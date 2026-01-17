@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "62903909022",
+    "project_id": "baxa-5bab0",
+    "storage_bucket": "baxa-5bab0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:62903909022:android:eccbc1d9a071d8b044598f",
+        "android_client_info": {
+          "package_name": "com.domain.baxa"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB1AIHDUGdjKnj7yhfpFbc_h6vScp_6kJU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
