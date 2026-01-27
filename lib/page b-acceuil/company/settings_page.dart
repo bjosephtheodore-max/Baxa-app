@@ -1,15 +1,10 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
+// ==================== PAGE PRINCIPALE : LISTE DES FILES ====================
 class SettingsPage extends StatefulWidget {
-  final String companyId;
-  final String queueId;
-
-  const SettingsPage({
-    super.key,
-    required this.companyId,
-    required this.queueId,
-  });
+  const SettingsPage({super.key});
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -17,411 +12,816 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final _nameCtrl = TextEditingController();
-  // weekdays 1=Mon ... 7=Sun
-  List<bool> _selectedDays = List.filled(7, true);
+  String? _companyId;
+  bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadQueue();
-  }
-
-  Future<void> _loadQueue() async {
-    final doc = await _firestore
-        .collection('companies')
-        .doc(widget.companyId)
-        .collection('queues')
-        .doc(widget.queueId)
-        .get();
-
-    if (!doc.exists) return;
-    final data = doc.data();
-    if (data == null) return;
-    setState(() {
-      _nameCtrl.text = (data['name'] as String?) ?? '';
-      final days = (data['weekdays'] as List<dynamic>?)
-          ?.map((e) => (e as int))
-          .toList();
-      if (days != null) {
-        _selectedDays = List.filled(7, false);
-        for (final d in days) {
-          if (d >= 1 && d <= 7) _selectedDays[d - 1] = true;
-        }
-      }
-    });
-  }
-
-  Future<void> _saveQueueSettings() async {
-    final weekdays = <int>[];
-    for (int i = 0; i < 7; i++) {
-      if (_selectedDays[i]) weekdays.add(i + 1);
-    }
-
-    await _firestore
-        .collection('companies')
-        .doc(widget.companyId)
-        .collection('queues')
-        .doc(widget.queueId)
-        .set({
-          'name': _nameCtrl.text.trim(),
-          'weekdays': weekdays,
-        }, SetOptions(merge: true));
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Paramètres sauvegardés')));
-  }
-
-  String _formatTimeOfDay(TimeOfDay t) {
-    final h = t.hour.toString().padLeft(2, '0');
-    final m = t.minute.toString().padLeft(2, '0');
-    return '$h:$m';
-  }
-
-  Future<void> _showSlotDialog({DocumentSnapshot? doc}) async {
-    TimeOfDay? start = TimeOfDay(hour: 9, minute: 0);
-    TimeOfDay? end = TimeOfDay(hour: 12, minute: 0);
-    final svcCtrl = TextEditingController(text: '10');
-    final capCtrl = TextEditingController(text: '1');
-    final maxPerDayCtrl = TextEditingController(text: '1');
-    final deadlineCtrl = TextEditingController(text: '0');
-    final advanceCtrl = TextEditingController(text: '7');
-    List<bool> slotDays = List.from(_selectedDays);
-
-    if (doc != null) {
-      final data = doc.data() as Map<String, dynamic>?;
-      if (data != null) {
-        if (data['start'] is String) {
-          final parts = (data['start'] as String).split(':');
-          start = TimeOfDay(
-            hour: int.parse(parts[0]),
-            minute: int.parse(parts[1]),
-          );
-        }
-        if (data['end'] is String) {
-          final parts = (data['end'] as String).split(':');
-          end = TimeOfDay(
-            hour: int.parse(parts[0]),
-            minute: int.parse(parts[1]),
-          );
-        }
-        svcCtrl.text = (data['serviceDurationMinutes']?.toString() ?? '10');
-        capCtrl.text = (data['capacity']?.toString() ?? '1');
-        maxPerDayCtrl.text = (data['maxReservationsPerDay']?.toString() ?? '1');
-        deadlineCtrl.text =
-            (data['reservationDeadlineMinutes']?.toString() ?? '0');
-        advanceCtrl.text = (data['maxAdvanceDays']?.toString() ?? '7');
-        if (data['days'] is List) {
-          slotDays = List.filled(7, false);
-          for (final d in (data['days'] as List)) {
-            if (d is int && d >= 1 && d <= 7) slotDays[d - 1] = true;
-          }
-        }
-      }
-    }
-
-    await showDialog<void>(
-      context: context,
-      builder: (c) => StatefulBuilder(
-        builder: (ctx, setStateSB) {
-          return AlertDialog(
-            title: Text(
-              doc == null ? 'Ajouter une plage horaire' : 'Modifier la plage',
-            ),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextButton(
-                          onPressed: () async {
-                            final t = await showTimePicker(
-                              context: ctx,
-                              initialTime: start!,
-                            );
-                            if (t != null) setStateSB(() => start = t);
-                          },
-                          child: Text('Début: ${_formatTimeOfDay(start!)}'),
-                        ),
-                      ),
-                      Expanded(
-                        child: TextButton(
-                          onPressed: () async {
-                            final t = await showTimePicker(
-                              context: ctx,
-                              initialTime: end!,
-                            );
-                            if (t != null) setStateSB(() => end = t);
-                          },
-                          child: Text('Fin: ${_formatTimeOfDay(end!)}'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: svcCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: 'Durée service (minutes)',
-                    ),
-                  ),
-                  TextField(
-                    controller: capCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: 'Capacité par créneau',
-                    ),
-                  ),
-                  TextField(
-                    controller: maxPerDayCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: "Max réservations par jour (par personne)",
-                    ),
-                  ),
-                  TextField(
-                    controller: deadlineCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: 'Délai réservation (minutes avant, défaut 0)',
-                    ),
-                  ),
-                  TextField(
-                    controller: advanceCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: "Anticipation max (jours, défaut 7)",
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 6,
-                    children: List.generate(7, (i) {
-                      final labels = [
-                        'Lun',
-                        'Mar',
-                        'Mer',
-                        'Jeu',
-                        'Ven',
-                        'Sam',
-                        'Dim',
-                      ];
-                      return FilterChip(
-                        selected: slotDays[i],
-                        label: Text(labels[i]),
-                        onSelected: (v) => setStateSB(() => slotDays[i] = v),
-                      );
-                    }),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Annuler'),
-              ),
-              ElevatedButton(
-                onPressed: () async {
-                  final sd = int.tryParse(svcCtrl.text.trim()) ?? 10;
-                  final cap = int.tryParse(capCtrl.text.trim()) ?? 1;
-                  final maxPerDay =
-                      int.tryParse(maxPerDayCtrl.text.trim()) ?? 1;
-                  final deadline = int.tryParse(deadlineCtrl.text.trim()) ?? 0;
-                  final advance = int.tryParse(advanceCtrl.text.trim()) ?? 7;
-
-                  final daysList = <int>[];
-                  for (int i = 0; i < 7; i++)
-                    if (slotDays[i]) daysList.add(i + 1);
-
-                  final payload = {
-                    'start': _formatTimeOfDay(start!),
-                    'end': _formatTimeOfDay(end!),
-                    'serviceDurationMinutes': sd,
-                    'capacity': cap,
-                    'maxReservationsPerDay': maxPerDay,
-                    'reservationDeadlineMinutes': deadline,
-                    'maxAdvanceDays': advance,
-                    'days': daysList,
-                    'updatedAt': FieldValue.serverTimestamp(),
-                  };
-
-                  final col = _firestore
-                      .collection('companies')
-                      .doc(widget.companyId)
-                      .collection('queues')
-                      .doc(widget.queueId)
-                      .collection('slots');
-
-                  if (doc == null) {
-                    await col.add(payload);
-                  } else {
-                    await col.doc(doc.id).set(payload, SetOptions(merge: true));
-                  }
-
-                  if (!mounted) return;
-                  Navigator.pop(ctx);
-                },
-                child: const Text('Enregistrer'),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-  Future<void> _deleteSlot(String slotId) async {
-    await _firestore
-        .collection('companies')
-        .doc(widget.companyId)
-        .collection('queues')
-        .doc(widget.queueId)
-        .collection('slots')
-        .doc(slotId)
-        .delete();
+    final user = FirebaseAuth.instance.currentUser;
+    _companyId = user?.uid;
+    setState(() => _isLoading = false);
   }
 
   @override
   Widget build(BuildContext context) {
-    final slotsRef = _firestore
-        .collection('companies')
-        .doc(widget.companyId)
-        .collection('queues')
-        .doc(widget.queueId)
-        .collection('slots')
-        .orderBy('start');
+    if (_companyId == null) {
+      return const Scaffold(
+        body: Center(child: Text('Erreur : utilisateur non connecté')),
+      );
+    }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Paramètres de la file')),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            TextField(
-              controller: _nameCtrl,
-              decoration: const InputDecoration(labelText: 'Nom de la file'),
-            ),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: const Text('Jours réservables (par défaut tous)'),
-            ),
-            Wrap(
-              spacing: 6,
-              children: List.generate(7, (i) {
-                final labels = [
-                  'Lun',
-                  'Mar',
-                  'Mer',
-                  'Jeu',
-                  'Ven',
-                  'Sam',
-                  'Dim',
-                ];
-                return FilterChip(
-                  selected: _selectedDays[i],
-                  label: Text(labels[i]),
-                  onSelected: (v) => setState(() => _selectedDays[i] = v),
-                );
-              }),
-            ),
-            const SizedBox(height: 12),
-            ElevatedButton.icon(
-              onPressed: _saveQueueSettings,
-              icon: const Icon(Icons.save),
-              label: const Text('Sauvegarder paramètres de la file'),
-            ),
-            const SizedBox(height: 12),
-            const Divider(),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: const Text(
-                'Plages horaires',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Expanded(
-              child: StreamBuilder<QuerySnapshot>(
-                stream: slotsRef.snapshots(),
-                builder: (context, snap) {
-                  if (snap.connectionState == ConnectionState.waiting)
-                    return const Center(child: CircularProgressIndicator());
-                  if (snap.hasError)
-                    return Center(child: Text('Erreur: ${snap.error}'));
-                  final docs = snap.data?.docs ?? [];
-                  if (docs.isEmpty)
-                    return const Center(
-                      child: Text('Aucune plage horaire. Ajoutez-en une.'),
-                    );
+      backgroundColor: Colors.grey.shade50,
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor: Colors.white,
+        title: const Text(
+          'Gestion des files d\'attente',
+          style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold),
+        ),
+        automaticallyImplyLeading: false,
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : StreamBuilder<QuerySnapshot>(
+              stream: _firestore
+                  .collection('companies')
+                  .doc(_companyId)
+                  .collection('queues')
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
 
-                  return ListView.separated(
-                    itemCount: docs.length,
-                    separatorBuilder: (_, __) => const Divider(),
-                    itemBuilder: (context, i) {
-                      final d = docs[i];
-                      final data = d.data() as Map<String, dynamic>?;
-                      final start = (data?['start'] as String?) ?? '--';
-                      final end = (data?['end'] as String?) ?? '--';
-                      final cap = (data?['capacity']?.toString() ?? '');
-                      final svc =
-                          (data?['serviceDurationMinutes']?.toString() ?? '');
-                      return ListTile(
-                        title: Text('$start – $end'),
-                        subtitle: Text('Durée: ${svc}min • Capacité: $cap'),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              onPressed: () => _showSlotDialog(doc: d),
-                              icon: const Icon(Icons.edit),
-                            ),
-                            IconButton(
-                              onPressed: () async {
-                                final ok = await showDialog<bool>(
-                                  context: context,
-                                  builder: (c) => AlertDialog(
-                                    title: const Text('Supprimer la plage ?'),
-                                    actions: [
-                                      TextButton(
-                                        onPressed: () =>
-                                            Navigator.pop(c, false),
-                                        child: const Text('Annuler'),
-                                      ),
-                                      ElevatedButton(
-                                        onPressed: () => Navigator.pop(c, true),
-                                        child: const Text('Supprimer'),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                                if (ok == true) await _deleteSlot(d.id);
-                              },
-                              icon: const Icon(Icons.delete),
-                            ),
-                          ],
+                if (snapshot.hasError) {
+                  return Center(child: Text('Erreur : ${snapshot.error}'));
+                }
+
+                final queues = snapshot.data?.docs ?? [];
+
+                return Column(
+                  children: [
+                    // En-tête avec compteur
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.grey.shade200,
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Text(
+                        '${queues.length} file(s) d\'attente',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.grey.shade700,
                         ),
-                      );
-                    },
-                  );
-                },
+                      ),
+                    ),
+
+                    // Liste des files
+                    Expanded(
+                      child: queues.isEmpty
+                          ? _buildEmptyState()
+                          : ListView.builder(
+                              padding: const EdgeInsets.all(16),
+                              itemCount: queues.length,
+                              itemBuilder: (context, index) {
+                                final queue = queues[index];
+                                final queueData =
+                                    queue.data() as Map<String, dynamic>;
+                                return _buildQueueCard(queue.id, queueData);
+                              },
+                            ),
+                    ),
+                  ],
+                );
+              },
+            ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _showCreateQueueDialog(),
+        backgroundColor: const Color.fromARGB(255, 75, 139, 94),
+        icon: const Icon(Icons.add, color: Colors.white),
+        label: const Text(
+          'Créer une file',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.queue_outlined, size: 80, color: Colors.grey.shade400),
+          const SizedBox(height: 24),
+          const Text(
+            'Aucune file d\'attente',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+              color: Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Créez votre première file pour commencer',
+            style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQueueCard(String queueId, Map<String, dynamic> queueData) {
+    final name = queueData['name'] ?? 'File sans nom';
+    final weekdays =
+        (queueData['weekdays'] as List<dynamic>?)
+            ?.map((e) => e as int)
+            .toList() ??
+        [1, 2, 3, 4, 5, 6, 7];
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => QueueTimeSlotsPage(
+                companyId: _companyId!,
+                queueId: queueId,
+                queueName: name,
               ),
             ),
-            const SizedBox(height: 8),
-            ElevatedButton.icon(
-              onPressed: () => _showSlotDialog(),
-              icon: const Icon(Icons.add),
-              label: const Text('Ajouter une nouvelle plage horaire'),
+          );
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color.fromARGB(255, 178, 211, 194),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.people_outline,
+                  color: Color.fromARGB(255, 75, 139, 94),
+                  size: 28,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _formatWeekdays(weekdays),
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.arrow_forward_ios,
+                size: 16,
+                color: Colors.grey.shade400,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatWeekdays(List<int> weekdays) {
+    final labels = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'];
+    return weekdays.map((d) => labels[d - 1]).join(', ');
+  }
+
+  Future<void> _showCreateQueueDialog() async {
+    final nameController = TextEditingController();
+    List<bool> selectedDays = List.filled(7, true);
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Créer une file d\'attente'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: nameController,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Nom de la file',
+                    hintText: 'Ex: Consultation générale',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Jours de fonctionnement',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  children: List.generate(7, (i) {
+                    final labels = [
+                      'Lun',
+                      'Mar',
+                      'Mer',
+                      'Jeu',
+                      'Ven',
+                      'Sam',
+                      'Dim',
+                    ];
+                    return FilterChip(
+                      selected: selectedDays[i],
+                      label: Text(labels[i]),
+                      onSelected: (v) => setState(() => selectedDays[i] = v),
+                      selectedColor: const Color.fromARGB(255, 178, 211, 194),
+                    );
+                  }),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annuler'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (nameController.text.trim().isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Veuillez entrer un nom')),
+                  );
+                  return;
+                }
+                Navigator.pop(ctx, true);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color.fromARGB(255, 75, 139, 94),
+              ),
+              child: const Text('Créer', style: TextStyle(color: Colors.white)),
             ),
           ],
         ),
       ),
     );
+
+    if (result != true) return;
+
+    // Créer la file d'attente
+    final weekdays = <int>[];
+    for (int i = 0; i < 7; i++) {
+      if (selectedDays[i]) weekdays.add(i + 1);
+    }
+
+    try {
+      final queueRef = await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .add({
+            'name': nameController.text.trim(),
+            'weekdays': weekdays,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+
+      if (!mounted) return;
+
+      // Naviguer vers la page de gestion des plages horaires
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => QueueTimeSlotsPage(
+            companyId: _companyId!,
+            queueId: queueRef.id,
+            queueName: nameController.text.trim(),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+    }
+  }
+}
+
+// ==================== PAGE : GESTION DES PLAGES HORAIRES ====================
+class QueueTimeSlotsPage extends StatefulWidget {
+  final String companyId;
+  final String queueId;
+  final String queueName;
+
+  const QueueTimeSlotsPage({
+    super.key,
+    required this.companyId,
+    required this.queueId,
+    required this.queueName,
+  });
+
+  @override
+  State<QueueTimeSlotsPage> createState() => _QueueTimeSlotsPageState();
+}
+
+class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey.shade50,
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor: Colors.white,
+        iconTheme: const IconThemeData(color: Colors.black87),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Plages horaires',
+              style: TextStyle(
+                color: Colors.black87,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            Text(
+              widget.queueName,
+              style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+            ),
+          ],
+        ),
+      ),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: _firestore
+            .collection('companies')
+            .doc(widget.companyId)
+            .collection('queues')
+            .doc(widget.queueId)
+            .collection('timeSlots')
+            .orderBy('startTime')
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (snapshot.hasError) {
+            return Center(child: Text('Erreur : ${snapshot.error}'));
+          }
+
+          final slots = snapshot.data?.docs ?? [];
+
+          return slots.isEmpty
+              ? _buildEmptySlots()
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: slots.length,
+                  itemBuilder: (context, index) {
+                    final slot = slots[index];
+                    final slotData = slot.data() as Map<String, dynamic>;
+                    return _buildSlotCard(slot.id, slotData);
+                  },
+                );
+        },
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _showTimeSlotDialog(),
+        backgroundColor: const Color.fromARGB(255, 75, 139, 94),
+        icon: const Icon(Icons.add, color: Colors.white),
+        label: const Text(
+          'Ajouter une plage',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptySlots() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.schedule_outlined, size: 80, color: Colors.grey.shade400),
+          const SizedBox(height: 24),
+          const Text(
+            'Aucune plage horaire',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+              color: Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Ajoutez une plage pour générer des créneaux',
+            style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSlotCard(String slotId, Map<String, dynamic> slotData) {
+    final startTime = slotData['startTime'] ?? '00:00';
+    final endTime = slotData['endTime'] ?? '00:00';
+    final duration = slotData['serviceDurationMinutes'] ?? 0;
+    final capacity = slotData['capacityPerSlot'] ?? 1;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color.fromARGB(255, 178, 211, 194),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.access_time,
+                    color: Color.fromARGB(255, 75, 139, 94),
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    '$startTime – $endTime',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black87,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: () =>
+                      _showTimeSlotDialog(slotId: slotId, slotData: slotData),
+                  icon: const Icon(Icons.edit_outlined, size: 20),
+                ),
+                IconButton(
+                  onPressed: () => _deleteSlot(slotId),
+                  icon: const Icon(
+                    Icons.delete_outline,
+                    size: 20,
+                    color: Colors.red,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                _buildInfoChip(
+                  icon: Icons.timer_outlined,
+                  label: '${duration} min',
+                ),
+                const SizedBox(width: 8),
+                _buildInfoChip(
+                  icon: Icons.person_outline,
+                  label: '$capacity pers.',
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoChip({required IconData icon, required String label}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: Colors.grey.shade700),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey.shade700,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showTimeSlotDialog({
+    String? slotId,
+    Map<String, dynamic>? slotData,
+  }) async {
+    TimeOfDay startTime = const TimeOfDay(hour: 8, minute: 0);
+    TimeOfDay endTime = const TimeOfDay(hour: 12, minute: 0);
+    final durationCtrl = TextEditingController(text: '10');
+    final capacityCtrl = TextEditingController(text: '1');
+    final maxReservationsCtrl = TextEditingController();
+    final deadlineCtrl = TextEditingController(text: '0');
+    final advanceCtrl = TextEditingController(text: '7');
+
+    // Charger les données existantes si modification
+    if (slotData != null) {
+      final start = slotData['startTime']?.split(':') ?? ['8', '0'];
+      final end = slotData['endTime']?.split(':') ?? ['12', '0'];
+      startTime = TimeOfDay(
+        hour: int.tryParse(start[0]) ?? 8,
+        minute: int.tryParse(start[1]) ?? 0,
+      );
+      endTime = TimeOfDay(
+        hour: int.tryParse(end[0]) ?? 12,
+        minute: int.tryParse(end[1]) ?? 0,
+      );
+      durationCtrl.text =
+          slotData['serviceDurationMinutes']?.toString() ?? '10';
+      capacityCtrl.text = slotData['capacityPerSlot']?.toString() ?? '1';
+      maxReservationsCtrl.text =
+          slotData['maxReservationsPerPerson']?.toString() ?? '';
+      deadlineCtrl.text =
+          slotData['reservationDeadlineMinutes']?.toString() ?? '0';
+      advanceCtrl.text = slotData['maxAdvanceDays']?.toString() ?? '7';
+    }
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: Text(
+            slotId == null ? 'Ajouter une plage' : 'Modifier la plage',
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Sélection des heures
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          final t = await showTimePicker(
+                            context: ctx,
+                            initialTime: startTime,
+                          );
+                          if (t != null) setState(() => startTime = t);
+                        },
+                        icon: const Icon(Icons.access_time, size: 18),
+                        label: Text(_formatTime(startTime)),
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 8),
+                      child: Text('–'),
+                    ),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          final t = await showTimePicker(
+                            context: ctx,
+                            initialTime: endTime,
+                          );
+                          if (t != null) setState(() => endTime = t);
+                        },
+                        icon: const Icon(Icons.access_time, size: 18),
+                        label: Text(_formatTime(endTime)),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: durationCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Durée par créneau (minutes)',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.timer),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: capacityCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Capacité par créneau',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.people),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: maxReservationsCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Max réservations/personne (optionnel)',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.person_pin),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: deadlineCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Délai minimum (minutes)',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.schedule),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: advanceCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Anticipation max (jours)',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.calendar_today),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annuler'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color.fromARGB(255, 75, 139, 94),
+              ),
+              child: Text(
+                slotId == null ? 'Créer' : 'Modifier',
+                style: const TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != true) return;
+
+    // ✅ MODIFICATION : Ajout de reserved, cancelled, et status
+    final timeSlotData = {
+      'startTime': _formatTime(startTime),
+      'endTime': _formatTime(endTime),
+      'serviceDurationMinutes': int.tryParse(durationCtrl.text) ?? 10,
+      'capacityPerSlot': int.tryParse(capacityCtrl.text) ?? 1,
+      'maxReservationsPerPerson': maxReservationsCtrl.text.isNotEmpty
+          ? int.tryParse(maxReservationsCtrl.text)
+          : null,
+      'reservationDeadlineMinutes': int.tryParse(deadlineCtrl.text) ?? 0,
+      'maxAdvanceDays': int.tryParse(advanceCtrl.text) ?? 7,
+      'reserved': 0, // ← AJOUTÉ
+      'cancelled': 0, // ← AJOUTÉ
+      'status': 'open', // ← AJOUTÉ
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    try {
+      final slotsRef = _firestore
+          .collection('companies')
+          .doc(widget.companyId)
+          .collection('queues')
+          .doc(widget.queueId)
+          .collection('timeSlots');
+
+      if (slotId == null) {
+        await slotsRef.add(timeSlotData);
+        // Générer les créneaux automatiquement
+        await _generateSlots(timeSlotData);
+      } else {
+        await slotsRef.doc(slotId).update(timeSlotData);
+        // Régénérer les créneaux
+        await _generateSlots(timeSlotData);
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Plage horaire enregistrée')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+    }
+  }
+
+  Future<void> _generateSlots(Map<String, dynamic> timeSlotData) async {
+    // Logique pour générer les créneaux à partir de la plage horaire
+    // Cette fonction créera les créneaux individuels dans la collection 'slots'
+    // basés sur startTime, endTime et serviceDurationMinutes
+
+    // À implémenter selon votre logique métier
+    debugPrint('Génération des créneaux pour la plage horaire');
+  }
+
+  String _formatTime(TimeOfDay time) {
+    return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _deleteSlot(String slotId) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Supprimer cette plage ?'),
+        content: const Text(
+          'Tous les créneaux associés seront également supprimés.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text(
+              'Supprimer',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      await _firestore
+          .collection('companies')
+          .doc(widget.companyId)
+          .collection('queues')
+          .doc(widget.queueId)
+          .collection('timeSlots')
+          .doc(slotId)
+          .delete();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Plage horaire supprimée')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+    }
   }
 }

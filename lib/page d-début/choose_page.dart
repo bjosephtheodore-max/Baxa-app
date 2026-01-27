@@ -1,6 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:baxa/page%20b-acceuil/company/prereception_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/prereceptione_page.dart';
+import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 class ChoosePage extends StatelessWidget {
@@ -8,12 +8,7 @@ class ChoosePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const bg = Color.fromARGB(
-      255,
-      190,
-      248,
-      197,
-    ); // même couleur que prereception_page
+    const bg = Color.fromARGB(255, 190, 248, 197);
     final width = MediaQuery.of(context).size.width;
 
     return Scaffold(
@@ -23,85 +18,153 @@ class ChoosePage extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
           child: Column(
             children: [
-              const SizedBox(height: 8),
-              // court texte explicatif
+              const SizedBox(height: 20),
+
+              // Titre principal
               Text(
-                'Structure = gérer les files\nPersonne = rejoindre une file',
+                'Bienvenue sur Baxa',
                 textAlign: TextAlign.center,
                 style: GoogleFonts.pacifico(
-                  fontSize: (width * 0.07).clamp(20.0, 30.0),
+                  fontSize: (width * 0.08).clamp(24.0, 36.0),
                   color: Colors.black87,
                   fontWeight: FontWeight.w400,
                 ),
               ),
 
-              // espace pour pousser les boutons vers le bas (esthétique similaire)
-              const Spacer(),
+              const SizedBox(height: 12),
 
-              // boutons bas, style inspiré de prereception_page
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 520),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              Text(
+                'Qui êtes-vous ?',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.poppins(
+                  fontSize: 18,
+                  color: Colors.black54,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+
+              const SizedBox(height: 40),
+
+              // Cartes de choix
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Flexible(
-                      child: ElevatedButton(
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => const PrereceptionPage(),
-                            ),
-                          );
-                        },
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 48,
-                            vertical: 18,
+                    _buildChoiceCard(
+                      context: context,
+                      icon: Icons.business,
+                      emoji: '🏢',
+                      title: 'Je suis une Structure',
+                      subtitle: 'Gérer mes files d\'attente',
+                      color: const Color.fromARGB(255, 75, 139, 94),
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const PrereceptionPage(),
                           ),
-                          backgroundColor: Colors.white,
-                          foregroundColor: Colors.black87,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          textStyle: const TextStyle(fontSize: 18),
-                        ),
-                        child: const Text('Structure'),
-                      ),
+                        );
+                      },
                     ),
-                    const SizedBox(width: 12),
-                    Flexible(
-                      child: ElevatedButton(
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => const PrereceptionePage(),
-                            ),
-                          );
-                        },
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 48,
-                            vertical: 18,
+
+                    const SizedBox(height: 24),
+
+                    _buildChoiceCard(
+                      context: context,
+                      icon: Icons.person,
+                      emoji: '👤',
+                      title: 'Je suis un Client',
+                      subtitle: 'Réserver ma place sans attendre',
+                      color: const Color.fromARGB(255, 52, 168, 83),
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const PrereceptionePage(),
                           ),
-                          backgroundColor: Colors.white,
-                          foregroundColor: Colors.black87,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          textStyle: const TextStyle(fontSize: 18),
-                        ),
-                        child: const Text('Personne'),
-                      ),
+                        );
+                      },
                     ),
                   ],
                 ),
               ),
 
-              const SizedBox(height: 28),
+              const SizedBox(height: 20),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChoiceCard({
+    required BuildContext context,
+    required IconData icon,
+    required String emoji,
+    required String title,
+    required String subtitle,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        constraints: const BoxConstraints(maxWidth: 500),
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.08),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            // Icône/Emoji à gauche
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(emoji, style: const TextStyle(fontSize: 40)),
+            ),
+
+            const SizedBox(width: 20),
+
+            // Texte
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: GoogleFonts.poppins(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black87,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: GoogleFonts.poppins(
+                      fontSize: 14,
+                      color: Colors.black54,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // Flèche à droite
+            Icon(Icons.arrow_forward_ios, color: color, size: 20),
+          ],
         ),
       ),
     );

@@ -1,8 +1,8 @@
+import 'package:baxa/page%20b-acceuil/company/settings_page.dart';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
-import 'package:baxa/services/notifications/notification_service.dart';
 
 class HousePage extends StatefulWidget {
   const HousePage({super.key});
@@ -12,158 +12,160 @@ class HousePage extends StatefulWidget {
 }
 
 class _HousePageState extends State<HousePage> {
-  final FirebaseFirestore _fs = FirebaseFirestore.instance;
-  final DateFormat _dateFmt = DateFormat('EEEE d MMM', 'fr_FR');
-  final DateFormat _timeFmt = DateFormat('HH:mm');
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final DateFormat _dateFormat = DateFormat('EEEE d MMM yyyy', 'fr_FR');
+  final DateFormat _timeFormat = DateFormat('HH:mm');
 
-  String? _companyId; // récupéré depuis FirebaseAuth
+  String? _companyId;
+  String _companyName = "";
   DateTime _selectedDate = DateTime.now();
 
-  // timeline config
-  final int _startHour = 8;
-  final int _endHour = 18;
-  final double _pxPerMinute = 1.2; // ajustable : 72 px / heure
-
-  // adaptive pixel density for small screens
-  double get _effectivePxPerMinute {
-    try {
-      final w = MediaQuery.of(context).size.width;
-      if (w < 360) return _pxPerMinute * 0.88;
-      if (w < 420) return _pxPerMinute * 0.95;
-    } catch (e) {
-      // if called before build, fall back
-    }
-    return _pxPerMinute;
-  }
-
-  List<AgendaSlot> _slots = [];
-  bool _loading = true;
-
-  // computed layout and display helpers
-  final Map<String, SlotLayout> _slotLayouts =
-      {}; // slotId -> layout info (column index, columns count)
-  final Map<String, String> _slotDisplayNames =
-      {}; // slotId -> formatted name for single-capacity slots
-  final Map<String, Color> _queueColors = {}; // cache queue color by id
+  List<Queue> _queues = [];
+  bool _isLoading = true;
+  bool _hasQueues = false;
 
   @override
   void initState() {
     super.initState();
-    final user = FirebaseAuth.instance.currentUser;
-    _companyId = user?.uid;
-    _loadSlotsForDate(_selectedDate);
+    _loadCompanyData();
   }
 
-  Future<void> _loadSlotsForDate(DateTime date) async {
-    if (_companyId == null) return;
-    setState(() => _loading = true);
+  Future<void> _loadCompanyData() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    setState(() {
+      _companyId = user.uid;
+      _isLoading = true;
+    });
 
     try {
-      final startOfDay = DateTime(date.year, date.month, date.day);
-      final endOfDay = startOfDay.add(const Duration(days: 1));
+      // Charger les infos de l'entreprise
+      final companyDoc = await _firestore
+          .collection('Entreprises')
+          .doc(_companyId)
+          .get();
 
-      // Charger tous les créneaux de la company (toutes queues)
-      final snap = await _fs
+      if (companyDoc.exists) {
+        _companyName = companyDoc.data()?['nom'] ?? 'Baxa';
+      }
+
+      // Charger les files d'attente
+      final queuesSnapshot = await _firestore
           .collection('companies')
           .doc(_companyId)
           .collection('queues')
           .get();
 
-      final queues = snap.docs.map((d) => d.id).toList();
-      final slots = <AgendaSlot>[];
+      if (queuesSnapshot.docs.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _hasQueues = false;
+            _isLoading = false;
+          });
+        }
+        return;
+      }
 
-      for (final qid in queues) {
-        final s = await _fs
+      _hasQueues = true;
+      await _loadSlotsForDate(_selectedDate);
+    } catch (e) {
+      debugPrint('Erreur chargement données: $e');
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _loadSlotsForDate(DateTime date) async {
+    if (_companyId == null || !mounted) return;
+
+    if (mounted) {
+      setState(() => _isLoading = true);
+    }
+
+    try {
+      final startOfDay = DateTime(date.year, date.month, date.day);
+      final endOfDay = startOfDay.add(const Duration(days: 1));
+
+      // Charger toutes les queues
+      final queuesSnap = await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .get();
+
+      List<Queue> queues = [];
+
+      for (final queueDoc in queuesSnap.docs) {
+        final queueData = queueDoc.data();
+        final queueId = queueDoc.id;
+        final queueName = queueData['name'] ?? 'File sans nom';
+
+        // Charger les créneaux de cette queue pour la date sélectionnée
+        final slotsSnap = await _firestore
             .collection('companies')
             .doc(_companyId)
             .collection('queues')
-            .doc(qid)
+            .doc(queueId)
             .collection('slots')
             .where('start', isGreaterThanOrEqualTo: startOfDay)
             .where('start', isLessThan: endOfDay)
             .orderBy('start')
             .get();
 
-        for (final doc in s.docs) {
-          final data = doc.data();
-          slots.add(AgendaSlot.fromMap(queueId: qid, id: doc.id, data: data));
+        List<TimeSlot> slots = [];
+
+        for (final slotDoc in slotsSnap.docs) {
+          final slotData = slotDoc.data();
+          final slot = TimeSlot(
+            id: slotDoc.id,
+            queueId: queueId,
+            start: (slotData['start'] as Timestamp).toDate(),
+            end: (slotData['end'] as Timestamp).toDate(),
+            capacity: slotData['capacity'] ?? 1,
+            reserved: slotData['reserved'] ?? 0,
+            status: slotData['status'] ?? 'open',
+            customerNames: await _getCustomerNames(slotDoc.id),
+          );
+          slots.add(slot);
         }
+
+        queues.add(Queue(id: queueId, name: queueName, slots: slots));
       }
 
-      // trier par start
-      slots.sort((a, b) => a.start.compareTo(b.start));
-
-      // fetch display names for single-capacity reserved slots
-      _slotDisplayNames.clear();
-      _queueColors.clear();
-      for (final slot in slots) {
-        // cache color per queue
-        _queueColors[slot.queueId] =
-            _queueColors[slot.queueId] ?? _colorForQueue(slot.queueId);
-
-        if (slot.capacity == 1 && slot.reserved > 0) {
-          try {
-            final resSnap = await _fs
-                .collection('companies')
-                .doc(_companyId)
-                .collection('reservations')
-                .where('slotId', isEqualTo: slot.id)
-                .where('status', isEqualTo: 'confirmed')
-                .limit(1)
-                .get();
-
-            if (resSnap.docs.isNotEmpty) {
-              final r = resSnap.docs.first.data();
-              final customerId = r['customerId'] as String?;
-              final customerEmail = r['customerEmail'] as String?;
-              String name = '';
-              if (customerId != null) {
-                final userDoc = await _fs
-                    .collection('users')
-                    .doc(customerId)
-                    .get();
-                if (userDoc.exists) {
-                  final ud = userDoc.data() ?? {};
-                  name =
-                      (ud['displayName'] ??
-                              ud['name'] ??
-                              ud['prenom'] ??
-                              ud['fullName'])
-                          as String? ??
-                      '';
-                }
-              }
-              if (name.isEmpty && customerEmail != null) {
-                name = customerEmail.split('@').first;
-              }
-              if (name.isNotEmpty) {
-                _slotDisplayNames[slot.id] = _formatCustomerName(name);
-              }
-            }
-          } catch (e) {
-            debugPrint('Erreur fetch reservation name: $e');
-          }
-        }
-      }
-
-      // compute layout (columns for overlapping slots)
-      _slotLayouts.clear();
-      final layouts = _computeLayouts(slots);
-      _slotLayouts.addAll(layouts);
-
-      if (mounted)
-        setState(() {
-          _slots = slots;
-        });
-    } catch (e) {
-      debugPrint('Erreur chargement agenda house_page: $e');
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Erreur chargement agenda: $e')));
+        setState(() {
+          _queues = queues;
+          _isLoading = false;
+        });
       }
-    } finally {
-      if (mounted) setState(() => _loading = false);
+    } catch (e) {
+      debugPrint('Erreur chargement créneaux: $e');
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<List<String>> _getCustomerNames(String slotId) async {
+    try {
+      final reservationsSnap = await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('reservations')
+          .where('slotId', isEqualTo: slotId)
+          .where('status', isEqualTo: 'confirmed')
+          .get();
+
+      List<String> names = [];
+      for (final resDoc in reservationsSnap.docs) {
+        final name = resDoc.data()['customerName'] ?? 'Client';
+        names.add(name);
+      }
+      return names;
+    } catch (e) {
+      return [];
     }
   }
 
@@ -171,952 +173,443 @@ class _HousePageState extends State<HousePage> {
     final picked = await showDatePicker(
       context: context,
       initialDate: _selectedDate,
-      firstDate: DateTime.now().subtract(const Duration(days: 365)),
+      firstDate: DateTime.now().subtract(const Duration(days: 30)),
       lastDate: DateTime.now().add(const Duration(days: 365)),
       locale: const Locale('fr'),
     );
-    if (picked != null) {
-      setState(() => _selectedDate = picked);
+
+    if (picked != null && picked != _selectedDate) {
+      if (mounted) {
+        setState(() => _selectedDate = picked);
+      }
       _loadSlotsForDate(picked);
     }
   }
 
-  double _timeToOffset(DateTime t) {
-    final dayStart = DateTime(
-      _selectedDate.year,
-      _selectedDate.month,
-      _selectedDate.day,
-      _startHour,
-    );
-    final minutes = t.difference(dayStart).inMinutes;
-    return minutes * _effectivePxPerMinute;
-  }
+  String _calculateFillRate() {
+    int totalCapacity = 0;
+    int totalReserved = 0;
 
-  double _durationToHeight(DateTime start, DateTime end) {
-    final minutes = end.difference(start).inMinutes;
-    return minutes * _effectivePxPerMinute;
-  }
-
-  Color _statusColor(String status) {
-    switch (status) {
-      case 'open':
-        return Colors.green.withOpacity(0.15);
-      case 'full':
-        return Colors.red.withOpacity(0.15);
-      case 'closed':
-        return Colors.grey.withOpacity(0.12);
-      default:
-        return Colors.blue.withOpacity(0.12);
+    for (var queue in _queues) {
+      for (var slot in queue.slots) {
+        totalCapacity += slot.capacity;
+        totalReserved += slot.reserved;
+      }
     }
+
+    if (totalCapacity == 0) return '0%';
+    final percentage = ((totalReserved / totalCapacity) * 100).round();
+    return '$percentage% ($totalReserved/$totalCapacity)';
   }
 
   @override
   Widget build(BuildContext context) {
-    final companyName = 'Baxa';
-    final timelineHeight = (_endHour - _startHour) * 60 * _pxPerMinute;
-
     return Scaffold(
+      backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
+        elevation: 0,
+        backgroundColor: Colors.white,
         title: Row(
           children: [
-            const Icon(Icons.calendar_month),
-            const SizedBox(width: 8),
-            Expanded(child: Text(companyName)),
-            TextButton.icon(
-              onPressed: _pickDate,
-              icon: const Icon(Icons.calendar_today, color: Colors.white70),
-              label: Text(
-                _dateFmt.format(_selectedDate),
-                style: const TextStyle(color: Colors.white),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color.fromARGB(255, 75, 139, 94),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text(
+                '🏥 Baxa',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                _companyName,
+                style: const TextStyle(
+                  color: Colors.black87,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
         ),
-        backgroundColor: const Color(0xFF6FCF97),
         automaticallyImplyLeading: false,
+        actions: [
+          IconButton(
+            onPressed: () {
+              // Navigation vers aide/support
+            },
+            icon: const Icon(Icons.help_outline, color: Colors.black54),
+          ),
+        ],
       ),
-      body: _loading
+
+      body: _isLoading
           ? const Center(child: CircularProgressIndicator())
+          : !_hasQueues
+          ? _buildEmptyState()
           : Column(
               children: [
-                // Top indicators row
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 12,
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Agenda',
-                            style: Theme.of(context).textTheme.titleLarge,
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Vue quotidienne — ${_dateFmt.format(_selectedDate)}',
-                            style: const TextStyle(color: Colors.black54),
-                          ),
-                        ],
-                      ),
-                      // placeholder for fill rate (calculable)
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          const Text(
-                            'Taux de remplissage',
-                            style: TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            _computeFillRateText(),
-                            style: const TextStyle(color: Colors.black54),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
+                _buildHeader(),
+                Expanded(child: _buildAgendaView()),
+              ],
+            ),
+
+      floatingActionButton: _hasQueues
+          ? FloatingActionButton.extended(
+              onPressed: () {
+                // Navigation vers création de RDV
+              },
+              backgroundColor: const Color.fromARGB(255, 75, 139, 94),
+              icon: const Icon(Icons.add, color: Colors.white),
+              label: const Text(
+                'Nouveau RDV',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
                 ),
-                const Divider(height: 1),
-                Expanded(
-                  child: SingleChildScrollView(
-                    child: SizedBox(
-                      height: timelineHeight,
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // Time labels
-                          Container(
-                            width: 72,
-                            color: Colors.grey.shade50,
-                            child: Column(
-                              children: List.generate(
-                                _endHour - _startHour + 1,
-                                (i) {
-                                  final hour = _startHour + i;
-                                  return SizedBox(
-                                    height: 60 * _pxPerMinute,
-                                    child: Align(
-                                      alignment: Alignment.topCenter,
-                                      child: Text(
-                                        '${hour.toString().padLeft(2, '0')}:00',
-                                        style: const TextStyle(
-                                          color: Colors.black54,
-                                        ),
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                          ),
-                          // Timeline stack
-                          Expanded(
-                            child: Container(
-                              color: Colors.white,
-                              child: Stack(
-                                children: [
-                                  // hour lines
-                                  ...List.generate(_endHour - _startHour + 1, (
-                                    i,
-                                  ) {
-                                    final top = i * 60 * _pxPerMinute;
-                                    return Positioned(
-                                      top: top,
-                                      left: 0,
-                                      right: 0,
-                                      child: Container(
-                                        height: 1,
-                                        color: Colors.grey.shade200,
-                                      ),
-                                    );
-                                  }),
+              ),
+            )
+          : null,
+    );
+  }
 
-                                  // slots laid out in columns when overlapping
-                                  LayoutBuilder(
-                                    builder: (context, constraints) {
-                                      final availableWidth =
-                                          constraints.maxWidth - 24;
-                                      final widgets = <Widget>[];
-                                      for (final slot in _slots) {
-                                        final top = _timeToOffset(slot.start);
-                                        final height = _durationToHeight(
-                                          slot.start,
-                                          slot.end,
-                                        ).clamp(28.0, timelineHeight);
-                                        final layout = _slotLayouts[slot.id];
-                                        final colIndex = layout?.colIndex ?? 0;
-                                        final cols = layout?.cols ?? 1;
-                                        final colWidth = availableWidth / cols;
-                                        final leftPx =
-                                            12 +
-                                            colIndex * colWidth +
-                                            6 * colIndex;
-                                        final slotWidth = colWidth - 6;
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.calendar_today_outlined,
+            size: 80,
+            color: Colors.grey.shade400,
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Aucune file d\'attente configurée',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+              color: Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Créez votre première file pour commencer',
+            style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+          ),
+          const SizedBox(height: 32),
+          ElevatedButton.icon(
+            onPressed: () {
+              // Navigation vers settings_page.dart
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const SettingsPage()),
+              );
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color.fromARGB(255, 75, 139, 94),
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            icon: const Icon(Icons.add_circle_outline, color: Colors.white),
+            label: const Text(
+              'Créer une file d\'attente',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-                                        String displayText;
-                                        if (slot.capacity == 1) {
-                                          if (slot.reserved > 0) {
-                                            displayText =
-                                                _slotDisplayNames[slot.id] ??
-                                                'Réservé';
-                                          } else {
-                                            displayText = 'Disponible';
-                                          }
-                                        } else {
-                                          displayText =
-                                              '${slot.reserved}/${slot.capacity}';
-                                        }
-
-                                        widgets.add(
-                                          Positioned(
-                                            top: top.clamp(
-                                              0.0,
-                                              timelineHeight - 20,
-                                            ),
-                                            left: leftPx,
-                                            width: slotWidth,
-                                            height: height,
-                                            child: Semantics(
-                                              label:
-                                                  '${_timeFmt.format(slot.start)} — ${slot.queueName ?? ''}. ${displayText}',
-                                              button: true,
-                                              child: Tooltip(
-                                                message:
-                                                    '${_timeFmt.format(slot.start)} — ${slot.queueName ?? ''}\n$displayText',
-                                                child: Material(
-                                                  color: Colors.transparent,
-                                                  child: InkWell(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          8,
-                                                        ),
-                                                    onTap: () =>
-                                                        _showSlotDetails(slot),
-                                                    child: Container(
-                                                      constraints:
-                                                          const BoxConstraints(
-                                                            minHeight: 48,
-                                                          ),
-                                                      padding:
-                                                          const EdgeInsets.all(
-                                                            8,
-                                                          ),
-                                                      decoration: BoxDecoration(
-                                                        color: _statusColor(
-                                                          slot.status,
-                                                        ),
-                                                        borderRadius:
-                                                            BorderRadius.circular(
-                                                              8,
-                                                            ),
-                                                        border: Border.all(
-                                                          color: Colors
-                                                              .grey
-                                                              .shade200,
-                                                        ),
-                                                      ),
-                                                      child: Row(
-                                                        crossAxisAlignment:
-                                                            CrossAxisAlignment
-                                                                .stretch,
-                                                        children: [
-                                                          // left color stripe
-                                                          Container(
-                                                            width: 6,
-                                                            margin:
-                                                                const EdgeInsets.only(
-                                                                  right: 8,
-                                                                  top: 4,
-                                                                  bottom: 4,
-                                                                ),
-                                                            decoration: BoxDecoration(
-                                                              color:
-                                                                  (_queueColors[slot
-                                                                      .queueId] ??
-                                                                  Colors.grey),
-                                                              borderRadius:
-                                                                  BorderRadius.circular(
-                                                                    4,
-                                                                  ),
-                                                            ),
-                                                          ),
-                                                          Expanded(
-                                                            child: Column(
-                                                              crossAxisAlignment:
-                                                                  CrossAxisAlignment
-                                                                      .start,
-                                                              mainAxisAlignment:
-                                                                  MainAxisAlignment
-                                                                      .center,
-                                                              children: [
-                                                                Text(
-                                                                  '${_timeFmt.format(slot.start)} - ${_timeFmt.format(slot.end)}',
-                                                                  style: Theme.of(context)
-                                                                      .textTheme
-                                                                      .bodyLarge
-                                                                      ?.copyWith(
-                                                                        fontWeight:
-                                                                            FontWeight.bold,
-                                                                      ),
-                                                                ),
-                                                                const SizedBox(
-                                                                  height: 4,
-                                                                ),
-                                                                Text(
-                                                                  displayText,
-                                                                  style:
-                                                                      Theme.of(
-                                                                        context,
-                                                                      ).textTheme.bodyMedium?.copyWith(
-                                                                        fontSize:
-                                                                            13,
-                                                                      ),
-                                                                  maxLines: 3,
-                                                                  overflow:
-                                                                      TextOverflow
-                                                                          .ellipsis,
-                                                                ),
-                                                              ],
-                                                            ),
-                                                          ),
-                                                          const SizedBox(
-                                                            width: 8,
-                                                          ),
-                                                          Container(
-                                                            padding:
-                                                                const EdgeInsets.symmetric(
-                                                                  horizontal: 8,
-                                                                  vertical: 6,
-                                                                ),
-                                                            decoration: BoxDecoration(
-                                                              color: Colors
-                                                                  .white
-                                                                  .withOpacity(
-                                                                    0.85,
-                                                                  ),
-                                                              borderRadius:
-                                                                  BorderRadius.circular(
-                                                                    6,
-                                                                  ),
-                                                            ),
-                                                            child: Text(
-                                                              '${slot.reserved}/${slot.capacity}',
-                                                              style: const TextStyle(
-                                                                fontWeight:
-                                                                    FontWeight
-                                                                        .bold,
-                                                              ),
-                                                            ),
-                                                          ),
-                                                          const SizedBox(
-                                                            width: 8,
-                                                          ),
-                                                          // queue badge
-                                                          Container(
-                                                            padding:
-                                                                const EdgeInsets.symmetric(
-                                                                  horizontal: 6,
-                                                                  vertical: 6,
-                                                                ),
-                                                            decoration: BoxDecoration(
-                                                              color:
-                                                                  (_queueColors[slot
-                                                                              .queueId] ??
-                                                                          Colors
-                                                                              .grey)
-                                                                      .withOpacity(
-                                                                        0.95,
-                                                                      ),
-                                                              borderRadius:
-                                                                  BorderRadius.circular(
-                                                                    6,
-                                                                  ),
-                                                            ),
-                                                            child: Text(
-                                                              (slot.queueName ??
-                                                                      slot.queueId)
-                                                                  .split(' ')
-                                                                  .map(
-                                                                    (w) =>
-                                                                        w.isNotEmpty
-                                                                        ? w[0]
-                                                                        : '',
-                                                                  )
-                                                                  .take(2)
-                                                                  .join(),
-                                                              style: const TextStyle(
-                                                                color: Colors
-                                                                    .white,
-                                                                fontWeight:
-                                                                    FontWeight
-                                                                        .bold,
-                                                              ),
-                                                            ),
-                                                          ),
-                                                        ],
-                                                      ),
-                                                    ),
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        );
-                                      }
-                                      return Stack(children: widgets);
-                                    },
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
+  Widget _buildHeader() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.grey.shade200,
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          // Sélecteur de date
+          InkWell(
+            onTap: _pickDate,
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey.shade300),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.calendar_today, size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    _dateFormat.format(_selectedDate),
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
                     ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Icon(Icons.arrow_drop_down, size: 20),
+                ],
+              ),
+            ),
+          ),
+
+          // Taux de remplissage
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: const Color.fromARGB(255, 178, 211, 194).withOpacity(0.3),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.pie_chart_outline,
+                  size: 20,
+                  color: Color.fromARGB(255, 75, 139, 94),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _calculateFillRate(),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                    color: Color.fromARGB(255, 75, 139, 94),
                   ),
                 ),
               ],
             ),
+          ),
+        ],
+      ),
     );
   }
 
-  String _computeFillRateText() {
-    if (_slots.isEmpty) return '0% (0/0 places)';
-    int totalPlaces = 0;
-    int reserved = 0;
-    for (final s in _slots) {
-      totalPlaces += s.capacity;
-      reserved += s.reserved;
+  Widget _buildAgendaView() {
+    if (_queues.isEmpty) {
+      return Center(
+        child: Text(
+          'Aucun créneau pour cette date',
+          style: TextStyle(color: Colors.grey.shade600),
+        ),
+      );
     }
-    final pct = totalPlaces == 0 ? 0 : ((reserved / totalPlaces) * 100).round();
-    return '$pct% ($reserved/$totalPlaces places)';
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      scrollDirection: _queues.length > 1 ? Axis.horizontal : Axis.vertical,
+      itemCount: _queues.length,
+      itemBuilder: (context, index) {
+        final queue = _queues[index];
+        return _buildQueueColumn(queue);
+      },
+    );
   }
 
-  Future<void> _showSlotDetails(AgendaSlot slot) async {
-    if (!mounted) return;
+  Widget _buildQueueColumn(Queue queue) {
+    return Container(
+      width: _queues.length > 1 ? 350 : double.infinity,
+      margin: const EdgeInsets.only(right: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Nom de la file
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Text(
+              queue.name,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+          ),
 
-    // fetch reservation names for this slot (if any)
-    final List<String> names = [];
-    try {
-      final resSnap = await _fs
-          .collection('companies')
-          .doc(_companyId)
-          .collection('reservations')
-          .where('slotId', isEqualTo: slot.id)
-          .where('status', isEqualTo: 'confirmed')
-          .orderBy('createdAt')
-          .get();
+          // Liste des créneaux
+          Expanded(
+            child: queue.slots.isEmpty
+                ? Center(
+                    child: Text(
+                      'Aucun créneau',
+                      style: TextStyle(color: Colors.grey.shade500),
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: queue.slots.length,
+                    itemBuilder: (context, index) {
+                      return _buildSlotCard(queue.slots[index]);
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
 
-      for (final rdoc in resSnap.docs) {
-        final r = rdoc.data();
-        String name = '';
-        final customerId = r['customerId'] as String?;
-        if (customerId != null) {
-          final userDoc = await _fs.collection('users').doc(customerId).get();
-          if (userDoc.exists) {
-            final ud = userDoc.data() ?? {};
-            name =
-                (ud['displayName'] ??
-                        ud['name'] ??
-                        ud['prenom'] ??
-                        ud['fullName'])
-                    as String? ??
-                '';
-          }
-        }
-        if (name.isEmpty) {
-          final email = r['customerEmail'] as String?;
-          if (email != null) name = email.split('@').first;
-        }
-        if (name.isNotEmpty) names.add(_formatCustomerName(name));
-      }
-    } catch (e) {
-      debugPrint('Erreur fetch reservations for details: $e');
+  Widget _buildSlotCard(TimeSlot slot) {
+    final isFull = slot.reserved >= slot.capacity;
+    final isAvailable = slot.reserved == 0;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: isFull
+            ? const Color.fromARGB(255, 178, 211, 194).withOpacity(0.4)
+            : Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isFull
+              ? const Color.fromARGB(255, 75, 139, 94)
+              : Colors.grey.shade300,
+          width: 1.5,
+        ),
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        leading: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: isFull
+                ? const Color.fromARGB(255, 75, 139, 94)
+                : Colors.grey.shade400,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(
+            isAvailable ? Icons.event_available : Icons.people,
+            color: Colors.white,
+            size: 20,
+          ),
+        ),
+        title: Text(
+          '${_timeFormat.format(slot.start)} - ${_timeFormat.format(slot.end)}',
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+        ),
+        subtitle: Text(
+          _getSlotDisplayText(slot),
+          style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
+        ),
+        trailing: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: isFull ? Colors.green : Colors.orange,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            '${slot.reserved}/${slot.capacity}',
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+          ),
+        ),
+        onTap: () => _showSlotDetails(slot),
+      ),
+    );
+  }
+
+  String _getSlotDisplayText(TimeSlot slot) {
+    if (slot.reserved == 0) return 'DISPONIBLE';
+    if (slot.capacity == 1 && slot.customerNames.isNotEmpty) {
+      return slot.customerNames.first;
     }
+    if (slot.reserved > 1) {
+      return '${slot.reserved} personnes';
+    }
+    return 'Réservé';
+  }
 
-    if (!mounted) return;
-
+  void _showSlotDetails(TimeSlot slot) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('${_timeFmt.format(slot.start)} — ${slot.queueName ?? ''}'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Statut: ${slot.status}'),
+        title: Text(
+          '${_timeFormat.format(slot.start)} - ${_timeFormat.format(slot.end)}',
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Statut: ${slot.status}'),
+            const SizedBox(height: 8),
+            Text('Places: ${slot.reserved}/${slot.capacity}'),
+            const SizedBox(height: 16),
+            if (slot.customerNames.isNotEmpty) ...[
+              const Text(
+                'Clients:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
               const SizedBox(height: 8),
-              Text('Places: ${slot.reserved}/${slot.capacity}'),
-              const SizedBox(height: 8),
-              if (slot.title != null) Text('Info: ${slot.title}'),
-              const SizedBox(height: 12),
-              if (slot.capacity > 1)
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Réservations (${names.length}):',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 8),
-                    if (names.isEmpty) const Text('Aucune réservation'),
-                    if (names.isNotEmpty) ...names.map((n) => Text(n)).toList(),
-                  ],
-                ),
-              if (slot.capacity == 1)
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Client:',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      names.isNotEmpty
-                          ? names.first
-                          : (slot.reserved == 0 ? 'Disponible' : 'Réservé'),
-                    ),
-                  ],
-                ),
-            ],
-          ),
+              ...slot.customerNames.map((name) => Text('• $name')),
+            ] else
+              const Text('Aucune réservation'),
+          ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Fermer'),
           ),
-          if (slot.status == 'open' && slot.reserved < slot.capacity)
-            TextButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                _showQuickCreateDialog(slot);
-              },
-              child: const Text('Nouveau RDV'),
-            ),
-          TextButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await _toggleSlotStatus(slot);
-            },
-            child: Text(slot.status == 'open' ? 'Bloquer' : 'Ouvrir'),
-          ),
-          TextButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              final confirmed = await showDialog<bool>(
-                context: context,
-                builder: (c) => AlertDialog(
-                  title: const Text('Confirmer la suppression'),
-                  content: const Text(
-                    'Supprimer ce créneau ? Les clients seront notifiés.',
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(c, false),
-                      child: const Text('Annuler'),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.pop(c, true),
-                      child: const Text('Supprimer'),
-                    ),
-                  ],
-                ),
-              );
-              if (confirmed == true) await _deleteSlotWithNotification(slot);
-            },
-            child: const Text('Supprimer', style: TextStyle(color: Colors.red)),
-          ),
-          TextButton(
-            onPressed: () => _loadSlotsForDate(_selectedDate),
-            child: const Text('Rafraîchir'),
-          ),
         ],
       ),
     );
   }
-
-  Future<void> _toggleSlotStatus(AgendaSlot slot) async {
-    if (_companyId == null) return;
-    try {
-      final slotRef = _fs
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(slot.queueId)
-          .collection('slots')
-          .doc(slot.id);
-      final newStatus = slot.status == 'open' ? 'closed' : 'open';
-      await slotRef.update({
-        'status': newStatus,
-        'statusUpdatedAt': FieldValue.serverTimestamp(),
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Statut mis à jour: $newStatus')),
-        );
-        _loadSlotsForDate(_selectedDate);
-      }
-    } catch (e) {
-      debugPrint('Erreur toggle slot status: $e');
-      if (mounted)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Erreur: $e')));
-    }
-  }
-
-  Future<void> _deleteSlotWithNotification(AgendaSlot slot) async {
-    if (_companyId == null) return;
-    try {
-      final reservations = await _fs
-          .collection('companies')
-          .doc(_companyId)
-          .collection('reservations')
-          .where('slotId', isEqualTo: slot.id)
-          .get();
-
-      for (final r in reservations.docs) {
-        final customerId = r.data()['customerId'] as String?;
-        if (customerId == null) continue;
-        await _fs
-            .collection('customers')
-            .doc(customerId)
-            .collection('notifications')
-            .add({
-              'type': 'slot_cancelled',
-              'slotId': slot.id,
-              'slotStart': slot.start,
-              'reason': 'Annulé par l\'entreprise',
-              'companyId': _companyId,
-              'createdAt': FieldValue.serverTimestamp(),
-            });
-      }
-
-      final slotRef = _fs
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(slot.queueId)
-          .collection('slots')
-          .doc(slot.id);
-      await slotRef.delete();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Créneau supprimé et clients notifiés.'),
-          ),
-        );
-        _loadSlotsForDate(_selectedDate);
-      }
-    } catch (e) {
-      debugPrint('Erreur suppression créneau: $e');
-      if (mounted)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Erreur: $e')));
-    }
-  }
-
-  Future<void> _showQuickCreateDialog(AgendaSlot slot) async {
-    if (!mounted) return;
-    final _formKey = GlobalKey<FormState>();
-    final nameCtrl = TextEditingController();
-    final emailCtrl = TextEditingController();
-
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Nouveau RDV'),
-        content: Form(
-          key: _formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: nameCtrl,
-                autofocus: true,
-                textInputAction: TextInputAction.next,
-                decoration: const InputDecoration(
-                  labelText: 'Nom (Prénom Nom)',
-                  prefixIcon: Icon(Icons.person),
-                ),
-                validator: (v) =>
-                    v == null || v.trim().isEmpty ? 'Nom requis' : null,
-              ),
-              const SizedBox(height: 8),
-              TextFormField(
-                controller: emailCtrl,
-                textInputAction: TextInputAction.done,
-                decoration: const InputDecoration(
-                  labelText: 'Email (optionnel)',
-                  prefixIcon: Icon(Icons.email),
-                ),
-                keyboardType: TextInputType.emailAddress,
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Annuler'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (!_formKey.currentState!.validate()) return;
-              Navigator.pop(ctx, true);
-            },
-            child: const Text('Créer'),
-          ),
-        ],
-      ),
-    );
-
-    if (result != true) return;
-
-    final name = nameCtrl.text.trim();
-    final email = emailCtrl.text.trim();
-    await _createReservationQuick(
-      slot: slot,
-      customerName: name,
-      customerEmail: email,
-    );
-  }
-
-  Future<void> _createReservationQuick({
-    required AgendaSlot slot,
-    required String customerName,
-    required String customerEmail,
-  }) async {
-    if (_companyId == null) return;
-
-    final slotRef = _fs
-        .collection('companies')
-        .doc(_companyId)
-        .collection('queues')
-        .doc(slot.queueId)
-        .collection('slots')
-        .doc(slot.id);
-
-    final reservationsCol = _fs
-        .collection('companies')
-        .doc(_companyId)
-        .collection('reservations');
-    final reservationRef = reservationsCol.doc();
-    final now = DateTime.now().toUtc();
-
-    try {
-      await _fs.runTransaction((tx) async {
-        final freshSlot = await tx.get(slotRef);
-        if (!freshSlot.exists) throw Exception('Créneau introuvable');
-        final freshData = freshSlot.data()!;
-        final slotStart = (freshData['start'] as Timestamp).toDate().toUtc();
-        final capacity = (freshData['capacity'] ?? 1) as int;
-        final reserved = (freshData['reserved'] ?? 0) as int;
-        final status = (freshData['status'] ?? 'open') as String;
-
-        if (status != 'open') throw Exception('Ce créneau n\'est plus ouvert.');
-        if (reserved >= capacity) throw Exception('Ce créneau est complet.');
-
-        final minutesUntilStart = slotStart.difference(now).inMinutes;
-        final required = 10; // délai minimum 10 min
-        if (minutesUntilStart < required)
-          throw Exception('Délai minimal requis non respecté.');
-
-        final reservationPayload = {
-          'companyId': _companyId,
-          'queueId': slot.queueId,
-          'queueName': slot.queueName,
-          'slotId': slot.id,
-          'customerName': customerName,
-          'customerEmail': customerEmail.isNotEmpty ? customerEmail : null,
-          'createdAt': FieldValue.serverTimestamp(),
-          'status': 'confirmed',
-          'createdBy': FirebaseAuth.instance.currentUser?.uid,
-        };
-
-        tx.set(reservationRef, reservationPayload);
-        tx.update(slotRef, {'reserved': FieldValue.increment(1)});
-      });
-
-      // schedule notifications minimally
-      await NotificationService().cancelAll();
-      await NotificationService().scheduleReservationNotifications(
-        waitMinutes: 180,
-        slotDurationMinutes: 15,
-      );
-
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Réservation créée.')));
-        _loadSlotsForDate(_selectedDate);
-      }
-    } catch (e) {
-      debugPrint('Erreur création RDV: $e');
-      if (mounted)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Erreur création RDV: $e')));
-    }
-  }
-
-  // Layout computation: group overlapping slots and assign column indices per group
-  Map<String, SlotLayout> _computeLayouts(List<AgendaSlot> slots) {
-    final Map<String, SlotLayout> layouts = {};
-    if (slots.isEmpty) return layouts;
-
-    // group contiguous overlapping slots
-    final sorted = List<AgendaSlot>.from(slots)
-      ..sort((a, b) => a.start.compareTo(b.start));
-    List<List<AgendaSlot>> groups = [];
-    List<AgendaSlot> currentGroup = [sorted.first];
-    DateTime groupEnd = sorted.first.end;
-
-    for (var i = 1; i < sorted.length; i++) {
-      final s = sorted[i];
-      if (s.start.isBefore(groupEnd)) {
-        currentGroup.add(s);
-        if (s.end.isAfter(groupEnd)) groupEnd = s.end;
-      } else {
-        groups.add(currentGroup);
-        currentGroup = [s];
-        groupEnd = s.end;
-      }
-    }
-    if (currentGroup.isNotEmpty) groups.add(currentGroup);
-
-    // for each group, do interval partitioning to assign columns
-    for (final group in groups) {
-      // columns end times
-      final List<DateTime> colEnds = [];
-      final Map<AgendaSlot, int> assignment = {};
-
-      for (final s in group..sort((a, b) => a.start.compareTo(b.start))) {
-        // find first column that is free
-        int found = -1;
-        for (var c = 0; c < colEnds.length; c++) {
-          if (!s.start.isBefore(colEnds[c])) {
-            found = c;
-            break;
-          }
-        }
-        if (found == -1) {
-          // new column
-          colEnds.add(s.end);
-          assignment[s] = colEnds.length - 1;
-        } else {
-          colEnds[found] = s.end.isAfter(colEnds[found])
-              ? s.end
-              : colEnds[found];
-          assignment[s] = found;
-        }
-      }
-
-      final colsCount = colEnds.length;
-      for (final entry in assignment.entries) {
-        layouts[entry.key.id] = SlotLayout(
-          colIndex: entry.value,
-          cols: colsCount,
-        );
-      }
-    }
-
-    return layouts;
-  }
-
-  String _formatCustomerName(String raw) {
-    if (raw.trim().isEmpty) return raw;
-    final parts = raw.trim().split(RegExp(r"\s+"));
-    if (parts.length == 1) return _capitalize(parts[0]);
-    final first = _capitalize(parts.first);
-    final last = _capitalize(parts.last);
-    final middle = parts
-        .sublist(1, parts.length - 1)
-        .map((p) => p.isNotEmpty ? '${p[0].toUpperCase()}.' : '')
-        .join(' ');
-    final result = '$first ${middle.isNotEmpty ? middle + ' ' : ''}$last';
-    return result;
-  }
-
-  String _capitalize(String s) {
-    if (s.isEmpty) return s;
-    return s[0].toUpperCase() + s.substring(1);
-  }
-
-  Color _colorForQueue(String queueId) {
-    const palette = [
-      Color(0xFF6FCF97),
-      Color(0xFF7ED6A3),
-      Color(0xFF52C1A6),
-      Color(0xFF8AD0B9),
-      Color(0xFFFFC107),
-      Color(0xFF00ACC1),
-      Color(0xFF9C27B0),
-      Color(0xFFEF5350),
-    ];
-    final idx = queueId.hashCode.abs() % palette.length;
-    return palette[idx];
-  }
-
-  // small helper to store layout info
 }
 
-class SlotLayout {
-  final int colIndex;
-  final int cols;
-  SlotLayout({required this.colIndex, required this.cols});
+// Modèles de données
+class Queue {
+  final String id;
+  final String name;
+  final List<TimeSlot> slots;
+
+  Queue({required this.id, required this.name, required this.slots});
 }
 
-// Modèle simplifié pour l'affichage dans la timeline
-class AgendaSlot {
+class TimeSlot {
   final String id;
   final String queueId;
-  final String? queueName;
   final DateTime start;
   final DateTime end;
   final int capacity;
   final int reserved;
   final String status;
-  final String? title;
+  final List<String> customerNames;
 
-  AgendaSlot({
+  TimeSlot({
     required this.id,
     required this.queueId,
-    this.queueName,
     required this.start,
     required this.end,
     required this.capacity,
     required this.reserved,
-    this.status = 'open',
-    this.title,
+    required this.status,
+    this.customerNames = const [],
   });
-
-  static AgendaSlot fromMap({
-    required String queueId,
-    required String id,
-    required Map<String, dynamic> data,
-  }) {
-    final startTs = data['start'] as Timestamp;
-    final endTs = data['end'] as Timestamp? ?? startTs;
-    return AgendaSlot(
-      id: id,
-      queueId: queueId,
-      queueName: data['queueName'] as String?,
-      start: startTs.toDate().toLocal(),
-      end: endTs.toDate().toLocal(),
-      capacity: (data['capacity'] ?? 1) as int,
-      reserved: (data['reserved'] ?? 0) as int,
-      status: (data['status'] ?? 'open') as String,
-      title: data['title'] as String?,
-    );
-  }
 }

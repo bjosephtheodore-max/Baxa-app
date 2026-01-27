@@ -1,8 +1,11 @@
-// import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart'; // temporarily disabled for debugging
+import 'package:baxa/page%20b-acceuil/customer/customer_page.dart';
+import 'package:baxa/page%20b-acceuil/customer/search_page.dart';
+import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:baxa/page%20b-acceuil/company/company_page.dart';
 import 'package:baxa/services/notifications/notification_service.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
-import 'package:baxa/page%20b-acceuil/customer/customer_page.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -22,6 +25,8 @@ Future<void> main() async {
 
   // initialiser notifications
   await NotificationService().init();
+
+  await initializeDateFormatting('fr_FR', null);
 
   // edge-to-edge (appliqué avant runApp)
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -54,7 +59,7 @@ class MyApp extends StatelessWidget {
         colorSchemeSeed: const Color.fromARGB(255, 178, 211, 194),
         scaffoldBackgroundColor: Colors.white,
       ),
-      home: const Scaffold(body: Center(child: Text('Hello'))),
+      home: const SearchPage(),
     );
   }
 }

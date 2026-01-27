@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:baxa/page b-acceuil/company/house_page.dart';
 import 'package:baxa/page b-acceuil/company/settings_page.dart';
 import 'package:baxa/page%20b-acceuil/company/notifications_page.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:baxa/services/notifications/queue_notification_service.dart';
 
 class CompanyPage extends StatefulWidget {
   const CompanyPage({super.key});
@@ -16,17 +16,41 @@ class CompanyPage extends StatefulWidget {
 class CompanyPageState extends State<CompanyPage> {
   late final List<Widget> pages;
   int pageIndex = 0;
+  // ignore: unused_field
+  bool _serviceInitialized = false;
 
   @override
   void initState() {
     super.initState();
-    final user = FirebaseAuth.instance.currentUser;
-    final companyId = user?.uid ?? 'unknown_company';
     pages = [
       const HousePage(),
-      SettingsPage(companyId: companyId),
+      const SettingsPage(),
       const NotificationsPage(),
     ];
+
+    // Initialiser le service de notifications
+    _initializeNotificationService();
+  }
+
+  Future<void> _initializeNotificationService() async {
+    try {
+      await QueueNotificationService().initialize();
+      if (mounted) {
+        setState(() {
+          _serviceInitialized = true;
+        });
+      }
+      print('✅ Service de notifications initialisé');
+    } catch (e) {
+      print('❌ Erreur initialisation notifications: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    // Nettoyer le service quand la page est détruite
+    QueueNotificationService().dispose();
+    super.dispose();
   }
 
   @override
@@ -42,15 +66,11 @@ class CompanyPageState extends State<CompanyPage> {
           });
         },
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.home), label: "Acceuil"),
-          NavigationDestination(
-            icon: Icon(Icons.calendar_month),
-            label: "Agenda",
-          ),
+          NavigationDestination(icon: Icon(Icons.home), label: "Accueil"),
           NavigationDestination(icon: Icon(Icons.settings), label: "Réglages"),
           NavigationDestination(
             icon: Icon(Icons.notifications),
-            label: "Notification",
+            label: "Notifications",
           ),
         ],
       ),
