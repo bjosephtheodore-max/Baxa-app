@@ -11,7 +11,11 @@ class NotificationsPage extends StatefulWidget {
   State<NotificationsPage> createState() => _NotificationsPageState();
 }
 
-class _NotificationsPageState extends State<NotificationsPage> {
+class _NotificationsPageState extends State<NotificationsPage>
+    with AutomaticKeepAliveClientMixin {
+  // ── KeepAlive ─────────────────────────────────────────────
+  @override
+  bool get wantKeepAlive => true;
   final NotificationService _notifSvc = NotificationService();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final DateFormat _df = DateFormat('dd/MM/yyyy HH:mm');
@@ -84,12 +88,18 @@ class _NotificationsPageState extends State<NotificationsPage> {
   Future<void> _clearLocalScheduledForAll() async {
     await _notifSvc.cancelAll();
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Toutes les notifications locales programmées ont été annulées.')),
+      const SnackBar(
+        content: Text(
+          'Toutes les notifications locales programmées ont été annulées.',
+        ),
+      ),
     );
   }
 
   @override
+  @override
   Widget build(BuildContext context) {
+    super.build(context); // requis par AutomaticKeepAliveClientMixin
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color.fromARGB(255, 75, 139, 94),

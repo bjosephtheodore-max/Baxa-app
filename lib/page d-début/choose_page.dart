@@ -8,89 +8,101 @@ class ChoosePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const bg = Color.fromARGB(255, 190, 248, 197);
     final width = MediaQuery.of(context).size.width;
 
     return Scaffold(
-      backgroundColor: bg,
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
-          child: Column(
-            children: [
-              const SizedBox(height: 20),
-
-              // Titre principal
-              Text(
-                'Bienvenue sur Baxa',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.pacifico(
-                  fontSize: (width * 0.08).clamp(24.0, 36.0),
-                  color: Colors.black87,
-                  fontWeight: FontWeight.w400,
-                ),
-              ),
-
-              const SizedBox(height: 12),
-
-              Text(
-                'Qui êtes-vous ?',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.poppins(
-                  fontSize: 18,
-                  color: Colors.black54,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-
-              const SizedBox(height: 40),
-
-              // Cartes de choix
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _buildChoiceCard(
-                      context: context,
-                      icon: Icons.business,
-                      emoji: '🏢',
-                      title: 'Je suis une Structure',
-                      subtitle: 'Gérer mes files d\'attente',
-                      color: const Color.fromARGB(255, 75, 139, 94),
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => const PrereceptionPage(),
-                          ),
-                        );
-                      },
-                    ),
-
-                    const SizedBox(height: 24),
-
-                    _buildChoiceCard(
-                      context: context,
-                      icon: Icons.person,
-                      emoji: '👤',
-                      title: 'Je suis un Client',
-                      subtitle: 'Réserver ma place sans attendre',
-                      color: const Color.fromARGB(255, 52, 168, 83),
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => const PrereceptionePage(),
-                          ),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 20),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Color(0xFFFFFFFF), // blanc pur en haut
+              Color(0xFFEAF3ED), // vert très doux au milieu
+              Color(0xFFD6EBDe), // vert légèrement plus présent en bas
             ],
+            stops: [0.0, 0.55, 1.0],
+          ),
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+            child: Column(
+              children: [
+                const SizedBox(height: 20),
+
+                // Titre principal
+                Text(
+                  'Bienvenue sur Baxa',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.pacifico(
+                    fontSize: (width * 0.08).clamp(24.0, 36.0),
+                    color: Colors.black87,
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+
+                const SizedBox(height: 12),
+
+                Text(
+                  'Qui êtes-vous ?',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.poppins(
+                    fontSize: 18,
+                    color: Colors.black54,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+
+                const SizedBox(height: 40),
+
+                // Cartes de choix
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _buildChoiceCard(
+                        context: context,
+                        icon: Icons.business,
+                        emoji: '🏢',
+                        title: 'Je suis une Structure',
+                        subtitle: 'Gérer mes files d\'attente',
+                        color: const Color.fromARGB(255, 75, 139, 94),
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const PrereceptionPage(),
+                            ),
+                          );
+                        },
+                      ),
+
+                      const SizedBox(height: 24),
+
+                      _buildChoiceCard(
+                        context: context,
+                        icon: Icons.person,
+                        emoji: '👤',
+                        title: 'Je suis un Client',
+                        subtitle: 'Réserver ma place sans attendre',
+                        color: const Color.fromARGB(255, 52, 168, 83),
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const PrereceptionePage(),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 20),
+              ],
+            ),
           ),
         ),
       ),

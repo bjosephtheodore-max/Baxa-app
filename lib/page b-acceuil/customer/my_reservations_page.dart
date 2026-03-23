@@ -138,7 +138,7 @@ class _MyReservationsPageState extends State<MyReservationsPage> {
       // FloatingActionButton pour créer une nouvelle réservation
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () {
-          // Retourner à la page précédente ou naviguer vers la liste des entreprises
+          // Retourner à la page précédente ou naviguer vers la liste des companies
           Navigator.pop(
             context,
             true,

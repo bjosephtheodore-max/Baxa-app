@@ -1,7 +1,7 @@
 import org.gradle.api.tasks.Delete
 
 buildscript {
-    val kotlinVersion by extra("1.8.22")
+    val kotlinVersion by extra("2.1.0")
 
     repositories {
         google()
@@ -23,7 +23,7 @@ allprojects {
 // Force Kotlin Gradle plugin version for any dependency that requests an older version
 configurations.all {
     resolutionStrategy {
-        force("org.jetbrains.kotlin:kotlin-gradle-plugin:1.8.22")
+        force("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
     }
 }
 

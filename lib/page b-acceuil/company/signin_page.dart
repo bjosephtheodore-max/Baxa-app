@@ -8,8 +8,20 @@ import 'package:google_fonts/google_fonts.dart';
 class SigninPage extends StatefulWidget {
   final String? nomEntreprise;
   final String? typeEntreprise;
+  final String? ville;
+  final String? country;
+  final String? language;
+  final String? locale;
 
-  const SigninPage({super.key, this.nomEntreprise, this.typeEntreprise});
+  const SigninPage({
+    super.key,
+    this.nomEntreprise,
+    this.typeEntreprise,
+    this.ville,
+    this.country,
+    this.language,
+    this.locale,
+  });
 
   @override
   State<SigninPage> createState() => SigninPageState();
@@ -89,17 +101,29 @@ class SigninPageState extends State<SigninPage> {
           "createdAt": FieldValue.serverTimestamp(),
         };
 
-        // Ajouter les données de pré-inscription si disponibles
         if (widget.nomEntreprise != null) {
           entrepriseData["nom"] = widget.nomEntreprise!;
         }
         if (widget.typeEntreprise != null) {
           entrepriseData["type"] = widget.typeEntreprise!;
         }
+        // ── Ville + locale détectés automatiquement ──────────────────
+        if (widget.ville != null) {
+          entrepriseData["ville"] = widget.ville!;
+        }
+        if (widget.country != null) {
+          entrepriseData["country"] = widget.country!;
+        }
+        if (widget.language != null) {
+          entrepriseData["language"] = widget.language!;
+        }
+        if (widget.locale != null) {
+          entrepriseData["locale"] = widget.locale!;
+        }
 
         // Enregistrement entreprise (doc id = uid)
         await FirebaseFirestore.instance
-            .collection("Entreprises")
+            .collection("companies")
             .doc(uid)
             .set(entrepriseData, SetOptions(merge: true));
       }

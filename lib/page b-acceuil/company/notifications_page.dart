@@ -40,6 +40,14 @@ class _NotificationsPageState extends State<NotificationsPage> {
           style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         automaticallyImplyLeading: false,
+        actions: [
+          // Bouton "Supprimer tout"
+          IconButton(
+            icon: const Icon(Icons.delete_sweep, color: Colors.white),
+            tooltip: 'Supprimer tout',
+            onPressed: _showDeleteAllConfirmation,
+          ),
+        ],
       ),
       body: _companyId == null
           ? const Center(child: Text('Utilisateur non connecté'))
@@ -74,7 +82,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
                       doc.data() as Map<String, dynamic>,
                     );
 
-                    return _buildNotificationCard(history);
+                    return _buildNotificationCard(history, doc.id);
                   },
                 );
               },
@@ -82,164 +90,230 @@ class _NotificationsPageState extends State<NotificationsPage> {
     );
   }
 
-  Widget _buildNotificationCard(NotificationHistory history) {
+  Widget _buildNotificationCard(NotificationHistory history, String docId) {
     final duration = history.slotEnd.difference(history.slotStart);
     final hours = duration.inHours;
     final minutes = duration.inMinutes.remainder(60);
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
+    return Dismissible(
+      key: Key(docId),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: Colors.red,
           borderRadius: BorderRadius.circular(16),
-          onTap: () => _showDetails(history),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // En-tête avec nom et date
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: _lightGreen.withOpacity(0.3),
-                        borderRadius: BorderRadius.circular(10),
+        ),
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.delete, color: Colors.white, size: 32),
+            SizedBox(height: 4),
+            Text(
+              'Supprimer',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+      ),
+      confirmDismiss: (direction) async {
+        return await _showDeleteConfirmation(history.queueName);
+      },
+      onDismissed: (direction) {
+        _deleteNotification(docId);
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 10,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: () => _showDetails(history),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // En-tête avec nom, date et bouton 3 points
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: _lightGreen.withOpacity(0.3),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Icon(
+                          Icons.check_circle_outline,
+                          color: _primaryGreen,
+                          size: 24,
+                        ),
                       ),
-                      child: Icon(
-                        Icons.check_circle_outline,
-                        color: _primaryGreen,
-                        size: 24,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            history.queueName,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.black87,
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              history.queueName,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.black87,
+                              ),
                             ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _dateFmt.format(history.createdAt),
+                              style: TextStyle(
+                                color: Colors.grey.shade600,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _lightGreen.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          '${hours}h${minutes}min',
+                          style: TextStyle(
+                            color: _primaryGreen,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            _dateFmt.format(history.createdAt),
-                            style: TextStyle(
-                              color: Colors.grey.shade600,
-                              fontSize: 13,
+                        ),
+                      ),
+                      // Bouton 3 points
+                      PopupMenuButton<String>(
+                        icon: Icon(
+                          Icons.more_vert,
+                          color: Colors.grey.shade600,
+                        ),
+                        onSelected: (value) {
+                          if (value == 'delete') {
+                            _showDeleteConfirmation(history.queueName).then((
+                              confirmed,
+                            ) {
+                              if (confirmed == true) {
+                                _deleteNotification(docId);
+                              }
+                            });
+                          }
+                        },
+                        itemBuilder: (context) => [
+                          const PopupMenuItem(
+                            value: 'delete',
+                            child: Row(
+                              children: [
+                                Icon(Icons.delete, color: Colors.red, size: 20),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Supprimer',
+                                  style: TextStyle(color: Colors.red),
+                                ),
+                              ],
                             ),
                           ),
                         ],
                       ),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: _lightGreen.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        '${hours}h${minutes}min',
-                        style: TextStyle(
-                          color: _primaryGreen,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 16),
-
-                // Horaires
-                Row(
-                  children: [
-                    Icon(
-                      Icons.access_time,
-                      size: 16,
-                      color: Colors.grey.shade600,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      '${_timeFmt.format(history.slotStart)} - ${_timeFmt.format(history.slotEnd)}',
-                      style: TextStyle(
-                        color: Colors.grey.shade700,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 12),
-
-                // Statistiques en grille
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade50,
-                    borderRadius: BorderRadius.circular(12),
+                    ],
                   ),
-                  child: Row(
+
+                  const SizedBox(height: 16),
+
+                  // Horaires
+                  Row(
                     children: [
-                      Expanded(
-                        child: _buildStatItem(
-                          icon: Icons.people_outline,
-                          label: 'Réservations',
-                          value: history.totalReservations.toString(),
-                          color: Colors.blue,
-                        ),
+                      Icon(
+                        Icons.access_time,
+                        size: 16,
+                        color: Colors.grey.shade600,
                       ),
-                      Container(
-                        width: 1,
-                        height: 40,
-                        color: Colors.grey.shade300,
-                      ),
-                      Expanded(
-                        child: _buildStatItem(
-                          icon: Icons.cancel_outlined,
-                          label: 'Annulations',
-                          value: history.totalCancellations.toString(),
-                          color: Colors.orange,
-                        ),
-                      ),
-                      Container(
-                        width: 1,
-                        height: 40,
-                        color: Colors.grey.shade300,
-                      ),
-                      Expanded(
-                        child: _buildStatItem(
-                          icon: Icons.check_circle_outline,
-                          label: 'Servis',
-                          value: history.servedEstimate.toString(),
-                          color: _primaryGreen,
+                      const SizedBox(width: 6),
+                      Text(
+                        '${_timeFmt.format(history.slotStart)} - ${_timeFmt.format(history.slotEnd)}',
+                        style: TextStyle(
+                          color: Colors.grey.shade700,
+                          fontSize: 14,
                         ),
                       ),
                     ],
                   ),
-                ),
-              ],
+
+                  const SizedBox(height: 12),
+
+                  // Statistiques en grille
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _buildStatItem(
+                            icon: Icons.people_outline,
+                            label: 'Réservations',
+                            value: history.totalReservations.toString(),
+                            color: Colors.blue,
+                          ),
+                        ),
+                        Container(
+                          width: 1,
+                          height: 40,
+                          color: Colors.grey.shade300,
+                        ),
+                        Expanded(
+                          child: _buildStatItem(
+                            icon: Icons.cancel_outlined,
+                            label: 'Annulations',
+                            value: history.totalCancellations.toString(),
+                            color: Colors.orange,
+                          ),
+                        ),
+                        Container(
+                          width: 1,
+                          height: 40,
+                          color: Colors.grey.shade300,
+                        ),
+                        Expanded(
+                          child: _buildStatItem(
+                            icon: Icons.check_circle_outline,
+                            label: 'Servis',
+                            value: history.servedEstimate.toString(),
+                            color: _primaryGreen,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -274,6 +348,178 @@ class _NotificationsPageState extends State<NotificationsPage> {
       ],
     );
   }
+
+  // ==================== SUPPRESSION ====================
+
+  Future<bool?> _showDeleteConfirmation(String queueName) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.warning, color: Colors.orange, size: 28),
+            SizedBox(width: 12),
+            Text('Confirmer la suppression'),
+          ],
+        ),
+        content: Text(
+          'Voulez-vous supprimer la notification de "$queueName" ?\n\n'
+          'Cette action est irréversible.',
+          style: const TextStyle(fontSize: 15),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Supprimer'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _deleteNotification(String docId) async {
+    if (_companyId == null) return;
+
+    try {
+      await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('notificationsHistory')
+          .doc(docId)
+          .delete();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Notification supprimée'),
+            backgroundColor: _primaryGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur: $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _showDeleteAllConfirmation() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.delete_forever, color: Colors.red, size: 28),
+            SizedBox(width: 12),
+            Flexible(child: Text('Supprimer tout ?')),
+          ],
+        ),
+        content: const Text(
+          'Voulez-vous supprimer TOUT l\'historique des notifications ?\n\n'
+          '⚠️ Cette action est irréversible et supprimera toutes les notifications.',
+          style: TextStyle(fontSize: 15),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Tout supprimer'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      _deleteAllNotifications();
+    }
+  }
+
+  Future<void> _deleteAllNotifications() async {
+    if (_companyId == null) return;
+
+    try {
+      // Récupérer tous les documents
+      final snapshot = await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('notificationsHistory')
+          .get();
+
+      // Supprimer en batch (max 500 par batch)
+      final batch = _firestore.batch();
+      int count = 0;
+
+      for (final doc in snapshot.docs) {
+        batch.delete(doc.reference);
+        count++;
+
+        // Firestore limite : 500 opérations par batch
+        if (count >= 500) {
+          await batch.commit();
+          count = 0;
+        }
+      }
+
+      // Commit du dernier batch s'il reste des opérations
+      if (count > 0) {
+        await batch.commit();
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${snapshot.docs.length} notification(s) supprimée(s)',
+            ),
+            backgroundColor: _primaryGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur: $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
+  // ==================== DÉTAILS ====================
 
   void _showDetails(NotificationHistory history) {
     showDialog(

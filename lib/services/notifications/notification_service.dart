@@ -206,8 +206,6 @@ class NotificationService {
         ),
       ),
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
       payload: payload,
     );
   }
@@ -263,8 +261,6 @@ class NotificationService {
         ),
       ),
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
       payload: payload,
     );
   }
@@ -288,6 +284,7 @@ class NotificationService {
         ?.requestPermissions(alert: true, badge: true, sound: true);
 
     // Définir les catégories iOS avec actions
+    // ignore: unused_local_variable
     final List<DarwinNotificationCategory> darwinCategories = [
       DarwinNotificationCategory(
         'RESERVATION_CATEGORY',

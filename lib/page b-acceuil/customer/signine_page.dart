@@ -5,6 +5,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:baxa/services/locale_service.dart';
 
 class SigninePage extends StatefulWidget {
   final String? nom;
@@ -24,6 +26,7 @@ class _SigninePageState extends State<SigninePage> {
   bool _isObscure = true;
   bool _isLoadingLogin = false;
   bool _isLoadingSignup = false;
+  bool _isLoadingGoogle = false;
   bool _isLoginMode = true; // Pour basculer entre connexion et inscription
 
   @override
@@ -42,9 +45,10 @@ class _SigninePageState extends State<SigninePage> {
         'email': user.email ?? '',
         'createdAt': FieldValue.serverTimestamp(),
         'role': 'customer',
+        // ── Données locale silencieuses ──────────────────────────────
+        ...LocaleService.toFirestoreMap(),
       };
 
-      // Ajouter les données de pré-inscription si disponibles
       if (widget.nom != null) userData['nom'] = widget.nom!;
       if (widget.prenom != null) userData['prenom'] = widget.prenom!;
       if (widget.profession != null && widget.profession!.isNotEmpty) {
@@ -143,6 +147,86 @@ class _SigninePageState extends State<SigninePage> {
       );
     } finally {
       if (mounted) setState(() => _isLoadingSignup = false);
+    }
+  }
+
+  Future<void> _signInWithGoogle() async {
+    setState(() => _isLoadingGoogle = true);
+    try {
+      // Popup natif Google — reste dans l'app
+      final googleSignIn = GoogleSignIn();
+      final googleUser = await googleSignIn.signIn();
+
+      if (googleUser == null) {
+        setState(() => _isLoadingGoogle = false);
+        return;
+      }
+
+      final googleAuth = await googleUser.authentication;
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+
+      final userCred = await FirebaseAuth.instance.signInWithCredential(
+        credential,
+      );
+      final user = userCred.user;
+      if (user == null) throw Exception('Utilisateur introuvable');
+
+      // Post-auth : écriture Firestore
+      final usersRef = FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid);
+
+      final nameParts = (user.displayName ?? '').split(' ');
+      final prenom = nameParts.isNotEmpty ? nameParts.first : '';
+      final nom = nameParts.length > 1
+          ? nameParts.sublist(1).join(' ')
+          : (widget.nom ?? '');
+
+      await usersRef.set({
+        'email': user.email ?? '',
+        'nom': widget.nom ?? nom,
+        'prenom': widget.prenom ?? prenom,
+        if (widget.profession != null && widget.profession!.isNotEmpty)
+          'profession': widget.profession!,
+        'role': 'customer',
+        'createdAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // FCM token
+      try {
+        final token = await FirebaseMessaging.instance.getToken();
+        if (token != null) {
+          await usersRef.set({'fcmToken': token}, SetOptions(merge: true));
+        }
+      } catch (_) {}
+
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const CustomerPage()),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message ?? 'Erreur Google Sign-In'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Google Sign-In error: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Erreur lors de la connexion Google'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoadingGoogle = false);
     }
   }
 
@@ -324,6 +408,84 @@ class _SigninePageState extends State<SigninePage> {
 
                   const SizedBox(height: 24),
 
+                  // ── Séparateur "ou" ──────────────────────────────────
+                  Row(
+                    children: [
+                      Expanded(child: Divider(color: Colors.grey.shade300)),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Text(
+                          'ou',
+                          style: TextStyle(
+                            color: Colors.grey.shade500,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                      Expanded(child: Divider(color: Colors.grey.shade300)),
+                    ],
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  // ── Bouton Google ────────────────────────────────────
+                  SizedBox(
+                    width: double.infinity,
+                    height: 54,
+                    child: OutlinedButton(
+                      onPressed:
+                          (_isLoadingLogin ||
+                              _isLoadingSignup ||
+                              _isLoadingGoogle)
+                          ? null
+                          : _signInWithGoogle,
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(
+                          color: Colors.grey.shade300,
+                          width: 1.5,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        backgroundColor: Colors.white,
+                      ),
+                      child: _isLoadingGoogle
+                          ? const SizedBox(
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Color(0xFF4B8B5E),
+                              ),
+                            )
+                          : Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                // Logo Google SVG inline
+                                SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CustomPaint(
+                                    painter: _GoogleLogoPainter(),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Text(
+                                  'Continuer avec Google',
+                                  style: GoogleFonts.poppins(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+
                   // Basculer entre connexion et inscription
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -365,4 +527,81 @@ class _SigninePageState extends State<SigninePage> {
       ),
     );
   }
+}
+
+// ── Logo Google dessiné en code (pas besoin d'image externe) ─────────────
+class _GoogleLogoPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+
+    // Bleu
+    final blue = Paint()..color = const Color(0xFF4285F4);
+    // Rouge
+    final red = Paint()..color = const Color(0xFFEA4335);
+    // Jaune
+    final yellow = Paint()..color = const Color(0xFFFBBC05);
+    // Vert
+    final green = Paint()..color = const Color(0xFF34A853);
+
+    final center = Offset(w / 2, h / 2);
+    final radius = w / 2;
+    final strokeW = w * 0.22;
+
+    // Arc rouge (haut-gauche → bas-gauche)
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius - strokeW / 2),
+      2.36,
+      1.57,
+      false,
+      red
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeW,
+    );
+    // Arc jaune (bas-gauche → bas-droite)
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius - strokeW / 2),
+      3.93,
+      0.79,
+      false,
+      yellow
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeW,
+    );
+    // Arc vert (bas-droite → haut-droite)
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius - strokeW / 2),
+      4.71,
+      1.18,
+      false,
+      green
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeW,
+    );
+    // Arc bleu (haut-droite → haut-gauche)
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius - strokeW / 2),
+      5.89,
+      0.84,
+      false,
+      blue
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeW,
+    );
+
+    // Barre horizontale bleue (le "G")
+    canvas.drawRect(
+      Rect.fromLTWH(w * 0.5, h * 0.38, w * 0.48, h * 0.24),
+      blue..style = PaintingStyle.fill,
+    );
+    // Cache la partie intérieure de la barre
+    canvas.drawRect(
+      Rect.fromLTWH(w * 0.5, h * 0.44, w * 0.22, h * 0.12),
+      Paint()..color = Colors.white,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_GoogleLogoPainter old) => false;
 }
