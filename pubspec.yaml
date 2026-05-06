@@ -52,6 +52,7 @@ dependencies:
   share_plus: ^7.2.2        # partage natif (WhatsApp, email, impression...)
   path_provider: ^2.1.2     # dossier temporaire pour sauvegarder l'image
   mobile_scanner: ^5.2.3
+  shared_preferences: ^2.3.3   # historique des recherches
 
 dev_dependencies:
   flutter_test:

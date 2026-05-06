@@ -1,5 +1,6 @@
 import 'package:baxa/page%20b-acceuil/company/prereception_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/prereceptione_page.dart';
+import 'package:baxa/page b-acceuil/company/staff_auth_page.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -101,6 +102,38 @@ class ChoosePage extends StatelessWidget {
                 ),
 
                 const SizedBox(height: 20),
+
+                // Lien staff discret en bas
+                GestureDetector(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const StaffAuthPage(),
+                    ),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: RichText(
+                      textAlign: TextAlign.center,
+                      text: TextSpan(
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.black45,
+                        ),
+                        children: [
+                          const TextSpan(text: 'Vous avez un code d\'invitation ? '),
+                          TextSpan(
+                            text: 'Rejoindre une equipe',
+                            style: TextStyle(
+                              color: Color(0xFF4B8B5E),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),

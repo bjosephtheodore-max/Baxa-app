@@ -23,12 +23,11 @@ class _HousePageState extends State<HousePage>
   @override
   bool get wantKeepAlive => true;
 
-  // ── Palette chaleureuse (vert vivant, fond légèrement teinté, pas de noir froid)
-  static const Color _green = Color(0xFF4B8B5E);
+  // ── Palette épurée — vert uniquement pour la marque et les actions
+  static const Color _green = Color(0xFF4B8B5E);      // vert marque
   static const Color _greenLight = Color(0xFFE8F5ED);
-  static const Color _greenMid = Color(0xFFB2D3C2);
-  static const Color _bg = Color(0xFFF7F9F7);
-  static const Color _dark = Color(0xFF1E2D23); // vert très foncé, chaleureux
+  static const Color _dark = Color(0xFF1A1C2E);       // quasi-noir neutre
+  static const Color _bg = Color(0xFFF4F6FB);         // fond slate très clair
 
   final DateFormat _dateFmt = DateFormat('EEE d MMM', 'fr_FR');
   final DateFormat _timeFmt = DateFormat('HH:mm');
@@ -178,25 +177,51 @@ class _HousePageState extends State<HousePage>
 
   Future<void> _cancelReservation(DocumentSnapshot doc) async {
     final data = doc.data() as Map<String, dynamic>;
+    final companyId = data['companyId'] as String?;
+    final queueId = data['queueId'] as String?;
+    final slotId = data['slotId'] as String?;
+    final slotStartTs = data['slotStart'] as Timestamp?;
+
     try {
-      final batch = FirebaseFirestore.instance.batch();
-      batch.update(doc.reference, {'status': 'cancelled'});
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        tx.update(doc.reference, {
+          'status': 'cancelled',
+          'cancelledAt': FieldValue.serverTimestamp(),
+        });
 
-      final companyId = data['companyId'] as String?;
-      final queueId = data['queueId'] as String?;
-      final slotId = data['slotId'] as String?;
+        if (companyId != null && queueId != null && slotId != null) {
+          final slotRef = FirebaseFirestore.instance
+              .collection('companies')
+              .doc(companyId)
+              .collection('queues')
+              .doc(queueId)
+              .collection('slots')
+              .doc(slotId);
+          tx.update(slotRef, {
+            'reserved': FieldValue.increment(-1),
+            'cancelled': FieldValue.increment(1),
+          });
 
-      if (companyId != null && queueId != null && slotId != null) {
-        final slotRef = FirebaseFirestore.instance
-            .collection('companies')
-            .doc(companyId)
-            .collection('queues')
-            .doc(queueId)
-            .collection('slots')
-            .doc(slotId);
-        batch.update(slotRef, {'reserved': FieldValue.increment(-1)});
-      }
-      await batch.commit();
+          if (slotStartTs != null) {
+            final slotStart = slotStartTs.toDate().toLocal();
+            final dateStr = '${slotStart.year}-'
+                '${slotStart.month.toString().padLeft(2, '0')}-'
+                '${slotStart.day.toString().padLeft(2, '0')}';
+            final dailyStatsRef = FirebaseFirestore.instance
+                .collection('companies')
+                .doc(companyId)
+                .collection('queues')
+                .doc(queueId)
+                .collection('dailyStats')
+                .doc(dateStr);
+            tx.set(dailyStatsRef, {
+              'reserved': FieldValue.increment(-1),
+              'available': FieldValue.increment(1),
+              'cancelled': FieldValue.increment(1),
+            }, SetOptions(merge: true));
+          }
+        }
+      });
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -270,24 +295,24 @@ class _HousePageState extends State<HousePage>
       decoration: const BoxDecoration(
         color: Colors.white,
         border: Border(
-          bottom: BorderSide(color: Color(0xFFEDF3EF), width: 1.5),
+          bottom: BorderSide(color: Color(0xFFEEF0F4), width: 1),
         ),
       ),
       child: SafeArea(
         bottom: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(22, 16, 22, 24),
+          padding: const EdgeInsets.fromLTRB(22, 16, 22, 22),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  // Logo pill vert vivant
+                  // Logo pill vert (marque)
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 8,
+                      horizontal: 16,
+                      vertical: 7,
                     ),
                     decoration: BoxDecoration(
                       color: _green,
@@ -297,13 +322,13 @@ class _HousePageState extends State<HousePage>
                       'Baxa',
                       style: GoogleFonts.poppins(
                         color: Colors.white,
-                        fontSize: 18,
+                        fontSize: 17,
                         fontWeight: FontWeight.w700,
-                        letterSpacing: 0.8,
+                        letterSpacing: 0.5,
                       ),
                     ),
                   ),
-                  // Avatar vert clair avec bordure, pas intimidant
+                  // Avatar neutre
                   GestureDetector(
                     onTap: () => Navigator.push(
                       context,
@@ -313,87 +338,120 @@ class _HousePageState extends State<HousePage>
                       width: 42,
                       height: 42,
                       decoration: BoxDecoration(
-                        color: _greenLight,
+                        color: Colors.grey.shade100,
                         shape: BoxShape.circle,
-                        border: Border.all(color: _greenMid, width: 2),
+                        border: Border.all(
+                          color: Colors.grey.shade300,
+                          width: 1.5,
+                        ),
                       ),
-                      child: const Icon(
+                      child: Icon(
                         Icons.person_rounded,
-                        color: _green,
+                        color: Colors.grey.shade500,
                         size: 22,
                       ),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 24),
-              // Headline avec emoji pour chaleur
+              const SizedBox(height: 22),
               Text(
                 'Votre place,',
                 style: GoogleFonts.poppins(
-                  fontSize: 28,
+                  fontSize: 26,
                   fontWeight: FontWeight.w800,
                   color: _dark,
                   height: 1.15,
                 ),
               ),
-              RichText(
-                text: TextSpan(
-                  children: [
-                    TextSpan(
-                      text: 'sans attendre ',
-                      style: GoogleFonts.poppins(
-                        fontSize: 28,
-                        fontWeight: FontWeight.w800,
-                        color: _green,
-                        height: 1.15,
-                      ),
+              Text(
+                'sans attendre',
+                style: GoogleFonts.poppins(
+                  fontSize: 26,
+                  fontWeight: FontWeight.w800,
+                  color: _green,
+                  height: 1.15,
+                ),
+              ),
+              const SizedBox(height: 18),
+              // Barre de recherche — neutre + bouton scanner à droite
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.grey.shade200, width: 1.5),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.04),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
                     ),
                   ],
                 ),
-              ),
-              const SizedBox(height: 20),
-              // Barre recherche fond vert très clair
-              GestureDetector(
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const SearchPage()),
-                ),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
-                  ),
-                  decoration: BoxDecoration(
-                    color: _greenLight,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: _greenMid, width: 1.5),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(6),
-                        decoration: BoxDecoration(
-                          color: _green.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(8),
+                child: Row(
+                  children: [
+                    // Zone de recherche (cliquable)
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const SearchPage(),
+                          ),
                         ),
-                        child: const Icon(
-                          Icons.search_rounded,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 14,
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.search_rounded,
+                                color: Colors.grey.shade400,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 10),
+                              Text(
+                                'Rechercher une entreprise...',
+                                style: GoogleFonts.poppins(
+                                  color: Colors.grey.shade400,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w400,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Séparateur vertical
+                    Container(
+                      width: 1,
+                      height: 28,
+                      color: Colors.grey.shade200,
+                    ),
+                    // Bouton scanner QR
+                    GestureDetector(
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const SearchPage(openScanner: true),
+                        ),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 14,
+                        ),
+                        child: Icon(
+                          Icons.qr_code_scanner_rounded,
                           color: _green,
-                          size: 17,
+                          size: 22,
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      Text(
-                        'Rechercher une entreprise...',
-                        style: GoogleFonts.poppins(
-                          color: const Color(0xFF8AAD97),
-                          fontSize: 14,
-                          fontWeight: FontWeight.w400,
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -405,26 +463,14 @@ class _HousePageState extends State<HousePage>
 
   // ── Section title ─────────────────────────────────────────────────────────
   Widget _buildSectionTitle(String title) {
-    return Row(
-      children: [
-        Container(
-          width: 4,
-          height: 18,
-          decoration: BoxDecoration(
-            color: _green,
-            borderRadius: BorderRadius.circular(2),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Text(
-          title,
-          style: GoogleFonts.poppins(
-            fontSize: 16,
-            fontWeight: FontWeight.w700,
-            color: _dark,
-          ),
-        ),
-      ],
+    return Text(
+      title,
+      style: GoogleFonts.poppins(
+        fontSize: 16,
+        fontWeight: FontWeight.w700,
+        color: _dark,
+        letterSpacing: -0.2,
+      ),
     );
   }
 
@@ -487,10 +533,10 @@ class _HousePageState extends State<HousePage>
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _greenMid.withOpacity(0.6), width: 1.5),
+        border: Border.all(color: Colors.grey.shade100, width: 1),
         boxShadow: [
           BoxShadow(
-            color: _green.withOpacity(0.07),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 10,
             offset: const Offset(0, 3),
           ),
@@ -588,7 +634,14 @@ class _HousePageState extends State<HousePage>
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _greenMid.withOpacity(0.4), width: 1.5),
+        border: Border.all(color: Colors.grey.shade100, width: 1),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: Row(
         children: [
@@ -683,13 +736,10 @@ class _HousePageState extends State<HousePage>
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: _greenMid.withOpacity(0.5),
-                      width: 1.5,
-                    ),
+                    border: Border.all(color: Colors.grey.shade100, width: 1),
                     boxShadow: [
                       BoxShadow(
-                        color: _green.withOpacity(0.06),
+                        color: Colors.black.withValues(alpha: 0.04),
                         blurRadius: 8,
                         offset: const Offset(0, 2),
                       ),
@@ -703,7 +753,7 @@ class _HousePageState extends State<HousePage>
                         height: 40,
                         decoration: BoxDecoration(
                           gradient: const LinearGradient(
-                            colors: [_green, Color(0xFF2D5A3D)],
+                            colors: [Color(0xFF4B6CF7), Color(0xFF2D3A8C)],
                             begin: Alignment.topLeft,
                             end: Alignment.bottomRight,
                           ),
@@ -760,13 +810,20 @@ class _HousePageState extends State<HousePage>
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _greenMid.withOpacity(0.4), width: 1.5),
+        border: Border.all(color: Colors.grey.shade100, width: 1),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.star_outline_rounded, color: _greenMid, size: 26),
+            Icon(Icons.star_outline_rounded, color: Colors.grey.shade300, size: 26),
             const SizedBox(height: 6),
             Text(
               'Appui long sur une entreprise\npour l\'ajouter aux favoris',
@@ -864,21 +921,21 @@ class _HousePageState extends State<HousePage>
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: _greenLight,
+        color: const Color(0xFFFFF8EC),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _greenMid.withOpacity(0.5), width: 1),
+        border: Border.all(color: const Color(0xFFFFE4A0), width: 1),
       ),
       child: Row(
         children: [
           Container(
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
-              color: _green.withOpacity(0.12),
+              color: const Color(0xFFFFD166).withValues(alpha: 0.3),
               borderRadius: BorderRadius.circular(10),
             ),
             child: const Icon(
               Icons.lightbulb_outline_rounded,
-              color: _green,
+              color: Color(0xFFD4870A),
               size: 20,
             ),
           ),

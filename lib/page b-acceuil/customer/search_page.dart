@@ -4,10 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 
 class SearchPage extends StatefulWidget {
-  const SearchPage({super.key});
+  final bool openScanner;
+  const SearchPage({super.key, this.openScanner = false});
 
   @override
   State<SearchPage> createState() => _SearchPageState();
@@ -23,11 +25,15 @@ class _SearchPageState extends State<SearchPage> {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   Timer? _debounce;
-  String searchText = "";
+  String searchText = '';
   String? typeSelectionne;
 
-  // Ensemble des favoris déjà ajoutés (ids) — chargé au démarrage
+  // Favoris
   Set<String> _favoriteIds = {};
+
+  // Historique des recherches
+  static const String _historyKey = 'search_history';
+  List<String> _history = [];
 
   final List<String> typesEntreprises = [
     'Tous',
@@ -44,9 +50,10 @@ class _SearchPageState extends State<SearchPage> {
     super.initState();
     _searchController.addListener(_onSearchChanged);
     _loadFavoriteIds();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _searchFocusNode.requestFocus();
-    });
+    _loadHistory();
+    if (widget.openScanner) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _openQrScanner());
+    }
   }
 
   Future<void> _loadFavoriteIds() async {
@@ -79,13 +86,124 @@ class _SearchPageState extends State<SearchPage> {
     super.dispose();
   }
 
-  bool _matchesSearch(String nom, String query) {
-    if (query.isEmpty) return true;
-    final n = nom.toLowerCase();
-    final q = query.toLowerCase();
-    return n.startsWith(q) ||
-        n.contains(q) ||
-        n.split(' ').any((w) => w.startsWith(q));
+  // ── Normalisation (accents + minuscules) ──────────────────────────────────
+  static String _normalize(String s) {
+    const src = 'àáâãäåçèéêëìíîïñòóôõöùúûüýÿœæ';
+    const dst = 'aaaaaaceeeeiiiinoooooouuuuyyoeae';
+    var r = s.toLowerCase();
+    for (var i = 0; i < src.length; i++) {
+      r = r.replaceAll(src[i], dst[i]);
+    }
+    return r;
+  }
+
+  // ── Distance de Levenshtein ────────────────────────────────────────────────
+  static int _levenshtein(String a, String b) {
+    if (a == b) return 0;
+    if (a.isEmpty) return b.length;
+    if (b.isEmpty) return a.length;
+    final prev = List<int>.generate(b.length + 1, (i) => i);
+    for (var i = 0; i < a.length; i++) {
+      final curr = [i + 1, ...List<int>.filled(b.length, 0)];
+      for (var j = 0; j < b.length; j++) {
+        final cost = a[i] == b[j] ? 0 : 1;
+        curr[j + 1] = [
+          prev[j + 1] + 1,
+          curr[j] + 1,
+          prev[j] + cost,
+        ].reduce((x, y) => x < y ? x : y);
+      }
+      prev.setAll(0, curr);
+    }
+    return prev[b.length];
+  }
+
+  // ── Score de pertinence (plus grand = meilleur) ────────────────────────────
+  // Cherche dans : nom, ville, type
+  double _scoreMatch(Map<String, dynamic> data, String query) {
+    if (query.isEmpty) return 1.0; // tout passe
+    final q = _normalize(query.trim());
+    if (q.isEmpty) return 1.0;
+
+    final nom = _normalize(data['nom'] as String? ?? '');
+    final ville = _normalize(data['ville'] as String? ?? '');
+    final type = _normalize(data['type'] as String? ?? '');
+
+    double best = 0;
+    for (final field in [nom, ville, type]) {
+      if (field.isEmpty) continue;
+      double score = 0;
+      if (field == q)
+        score = 5.0; // exact
+      else if (field.startsWith(q))
+        score = 4.0; // préfixe exact
+      else if (field.split(' ').any((w) => w.startsWith(q)))
+        score = 3.0; // mot commence par
+      else if (field.contains(q))
+        score = 2.0; // contient
+      else {
+        // Tolérance aux fautes — Levenshtein sur chaque mot
+        for (final word in field.split(' ')) {
+          if (word.length < 3) continue;
+          final dist = _levenshtein(q, word);
+          if (dist == 1)
+            score = score < 1.5 ? 1.5 : score;
+          else if (dist == 2)
+            score = score < 0.8 ? 0.8 : score;
+        }
+        // Multi-mot : chaque mot de la query doit matcher quelque chose
+        final qWords = q.split(' ').where((w) => w.length >= 2).toList();
+        if (qWords.length > 1) {
+          final allMatch = qWords.every(
+            (qw) =>
+                field.contains(qw) ||
+                field.split(' ').any((fw) => _levenshtein(qw, fw) <= 1),
+          );
+          if (allMatch) score = score < 2.5 ? 2.5 : score;
+        }
+      }
+      if (score > best) best = score;
+    }
+    return best;
+  }
+
+  // ── Historique des recherches ──────────────────────────────────────────────
+  Future<void> _loadHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() => _history = prefs.getStringList(_historyKey) ?? []);
+    }
+  }
+
+  Future<void> _saveToHistory(String query) async {
+    final q = query.trim();
+    if (q.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final h = List<String>.from(_history)
+      ..remove(q) // évite les doublons
+      ..insert(0, q); // plus récent en premier
+    if (h.length > 6) h.removeLast();
+    await prefs.setStringList(_historyKey, h);
+    if (mounted) setState(() => _history = h);
+  }
+
+  Future<void> _removeFromHistory(String query) async {
+    final prefs = await SharedPreferences.getInstance();
+    final h = List<String>.from(_history)..remove(query);
+    await prefs.setStringList(_historyKey, h);
+    if (mounted) setState(() => _history = h);
+  }
+
+  Future<void> _clearHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_historyKey);
+    if (mounted) setState(() => _history = []);
+  }
+
+  void _applyHistoryQuery(String query) {
+    _searchController.text = query;
+    _searchController.selection = TextSelection.collapsed(offset: query.length);
+    setState(() => searchText = query);
   }
 
   Stream<QuerySnapshot> _getEntreprisesStream() {
@@ -330,138 +448,82 @@ class _SearchPageState extends State<SearchPage> {
       backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
         elevation: 0,
-        backgroundColor: _green,
+        backgroundColor: Colors.white,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          icon: const Icon(Icons.arrow_back, color: Color(0xFF1A1C2E)),
           onPressed: () => Navigator.pop(context),
         ),
-        title: Text(
-          'Rechercher',
-          style: GoogleFonts.poppins(
-            color: Colors.white,
-            fontWeight: FontWeight.w700,
-            fontSize: 18,
+        // TextField directement dans l'AppBar
+        title: TextField(
+          controller: _searchController,
+          focusNode: _searchFocusNode,
+          autofocus: !widget.openScanner,
+          decoration: InputDecoration(
+            hintText: typeSelectionne != null && typeSelectionne != 'Tous'
+                ? 'Dans $typeSelectionne...'
+                : 'Nom ou ville d\'une structure',
+            hintStyle: TextStyle(
+              color: Colors.grey.shade400,
+              fontSize: 14,
+              fontWeight: FontWeight.w400,
+            ),
+            border: InputBorder.none,
+            isDense: true,
+            contentPadding: EdgeInsets.zero,
+          ),
+          style: const TextStyle(
+            fontSize: 16,
+            color: Color(0xFF1A1C2E),
+            fontWeight: FontWeight.w500,
           ),
         ),
         actions: [
+          // Bouton effacer — visible si du texte est saisi
+          if (searchText.isNotEmpty)
+            IconButton(
+              icon: Icon(
+                Icons.close_rounded,
+                color: Colors.grey.shade500,
+                size: 22,
+              ),
+              onPressed: () {
+                _searchController.clear();
+                if (mounted) setState(() => searchText = '');
+              },
+            ),
+          // Scanner QR — toujours visible à droite
           IconButton(
             onPressed: _openQrScanner,
             icon: const Icon(
               Icons.qr_code_scanner_rounded,
-              color: Colors.white,
-              size: 26,
+              color: _green,
+              size: 24,
             ),
-            tooltip: 'Scanner un QR code',
           ),
           const SizedBox(width: 4),
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(color: Colors.grey.shade100, height: 1),
+        ),
       ),
       body: Column(
         children: [
-          // ── Zone de recherche ──────────────────────────────────────────
+          // ── Indice appui long ──────────────────────────────────────────
           Container(
             color: Colors.white,
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-            child: Column(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            child: Row(
               children: [
-                // Champ de recherche
-                Container(
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: _searchFocusNode.hasFocus
-                          ? _green
-                          : Colors.transparent,
-                      width: 1.5,
-                    ),
-                  ),
-                  child: TextField(
-                    controller: _searchController,
-                    focusNode: _searchFocusNode,
-                    decoration: InputDecoration(
-                      prefixIcon: Icon(
-                        Icons.search,
-                        color: Colors.grey.shade600,
-                      ),
-                      hintText:
-                          typeSelectionne != null && typeSelectionne != 'Tous'
-                          ? "Rechercher dans $typeSelectionne..."
-                          : "Nom de l'entreprise...",
-                      hintStyle: TextStyle(color: Colors.grey.shade500),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 14,
-                      ),
-                      suffixIcon: searchText.isNotEmpty
-                          ? IconButton(
-                              icon: Icon(
-                                Icons.clear,
-                                color: Colors.grey.shade600,
-                              ),
-                              onPressed: () {
-                                _searchController.clear();
-                                if (mounted) {
-                                  setState(() => searchText = "");
-                                }
-                              },
-                            )
-                          : null,
-                    ),
-                  ),
+                Icon(
+                  Icons.touch_app_outlined,
+                  size: 13,
+                  color: Colors.grey.shade400,
                 ),
-
-                if (searchText.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 10),
-                    child: StreamBuilder<QuerySnapshot>(
-                      stream: _getEntreprisesStream(),
-                      builder: (ctx, snap) {
-                        if (!snap.hasData) return const SizedBox.shrink();
-                        final count = snap.data!.docs
-                            .where(
-                              (d) => _matchesSearch(
-                                (d.data() as Map)["nom"] ?? "",
-                                searchText,
-                              ),
-                            )
-                            .length;
-                        return Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            '$count résultat${count > 1 ? 's' : ''} trouvé${count > 1 ? 's' : ''}',
-                            style: TextStyle(
-                              color: Colors.grey.shade600,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-
-                // Indice appui long
-                Padding(
-                  padding: const EdgeInsets.only(top: 10),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.touch_app_outlined,
-                        size: 13,
-                        color: Colors.grey.shade400,
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        'Appui long sur une entreprise pour l\'ajouter aux favoris',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey.shade400,
-                        ),
-                      ),
-                    ],
-                  ),
+                const SizedBox(width: 6),
+                Text(
+                  'Appui long sur une entreprise pour l\'ajouter aux favoris',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
                 ),
               ],
             ),
@@ -516,7 +578,7 @@ class _SearchPageState extends State<SearchPage> {
 
           const Divider(height: 1),
 
-          // ── Résultats ──────────────────────────────────────────────────
+          // ── Résultats + Historique ─────────────────────────────────────
           Expanded(
             child: StreamBuilder<QuerySnapshot>(
               stream: _getEntreprisesStream(),
@@ -529,40 +591,67 @@ class _SearchPageState extends State<SearchPage> {
                 if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
                   return _buildEmptyState(
                     icon: Icons.business_outlined,
-                    title: "Aucune entreprise",
-                    subtitle: "Aucune entreprise n'est encore inscrite",
+                    title: 'Aucune structure',
+                    subtitle: 'Aucune structure inscrite pour le moment',
                   );
                 }
 
-                final filtered = snapshot.data!.docs.where((d) {
-                  final nom = (d.data() as Map)["nom"] ?? "";
-                  return _matchesSearch(nom, searchText);
-                }).toList();
+                // Scoring et tri par pertinence
+                final docs = snapshot.data!.docs;
+                final scored =
+                    docs
+                        .map(
+                          (d) => (
+                            doc: d,
+                            score: _scoreMatch(
+                              d.data() as Map<String, dynamic>,
+                              searchText,
+                            ),
+                          ),
+                        )
+                        .where((item) => item.score > 0)
+                        .toList()
+                      ..sort((a, b) => b.score.compareTo(a.score));
 
-                if (filtered.isEmpty) {
+                if (scored.isEmpty) {
                   return _buildEmptyState(
                     icon: Icons.search_off,
-                    title: "Aucun résultat",
-                    subtitle: 'Aucune entreprise trouvée pour "$searchText"',
+                    title: 'Aucun résultat',
+                    subtitle:
+                        'Aucune structure trouvée pour "$searchText".\n'
+                        'Vérifiez l\'orthographe ou essayez un autre mot.',
                   );
                 }
 
-                return ListView.separated(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  itemCount: filtered.length,
-                  separatorBuilder: (_, __) => Divider(
-                    height: 1,
-                    indent: 72,
-                    color: Colors.grey.shade100,
-                  ),
+                return ListView.builder(
+                  padding: const EdgeInsets.only(bottom: 24),
+                  itemCount:
+                      scored.length +
+                      (searchText.isEmpty && _history.isNotEmpty ? 1 : 0),
                   itemBuilder: (_, i) {
-                    final doc = filtered[i];
-                    final data = doc.data() as Map<String, dynamic>;
-                    return _buildCompanyCard(
-                      doc: doc,
-                      nom: data["nom"] ?? "Sans nom",
-                      type: data["type"],
-                      ville: data["ville"],
+                    // Section historique en tête de liste (recherche vide)
+                    if (searchText.isEmpty && _history.isNotEmpty && i == 0) {
+                      return _buildHistorySection();
+                    }
+                    final offset = searchText.isEmpty && _history.isNotEmpty
+                        ? 1
+                        : 0;
+                    final item = scored[i - offset];
+                    final data = item.doc.data() as Map<String, dynamic>;
+                    return Column(
+                      children: [
+                        _buildCompanyCard(
+                          doc: item.doc,
+                          nom: data['nom'] ?? 'Sans nom',
+                          type: data['type'] as String?,
+                          ville: data['ville'] as String?,
+                        ),
+                        Divider(
+                          height: 1,
+                          indent: 72,
+                          color: Colors.grey.shade100,
+                        ),
+                      ],
                     );
                   },
                 );
@@ -571,6 +660,79 @@ class _SearchPageState extends State<SearchPage> {
           ),
         ],
       ),
+    );
+  }
+
+  // ── Section historique des recherches ─────────────────────────────────────
+  Widget _buildHistorySection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Row(
+            children: [
+              Text(
+                'Recherches récentes',
+                style: GoogleFonts.poppins(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0xFF1A1C2E),
+                ),
+              ),
+              const Spacer(),
+              GestureDetector(
+                onTap: _clearHistory,
+                child: Text(
+                  'Tout effacer',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade500,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        ..._history.map(
+          (q) => ListTile(
+            dense: true,
+            leading: Icon(
+              Icons.history_rounded,
+              color: Colors.grey.shade400,
+              size: 20,
+            ),
+            title: Text(
+              q,
+              style: const TextStyle(fontSize: 14, color: Color(0xFF1A1C2E)),
+            ),
+            trailing: IconButton(
+              icon: Icon(
+                Icons.close_rounded,
+                size: 16,
+                color: Colors.grey.shade400,
+              ),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              onPressed: () => _removeFromHistory(q),
+            ),
+            onTap: () => _applyHistoryQuery(q),
+          ),
+        ),
+        const Divider(height: 1),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+          child: Text(
+            'Toutes les structures',
+            style: GoogleFonts.poppins(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: const Color(0xFF1A1C2E),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -586,13 +748,17 @@ class _SearchPageState extends State<SearchPage> {
     return Material(
       color: Colors.white,
       child: InkWell(
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) =>
-                CompanyQueuePage(entrepriseId: doc.id, entrepriseNom: nom),
-          ),
-        ),
+        onTap: () {
+          final q = _searchController.text.trim();
+          if (q.isNotEmpty) _saveToHistory(q);
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) =>
+                  CompanyQueuePage(entrepriseId: doc.id, entrepriseNom: nom),
+            ),
+          );
+        },
         onLongPress: () => _showFavoriteSheet(doc, nom, type),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -934,7 +1100,7 @@ class _QrScannerPageState extends State<_QrScannerPage> {
                         child: Container(
                           padding: const EdgeInsets.all(10),
                           decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.5),
+                            color: Colors.black.withValues(alpha:0.5),
                             shape: BoxShape.circle,
                           ),
                           child: const Icon(
@@ -968,8 +1134,8 @@ class _QrScannerPageState extends State<_QrScannerPage> {
                           padding: const EdgeInsets.all(10),
                           decoration: BoxDecoration(
                             color: _torchOn
-                                ? _green.withOpacity(0.8)
-                                : Colors.black.withOpacity(0.5),
+                                ? _green.withValues(alpha:0.8)
+                                : Colors.black.withValues(alpha:0.5),
                             shape: BoxShape.circle,
                           ),
                           child: Icon(
@@ -999,7 +1165,7 @@ class _QrScannerPageState extends State<_QrScannerPage> {
                 gradient: LinearGradient(
                   begin: Alignment.bottomCenter,
                   end: Alignment.topCenter,
-                  colors: [Colors.black.withOpacity(0.85), Colors.transparent],
+                  colors: [Colors.black.withValues(alpha:0.85), Colors.transparent],
                 ),
               ),
               child: Column(
@@ -1027,10 +1193,10 @@ class _QrScannerPageState extends State<_QrScannerPage> {
                             vertical: 8,
                           ),
                           decoration: BoxDecoration(
-                            color: _green.withOpacity(0.2),
+                            color: _green.withValues(alpha:0.2),
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(
-                              color: _green.withOpacity(0.5),
+                              color: _green.withValues(alpha:0.5),
                               width: 1,
                             ),
                           ),
@@ -1058,7 +1224,7 @@ class _QrScannerPageState extends State<_QrScannerPage> {
                         Text(
                           'Le scan est automatique',
                           style: TextStyle(
-                            color: Colors.white.withOpacity(0.5),
+                            color: Colors.white.withValues(alpha:0.5),
                             fontSize: 11,
                           ),
                         ),
@@ -1086,7 +1252,7 @@ class _QrScannerPageState extends State<_QrScannerPage> {
             // Fond sombre
             ColorFiltered(
               colorFilter: ColorFilter.mode(
-                Colors.black.withOpacity(0.55),
+                Colors.black.withValues(alpha:0.55),
                 BlendMode.srcOut,
               ),
               child: Stack(

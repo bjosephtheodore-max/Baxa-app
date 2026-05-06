@@ -130,38 +130,50 @@ class _CompanyQueuePageState extends State<CompanyQueuePage> {
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
       elevation: 0,
-      backgroundColor: _primaryGreen,
-      iconTheme: const IconThemeData(color: Colors.white),
+      backgroundColor: Colors.white,
+      iconTheme: const IconThemeData(color: Color(0xFF1A1C2E)),
+      titleSpacing: 4,
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Réserver',
+          Text(
+            'Reserver',
             style: TextStyle(
-              color: Colors.white,
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.2,
+              fontSize: 11,
+              color: Colors.grey.shade400,
+              fontWeight: FontWeight.w500,
             ),
           ),
           Text(
             widget.entrepriseNom,
-            style: const TextStyle(color: Colors.white70, fontSize: 13),
+            style: const TextStyle(
+              color: Color(0xFF1A1C2E),
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
         ],
       ),
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(1),
+        child: Container(color: Colors.grey.shade100, height: 1),
+      ),
       actions: [
-        // Bouton partager
         IconButton(
-          icon: const Icon(Icons.share_rounded, color: Colors.white),
+          icon: Icon(Icons.share_rounded, color: Colors.grey.shade600),
           tooltip: 'Partager',
           onPressed: _shareCompany,
         ),
         Stack(
           children: [
             IconButton(
-              icon: const Icon(Icons.event_note_rounded, color: Colors.white),
-              tooltip: 'Mes réservations',
+              icon: Icon(
+                Icons.event_note_rounded,
+                color: Colors.grey.shade600,
+              ),
+              tooltip: 'Mes reservations',
               onPressed: () async {
                 final result = await Navigator.push(
                   context,
@@ -183,7 +195,7 @@ class _CompanyQueuePageState extends State<CompanyQueuePage> {
                   decoration: BoxDecoration(
                     color: Colors.red.shade500,
                     shape: BoxShape.circle,
-                    border: Border.all(color: _primaryGreen, width: 2),
+                    border: Border.all(color: Colors.white, width: 2),
                   ),
                   constraints: const BoxConstraints(
                     minWidth: 18,

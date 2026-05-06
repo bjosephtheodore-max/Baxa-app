@@ -19,10 +19,9 @@ class CustomerPageState extends State<CustomerPage> {
   int pageIndex = 0;
   bool _isInitialized = false;
 
-  // Pages instanciées une seule fois — jamais recréées
+  // Pages instanciées une seule fois — SearchPage est pushée, pas dans le stack
   static const List<Widget> _pages = [
     HousePage(),
-    SearchPage(),
     NotificationsPage(),
   ];
 
@@ -71,25 +70,40 @@ class CustomerPageState extends State<CustomerPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Mapping : pageIndex 0=Accueil, 1=Notifications
+    // NavBar :  index   0=Accueil, 1=Recherche (push), 2=Notifications
+    final navBarIndex = pageIndex == 1 ? 2 : pageIndex;
+
     return MediaQuery(
-      // ✅ WRAPPER RESPONSIVE — Scale automatiquement le texte et les widgets
-      data: MediaQuery.of(
-        context,
-      ).copyWith(textScaleFactor: _getTextScaleFactor(context)),
+      data: MediaQuery.of(context).copyWith(
+        textScaler: TextScaler.linear(_getTextScaleFactor(context)),
+      ),
       child: Scaffold(
         body: IndexedStack(index: pageIndex, children: _pages),
         bottomNavigationBar: NavigationBar(
           height: 60,
           backgroundColor: Colors.white,
-          selectedIndex: pageIndex,
+          selectedIndex: navBarIndex,
           onDestinationSelected: (int index) {
-            setState(() {
-              pageIndex = index;
-            });
+            if (index == 1) {
+              // Recherche — plein écran, sans bottom nav
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const SearchPage(),
+                ),
+              );
+            } else {
+              // 0 → Accueil, 2 → Notifications (pageIndex 1)
+              setState(() => pageIndex = index == 2 ? 1 : 0);
+            }
           },
           destinations: const [
             NavigationDestination(icon: Icon(Icons.home), label: "Accueil"),
-            NavigationDestination(icon: Icon(Icons.search), label: "Recherche"),
+            NavigationDestination(
+              icon: Icon(Icons.search),
+              label: "Recherche",
+            ),
             NavigationDestination(
               icon: Icon(Icons.notifications),
               label: "Notifications",

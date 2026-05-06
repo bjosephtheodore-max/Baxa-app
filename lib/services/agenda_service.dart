@@ -61,9 +61,10 @@ class AgendaSlot {
   final int cancelled;
   final String status; // "open" | "blocked"
   final int duration; // en minutes
-  final bool
-  isLegacy; // true = créneau réservé avec ancienne config, ne pas toucher
-  List<String> customerNames; // chargé séparément
+  final bool isLegacy;
+  final String timeSlotId;
+  final String? blockReason;
+  List<String> customerNames;
 
   AgendaSlot({
     required this.id,
@@ -76,6 +77,8 @@ class AgendaSlot {
     required this.status,
     required this.duration,
     this.isLegacy = false,
+    this.timeSlotId = '',
+    this.blockReason,
     this.customerNames = const [],
   });
 
@@ -178,6 +181,8 @@ class AgendaService {
           ? (d['duration'] as num).toInt()
           : slotEnd.difference(slotStart).inMinutes,
       isLegacy: d['isLegacy'] as bool? ?? false,
+      timeSlotId: d['timeSlotId'] as String? ?? '',
+      blockReason: d['blockReason'] as String?,
     );
   }
 
@@ -223,36 +228,29 @@ class AgendaService {
 
   // ==============================================================
   // 4. VÉRIFIER SI LA PLAGE EST BLOQUÉE + RÉCUPÉRER LA RAISON
+  //    Une seule requête Firestore au lieu de deux
   // ==============================================================
 
-  Future<bool> isPlageBlocked(String queueId, DateTime date) async {
+  Future<({bool blocked, String? reason})> getBlockInfo(
+    String queueId,
+    DateTime date,
+  ) async {
     final startOfDay = DateTime(date.year, date.month, date.day);
     final endOfDay = startOfDay.add(const Duration(days: 1));
 
     final snap = await _slotsRef(queueId)
         .where('start', isGreaterThanOrEqualTo: startOfDay)
         .where('start', isLessThan: endOfDay)
-        .where('status', isEqualTo: 'blocked')
-        .limit(1)
+        .limit(20)
         .get();
 
-    return snap.docs.isNotEmpty;
-  }
-
-  Future<String?> getBlockReason(String queueId, DateTime date) async {
-    final startOfDay = DateTime(date.year, date.month, date.day);
-    final endOfDay = startOfDay.add(const Duration(days: 1));
-
-    final snap = await _slotsRef(queueId)
-        .where('start', isGreaterThanOrEqualTo: startOfDay)
-        .where('start', isLessThan: endOfDay)
-        .where('status', isEqualTo: 'blocked')
-        .limit(1)
-        .get();
-
-    if (snap.docs.isEmpty) return null;
-    return (snap.docs.first.data() as Map<String, dynamic>)['blockReason']
-        as String?;
+    for (final doc in snap.docs) {
+      final data = doc.data() as Map<String, dynamic>;
+      if (data['status'] == 'blocked') {
+        return (blocked: true, reason: data['blockReason'] as String?);
+      }
+    }
+    return (blocked: false, reason: null);
   }
 
   // ==============================================================
@@ -371,6 +369,7 @@ class AgendaService {
     required int newCapacity,
     required ModificationType type,
     bool applyToFuture = false,
+    String? timeSlotId,
   }) async {
     try {
       final startOfDay = DateTime(date.year, date.month, date.day);
@@ -382,30 +381,40 @@ class AgendaService {
           .where('status', isEqualTo: 'open')
           .get();
 
+      final docs = timeSlotId != null
+          ? slotsSnap.docs
+              .where((d) =>
+                  (d.data() as Map<String, dynamic>)['timeSlotId'] ==
+                  timeSlotId)
+              .toList()
+          : slotsSnap.docs;
+
       final batch = _firestore.batch();
       int affected = 0;
 
-      for (final doc in slotsSnap.docs) {
+      for (final doc in docs) {
         final reserved =
             ((doc.data() as Map<String, dynamic>)['reserved'] as num).toInt();
-
-        // ⚠️ RÈGLE FONDAMENTALE : jamais en dessous du nombre réservé
-        final effectiveCapacity = newCapacity < reserved
-            ? reserved
-            : newCapacity;
-
+        final effectiveCapacity =
+            newCapacity < reserved ? reserved : newCapacity;
         batch.update(doc.reference, {'capacity': effectiveCapacity});
         affected++;
       }
 
       await batch.commit();
 
-      // Si PERMANENTE → sync config globale
       if (type == ModificationType.permanente) {
-        await _syncGlobalConfig(queueId, {'capacityPerSlot': newCapacity});
-
+        if (timeSlotId != null) {
+          await _timeSlotsRef(queueId).doc(timeSlotId).update({
+            'capacityPerSlot': newCapacity,
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+        } else {
+          await _syncGlobalConfig(queueId, {'capacityPerSlot': newCapacity});
+        }
         if (applyToFuture) {
-          await _applyCapacityToFutureDays(queueId, newCapacity, date);
+          await _applyCapacityToFutureDays(
+              queueId, newCapacity, date, timeSlotId: timeSlotId);
         }
       }
 
@@ -679,7 +688,7 @@ class AgendaService {
   // INTERNES — APPLIQUER AUX JOURS FUTURS (bouton séparé)
   // ==============================================================
 
-  /// Applique une nouvelle durée aux 30 prochains jours (créneaux futurs libres)
+  /// Applique une nouvelle durée aux 30 prochains jours en parallèle
   Future<void> _applyDurationToFutureDays(
     String queueId,
     int newDuration,
@@ -691,39 +700,40 @@ class AgendaService {
       fromDate.day,
     ).add(const Duration(days: 1));
 
-    for (int i = 0; i < 30; i++) {
-      final targetDate = tomorrow.add(Duration(days: i));
-      // Appel ponctuel pour chaque jour (pas de récursion vers permanente)
-      await modifySlotDuration(
-        queueId: queueId,
-        date: targetDate,
-        newDuration: newDuration,
-        type: ModificationType.ponctuelle,
-      );
-    }
+    await Future.wait([
+      for (int i = 0; i < 30; i++)
+        modifySlotDuration(
+          queueId: queueId,
+          date: tomorrow.add(Duration(days: i)),
+          newDuration: newDuration,
+          type: ModificationType.ponctuelle,
+        ),
+    ]);
   }
 
-  /// Applique une nouvelle capacité aux 30 prochains jours
+  /// Applique une nouvelle capacité aux 30 prochains jours en parallèle
   Future<void> _applyCapacityToFutureDays(
     String queueId,
     int newCapacity,
-    DateTime fromDate,
-  ) async {
+    DateTime fromDate, {
+    String? timeSlotId,
+  }) async {
     final tomorrow = DateTime(
       fromDate.year,
       fromDate.month,
       fromDate.day,
     ).add(const Duration(days: 1));
 
-    for (int i = 0; i < 30; i++) {
-      final targetDate = tomorrow.add(Duration(days: i));
-      await modifySlotCapacity(
-        queueId: queueId,
-        date: targetDate,
-        newCapacity: newCapacity,
-        type: ModificationType.ponctuelle,
-      );
-    }
+    await Future.wait([
+      for (int i = 0; i < 30; i++)
+        modifySlotCapacity(
+          queueId: queueId,
+          date: tomorrow.add(Duration(days: i)),
+          newCapacity: newCapacity,
+          type: ModificationType.ponctuelle,
+          timeSlotId: timeSlotId,
+        ),
+    ]);
   }
 
   // ==============================================================
@@ -735,45 +745,46 @@ class AgendaService {
   Future<void> _sendBlockNotifications(
     List<Map<String, dynamic>> clients,
   ) async {
-    for (final client in clients) {
-      final customerId = client['customerId'] as String?;
-      if (customerId == null) continue;
+    await Future.wait(
+      clients.map((client) async {
+        final customerId = client['customerId'] as String?;
+        if (customerId == null) return;
 
-      try {
-        final slotStart = client['slotStart'] as DateTime;
-        final slotEnd = client['slotEnd'] as DateTime;
-        final queueName = client['queueName'] as String;
-        final reason = client['reason'] as String;
+        try {
+          final slotStart = client['slotStart'] as DateTime;
+          final slotEnd = client['slotEnd'] as DateTime;
+          final queueName = client['queueName'] as String;
+          final reason = client['reason'] as String;
 
-        final startStr =
-            '${slotStart.day.toString().padLeft(2, '0')}/'
-            '${slotStart.month.toString().padLeft(2, '0')} '
-            '${slotStart.hour.toString().padLeft(2, '0')}:'
-            '${slotStart.minute.toString().padLeft(2, '0')}';
-        final endStr =
-            '${slotEnd.hour.toString().padLeft(2, '0')}:'
-            '${slotEnd.minute.toString().padLeft(2, '0')}';
+          final startStr =
+              '${slotStart.day.toString().padLeft(2, '0')}/'
+              '${slotStart.month.toString().padLeft(2, '0')} '
+              '${slotStart.hour.toString().padLeft(2, '0')}:'
+              '${slotStart.minute.toString().padLeft(2, '0')}';
+          final endStr =
+              '${slotEnd.hour.toString().padLeft(2, '0')}:'
+              '${slotEnd.minute.toString().padLeft(2, '0')}';
 
-        await _firestore
-            .collection('customers')
-            .doc(customerId)
-            .collection('notifications')
-            .add({
-              'title': '❌ Réservation annulée',
-              'body':
-                  'File : $queueName\n'
-                  'Créneau : $startStr – $endStr\n\n'
-                  'Raison : $reason\n\n'
-                  'Nous nous excusons pour ce désagrément.',
-              'type': 'reservation_cancelled_by_company',
-              'read': false,
-              'createdAt': FieldValue.serverTimestamp(),
-            });
-      } catch (e) {
-        debugPrint('⚠️ Notification échouée pour $customerId : $e');
-        // On continue — une notification échouée ne bloque pas les autres
-      }
-    }
+          await _firestore
+              .collection('customers')
+              .doc(customerId)
+              .collection('notifications')
+              .add({
+                'title': '❌ Réservation annulée',
+                'body':
+                    'File : $queueName\n'
+                    'Créneau : $startStr – $endStr\n\n'
+                    'Raison : $reason\n\n'
+                    'Nous nous excusons pour ce désagrément.',
+                'type': 'reservation_cancelled_by_company',
+                'read': false,
+                'createdAt': FieldValue.serverTimestamp(),
+              });
+        } catch (e) {
+          debugPrint('⚠️ Notification échouée pour $customerId : $e');
+        }
+      }),
+    );
   }
 
   // ==============================================================
@@ -819,6 +830,336 @@ class AgendaService {
       totalCreneaux: openSlots.length,
       estBloquee: allBlocked,
     );
+  }
+
+  // ==============================================================
+  // PROCHAIN CRÉNEAU DISPONIBLE (pour le dialog vigil)
+  // ==============================================================
+
+  /// Retourne le prochain créneau ouvert avec des places disponibles
+  /// à partir de maintenant pour la date donnée.
+  Future<AgendaSlot?> getNextAvailableSlot(
+    String queueId,
+    DateTime date,
+  ) async {
+    final slots = await loadSlotsForDate(queueId, date);
+    final now = DateTime.now();
+    final available = slots
+        .where(
+          (s) =>
+              !s.isBlocked &&
+              s.reserved < s.capacity &&
+              s.start.isAfter(now),
+        )
+        .toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
+    return available.isEmpty ? null : available.first;
+  }
+
+  // ==============================================================
+  // 10. GÉNÉRATION IMMÉDIATE DE CRÉNEAUX
+  // ==============================================================
+  Future<int> generateSlotsImmediately({
+    required String queueId,
+    required String timeSlotId,
+    required String startTimeStr,
+    required String endTimeStr,
+    required int duration,
+    required int capacity,
+    required List<int> workingDays,
+    required int maxAdvanceDays,
+    required int maxReservationsPerPerson,
+    required int reservationDeadlineMinutes,
+    String? companyId,
+  }) async {
+    final cid = companyId ?? _companyId;
+    final today = DateTime.now();
+    final queuePath = _firestore
+        .collection('companies')
+        .doc(cid)
+        .collection('queues')
+        .doc(queueId);
+    final slotsRef = queuePath.collection('slots');
+    final dailyStatsRef = queuePath.collection('dailyStats');
+
+    WriteBatch batch = _firestore.batch();
+    int batchCount = 0;
+    int created = 0;
+    final processedDays = <DateTime>[];
+
+    final startParts = startTimeStr.split(':');
+    final endParts = endTimeStr.split(':');
+
+    for (int i = 0; i <= 7; i++) {
+      final date =
+          DateTime(today.year, today.month, today.day).add(Duration(days: i));
+      if (!workingDays.contains(date.weekday)) continue;
+      processedDays.add(date);
+
+      final startOfDay = date;
+      final endOfDay = date.add(const Duration(days: 1));
+      Set<DateTime> existingStarts = {};
+      try {
+        final existingSnap = await slotsRef
+            .where('start', isGreaterThanOrEqualTo: startOfDay)
+            .where('start', isLessThan: endOfDay)
+            .get(const GetOptions(source: Source.cache));
+        existingStarts = existingSnap.docs
+            .map((d) => d.data()['start'] as Timestamp)
+            .map((ts) => ts.toDate())
+            .toSet();
+      } catch (_) {}
+
+      final plageStart = DateTime(
+        date.year, date.month, date.day,
+        int.parse(startParts[0]), int.parse(startParts[1]),
+      );
+      final plageEnd = endTimeStr == '24:00'
+          ? DateTime(date.year, date.month, date.day)
+              .add(const Duration(days: 1))
+          : DateTime(date.year, date.month, date.day,
+              int.parse(endParts[0]), int.parse(endParts[1]));
+
+      DateTime cursor = plageStart;
+      if (i == 0) {
+        final now = DateTime.now();
+        while (cursor.isBefore(now) &&
+            cursor.add(Duration(minutes: duration)).compareTo(plageEnd) <= 0) {
+          cursor = cursor.add(Duration(minutes: duration));
+        }
+      }
+
+      while (cursor.add(Duration(minutes: duration)).compareTo(plageEnd) <= 0) {
+        final slotEnd = cursor.add(Duration(minutes: duration));
+        if (!existingStarts.contains(cursor)) {
+          batch.set(slotsRef.doc(), {
+            'start': cursor,
+            'end': slotEnd,
+            'capacity': capacity,
+            'reserved': 0,
+            'cancelled': 0,
+            'status': 'open',
+            'duration': duration,
+            'isLegacy': false,
+            'timeSlotId': timeSlotId,
+            'maxReservationsPerPerson': maxReservationsPerPerson,
+            'reservationDeadlineMinutes': reservationDeadlineMinutes,
+          });
+          batchCount++;
+          created++;
+          if (batchCount >= 400) {
+            await batch.commit();
+            batch = _firestore.batch();
+            batchCount = 0;
+          }
+        }
+        cursor = slotEnd;
+      }
+    }
+
+    if (batchCount > 0) await batch.commit();
+    await queuePath.update({'slotsLastGenerated': FieldValue.serverTimestamp()});
+
+    try {
+      for (final date in processedDays) {
+        final startOfDay = date;
+        final endOfDay = date.add(const Duration(days: 1));
+        final snap = await slotsRef
+            .where('start', isGreaterThanOrEqualTo: startOfDay)
+            .where('start', isLessThan: endOfDay)
+            .get(const GetOptions(source: Source.cache));
+        if (snap.docs.isEmpty) continue;
+        int totalSlots = 0, totalCapacity = 0, reserved = 0, cancelled = 0;
+        for (final doc in snap.docs) {
+          final d = doc.data();
+          totalSlots++;
+          totalCapacity += (d['capacity'] as int? ?? 0);
+          reserved += (d['reserved'] as int? ?? 0);
+          cancelled += (d['cancelled'] as int? ?? 0);
+        }
+        final dateStr =
+            '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+        await dailyStatsRef.doc(dateStr).set({
+          'date': dateStr,
+          'totalSlots': totalSlots,
+          'totalCapacity': totalCapacity,
+          'available': totalCapacity - reserved,
+          'reserved': reserved,
+          'cancelled': cancelled,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (_) {}
+
+    return created;
+  }
+
+  // ==============================================================
+  // 11. SUPPRIMER LES CRÉNEAUX VIDES FUTURS D'UNE PLAGE
+  // ==============================================================
+  Future<void> deleteEmptyFutureSlotsForTimeSlot(
+    String timeSlotId,
+    String queueId, {
+    String? companyId,
+  }) async {
+    final cid = companyId ?? _companyId;
+    final today =
+        DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+    final slotsRef = _firestore
+        .collection('companies')
+        .doc(cid)
+        .collection('queues')
+        .doc(queueId)
+        .collection('slots');
+
+    QuerySnapshot snap;
+    try {
+      snap =
+          await slotsRef.where('start', isGreaterThanOrEqualTo: today).get();
+    } on FirebaseException catch (e) {
+      if (e.code == 'unavailable') {
+        snap = await slotsRef
+            .where('start', isGreaterThanOrEqualTo: today)
+            .get(const GetOptions(source: Source.cache));
+      } else {
+        rethrow;
+      }
+    }
+
+    WriteBatch batch = _firestore.batch();
+    int batchCount = 0;
+    for (final doc in snap.docs) {
+      final data = doc.data() as Map<String, dynamic>;
+      if (data['timeSlotId'] != timeSlotId) continue;
+      if ((data['reserved'] as int? ?? 0) > 0) continue;
+      batch.delete(doc.reference);
+      batchCount++;
+      if (batchCount >= 400) {
+        await batch.commit();
+        batch = _firestore.batch();
+        batchCount = 0;
+      }
+    }
+    if (batchCount > 0) await batch.commit();
+  }
+
+  // ==============================================================
+  // 12. SUPPRIMER LES CRÉNEAUX VIDES AU-DELÀ D'UN HORIZON
+  // ==============================================================
+  Future<void> deleteEmptyFutureSlotsForTimeSlotBeyondHorizon(
+    String timeSlotId,
+    String queueId,
+    int maxAdvanceDays, {
+    String? companyId,
+  }) async {
+    final cid = companyId ?? _companyId;
+    final today =
+        DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+    final horizon = today.add(const Duration(days: 8));
+    final slotsRef = _firestore
+        .collection('companies')
+        .doc(cid)
+        .collection('queues')
+        .doc(queueId)
+        .collection('slots');
+
+    QuerySnapshot snap;
+    try {
+      snap =
+          await slotsRef.where('start', isGreaterThanOrEqualTo: horizon).get();
+    } on FirebaseException catch (e) {
+      if (e.code == 'unavailable') {
+        snap = await slotsRef
+            .where('start', isGreaterThanOrEqualTo: horizon)
+            .get(const GetOptions(source: Source.cache));
+      } else {
+        rethrow;
+      }
+    }
+
+    WriteBatch batch = _firestore.batch();
+    int batchCount = 0;
+    for (final doc in snap.docs) {
+      final data = doc.data() as Map<String, dynamic>;
+      if (data['timeSlotId'] != timeSlotId) continue;
+      if ((data['reserved'] as int? ?? 0) > 0) continue;
+      batch.delete(doc.reference);
+      batchCount++;
+      if (batchCount >= 400) {
+        await batch.commit();
+        batch = _firestore.batch();
+        batchCount = 0;
+      }
+    }
+    if (batchCount > 0) await batch.commit();
+  }
+
+  // ==============================================================
+  // 13. MISE À JOUR DES PARAMÈTRES SUR LES CRÉNEAUX EXISTANTS
+  // ==============================================================
+  Future<int> updateSlotParameters({
+    required String timeSlotId,
+    required String queueId,
+    required int capacity,
+    required int duration,
+    required int maxReservationsPerPerson,
+    required int reservationDeadlineMinutes,
+    required int maxAdvanceDays,
+    String? companyId,
+  }) async {
+    final cid = companyId ?? _companyId;
+    final today =
+        DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+    final maxDate = today.add(const Duration(days: 8));
+    final slotsRef = _firestore
+        .collection('companies')
+        .doc(cid)
+        .collection('queues')
+        .doc(queueId)
+        .collection('slots');
+
+    QuerySnapshot snap;
+    try {
+      snap = await slotsRef
+          .where('start', isGreaterThanOrEqualTo: today)
+          .where('start', isLessThan: maxDate)
+          .get();
+    } on FirebaseException catch (e) {
+      if (e.code == 'unavailable') {
+        snap = await slotsRef
+            .where('start', isGreaterThanOrEqualTo: today)
+            .where('start', isLessThan: maxDate)
+            .get(const GetOptions(source: Source.cache));
+      } else {
+        rethrow;
+      }
+    }
+
+    WriteBatch batch = _firestore.batch();
+    int batchCount = 0;
+    int updated = 0;
+    for (final doc in snap.docs) {
+      final data = doc.data() as Map<String, dynamic>;
+      if (data['timeSlotId'] != timeSlotId) continue;
+      if (data['status'] != 'open') continue;
+      final reserved = data['reserved'] as int? ?? 0;
+      final safeCapacity = capacity < reserved ? reserved : capacity;
+      batch.update(doc.reference, {
+        'capacity': safeCapacity,
+        'duration': duration,
+        'maxReservationsPerPerson': maxReservationsPerPerson,
+        'reservationDeadlineMinutes': reservationDeadlineMinutes,
+      });
+      batchCount++;
+      updated++;
+      if (batchCount >= 400) {
+        await batch.commit();
+        batch = _firestore.batch();
+        batchCount = 0;
+      }
+    }
+    if (batchCount > 0) await batch.commit();
+    return updated;
   }
 
   // ==============================================================

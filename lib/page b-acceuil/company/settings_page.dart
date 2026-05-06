@@ -3,6 +3,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:baxa/services/booking_constants.dart';
 
+part 'queue_timeslots_page.dart';
+part 'queue_timeslots_dialogs.dart';
+part 'queue_timeslots_logic.dart';
+
 // ============================================================
 // CONSTANTES PARTAGÉES
 // ============================================================
@@ -28,7 +32,6 @@ class _SettingsPageState extends State<SettingsPage> {
     final user = FirebaseAuth.instance.currentUser;
     _companyId = user?.uid;
     setState(() => _isLoading = false);
-    // ── Auto-ouvre le dialog de création si demandé depuis house_page
     if (widget.autoOpenCreateDialog) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _showCreateQueueDialog();
@@ -44,20 +47,29 @@ class _SettingsPageState extends State<SettingsPage> {
       );
     }
     return Scaffold(
-      backgroundColor: Colors.grey.shade50,
+      backgroundColor: const Color(0xFFF6F8FA),
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.white,
         automaticallyImplyLeading: false,
         leading: Navigator.canPop(context)
             ? IconButton(
-                icon: const Icon(Icons.arrow_back, color: Colors.black87),
+                icon: const Icon(Icons.arrow_back_ios_new_rounded,
+                    color: Colors.black87, size: 20),
                 onPressed: () => Navigator.pop(context),
               )
             : null,
         title: const Text(
-          'Gestion des files d\'attente',
-          style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold),
+          'Files d\'attente',
+          style: TextStyle(
+            color: Colors.black87,
+            fontWeight: FontWeight.w700,
+            fontSize: 18,
+          ),
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(color: Colors.grey.shade100, height: 1),
         ),
       ),
       body: _isLoading
@@ -76,56 +88,30 @@ class _SettingsPageState extends State<SettingsPage> {
                   return Center(child: Text('Erreur : ${snapshot.error}'));
                 }
                 final queues = snapshot.data?.docs ?? [];
-                return Column(
-                  children: [
-                    // En-tête compteur
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.grey.shade200,
-                            blurRadius: 4,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: Text(
-                        '${queues.length} file(s) d\'attente',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.grey.shade700,
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      child: queues.isEmpty
-                          ? _buildEmptyState()
-                          : ListView.builder(
-                              padding: const EdgeInsets.all(16),
-                              itemCount: queues.length,
-                              itemBuilder: (context, index) {
-                                final queue = queues[index];
-                                final queueData =
-                                    queue.data() as Map<String, dynamic>;
-                                return _buildQueueCard(queue.id, queueData);
-                              },
-                            ),
-                    ),
-                  ],
+                if (queues.isEmpty) return _buildEmptyState();
+                return ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(16, 20, 16, 100),
+                  itemCount: queues.length,
+                  itemBuilder: (context, index) {
+                    final queue = queues[index];
+                    final queueData = queue.data() as Map<String, dynamic>;
+                    return _buildQueueCard(queue.id, queueData);
+                  },
                 );
               },
             ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _showCreateQueueDialog,
         backgroundColor: _kGreen,
-        icon: const Icon(Icons.add, color: Colors.white),
+        elevation: 3,
+        icon: const Icon(Icons.add_rounded, color: Colors.white),
         label: const Text(
-          'Créer une file',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          'Nouvelle file',
+          style: TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.3,
+          ),
         ),
       ),
     );
@@ -156,9 +142,6 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  // ==============================================================
-  // CARTE D'UNE FILE — avec menu ⋮ (toggle + supprimer)
-  // ==============================================================
   Widget _buildQueueCard(String queueId, Map<String, dynamic> queueData) {
     final name = queueData['name'] ?? 'File sans nom';
     final weekdays =
@@ -168,194 +151,179 @@ class _SettingsPageState extends State<SettingsPage> {
         [1, 2, 3, 4, 5, 6, 7];
     final isActive = queueData['isActive'] ?? true;
 
-    return Card(
+    return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => QueueTimeSlotsPage(
-                companyId: _companyId!,
-                queueId: queueId,
-                queueName: name,
-              ),
-            ),
-          );
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: IntrinsicHeight(
           child: Row(
             children: [
-              // Icône file
               Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: isActive ? _kLightGreen : Colors.grey.shade200,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(
-                  Icons.people_outline,
-                  color: isActive ? _kGreen : Colors.grey.shade500,
-                  size: 28,
-                ),
+                width: 4,
+                color: isActive ? _kGreen : Colors.grey.shade300,
               ),
-              const SizedBox(width: 16),
-              // Nom + jours + badge inactif
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          name,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.black87,
-                          ),
-                        ),
-                        if (!isActive) ...[
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 7,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.orange.shade100,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              'Désactivée',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.orange.shade700,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      _formatWeekdays(weekdays),
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Colors.grey.shade600,
+                child: InkWell(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => QueueTimeSlotsPage(
+                        companyId: _companyId!,
+                        queueId: queueId,
+                        queueName: name,
                       ),
                     ),
-                  ],
-                ),
-              ),
-              // Badge capacité
-              StreamBuilder<int>(
-                stream: _calculateTotalCapacity(queueId),
-                builder: (context, snap) {
-                  if (snap.connectionState == ConnectionState.waiting) {
-                    return SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          Colors.grey.shade400,
-                        ),
-                      ),
-                    );
-                  }
-                  final total = snap.data ?? 0;
-                  return Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: total > 0
-                          ? _kGreen.withOpacity(0.1)
-                          : Colors.grey.shade200,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: total > 0 ? _kGreen : Colors.grey.shade400,
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.groups,
-                          size: 16,
-                          color: total > 0 ? _kGreen : Colors.grey.shade600,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          total.toString(),
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.bold,
-                            color: total > 0 ? _kGreen : Colors.grey.shade600,
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-              const SizedBox(width: 8),
-
-              // ✅ MODIFICATION 5 — Menu ⋮ (remplace la flèche →)
-              PopupMenuButton<String>(
-                icon: Icon(
-                  Icons.more_vert,
-                  size: 20,
-                  color: Colors.grey.shade600,
-                ),
-                onSelected: (value) {
-                  if (value == 'toggle') {
-                    _toggleQueueActive(queueId, queueData);
-                  } else if (value == 'delete') {
-                    _deleteQueue(queueId);
-                  }
-                },
-                itemBuilder: (ctx) => [
-                  PopupMenuItem(
-                    value: 'toggle',
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 20, 8, 20),
                     child: Row(
                       children: [
-                        Icon(
-                          isActive ? Icons.block : Icons.check_circle,
-                          size: 20,
-                          color: isActive ? Colors.orange.shade700 : _kGreen,
+                        Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: isActive
+                                ? _kGreen.withValues(alpha: 0.1)
+                                : Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(
+                            Icons.people_alt_rounded,
+                            color: isActive ? _kGreen : Colors.grey.shade400,
+                            size: 22,
+                          ),
                         ),
                         const SizedBox(width: 12),
-                        Text(
-                          isActive
-                              ? 'Cesser réservations'
-                              : 'Activer réservations',
-                          style: TextStyle(
-                            color: isActive ? Colors.orange.shade700 : _kGreen,
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      name,
+                                      style: const TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w700,
+                                        color: Color(0xFF1A1C2E),
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  if (!isActive) ...[
+                                    const SizedBox(width: 8),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 7,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: Colors.orange.shade50,
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                      child: Text(
+                                        'Pause',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          color: Colors.orange.shade700,
+                                          fontWeight: FontWeight.w700,
+                                          letterSpacing: 0.3,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              Text(
+                                _formatWeekdays(weekdays),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade500,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        StreamBuilder<int>(
+                          stream: _calculateTotalCapacity(queueId),
+                          builder: (context, snap) {
+                            if (snap.connectionState ==
+                                ConnectionState.waiting) {
+                              return const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              );
+                            }
+                            final total = snap.data ?? 0;
+                            if (total == 0) return const SizedBox.shrink();
+                            return Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 10,
+                              ),
+                              decoration: BoxDecoration(
+                                color: _kGreen.withValues(alpha: 0.08),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.groups_rounded,
+                                      size: 20, color: _kGreen),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '$total',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: _kGreen,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                        const SizedBox(width: 6),
+                        GestureDetector(
+                          onTap: () => _showQueueActions(queueId, queueData),
+                          child: Container(
+                            width: 36,
+                            height: 36,
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Icon(
+                              Icons.more_vert_rounded,
+                              color: Colors.grey.shade500,
+                              size: 20,
+                            ),
                           ),
                         ),
                       ],
                     ),
                   ),
-                  PopupMenuItem(
-                    value: 'delete',
-                    child: Row(
-                      children: const [
-                        Icon(Icons.delete, size: 20, color: Colors.red),
-                        SizedBox(width: 12),
-                        Text('Supprimer', style: TextStyle(color: Colors.red)),
-                      ],
-                    ),
-                  ),
-                ],
+                ),
               ),
             ],
           ),
@@ -364,9 +332,103 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  // ==============================================================
-  // TOGGLE ACTIF / INACTIF
-  // ==============================================================
+  void _showQueueActions(String queueId, Map<String, dynamic> queueData) {
+    final isActive = queueData['isActive'] ?? true;
+    final name = queueData['name'] ?? 'File';
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              name,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1A1C2E),
+              ),
+            ),
+            const SizedBox(height: 20),
+            _actionTile(
+              icon: isActive
+                  ? Icons.pause_circle_outline_rounded
+                  : Icons.play_circle_outline_rounded,
+              label: isActive
+                  ? 'Suspendre les réservations'
+                  : 'Réactiver la file',
+              color: isActive ? Colors.orange.shade600 : _kGreen,
+              onTap: () {
+                Navigator.pop(context);
+                _toggleQueueActive(queueId, queueData);
+              },
+            ),
+            const SizedBox(height: 10),
+            _actionTile(
+              icon: Icons.delete_outline_rounded,
+              label: 'Supprimer la file',
+              color: Colors.red.shade400,
+              onTap: () {
+                Navigator.pop(context);
+                _deleteQueue(queueId);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _actionTile({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withValues(alpha: 0.15)),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: 22),
+            const SizedBox(width: 14),
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w600,
+                fontSize: 15,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _toggleQueueActive(
     String queueId,
     Map<String, dynamic> queueData,
@@ -399,11 +461,7 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  // ==============================================================
-  // SUPPRIMER UNE FILE — vérifie les réservations avant
-  // ==============================================================
   Future<void> _deleteQueue(String queueId) async {
-    // Vérifier s'il existe des réservations confirmées
     final reservationsSnap = await _firestore
         .collection('reservations')
         .where('queueId', isEqualTo: queueId)
@@ -414,7 +472,6 @@ class _SettingsPageState extends State<SettingsPage> {
     if (!mounted) return;
 
     if (reservationsSnap.docs.isNotEmpty) {
-      // Toast rouge 1.5s — impossible de supprimer
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('❌ Cette file contient des réservations'),
@@ -425,7 +482,6 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
 
-    // Confirmation avant suppression
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -473,10 +529,6 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  // ==============================================================
-  // CAPACITÉ TOTALE (pour le badge sur la carte)
-  // Utilise timeSlots (config) plutôt que les slots générés
-  // ==============================================================
   Stream<int> _calculateTotalCapacity(String queueId) {
     return _firestore
         .collection('companies')
@@ -522,182 +574,312 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  // ==============================================================
-  // DIALOG CRÉER UNE FILE
-  // ==============================================================
   Future<void> _showCreateQueueDialog() async {
     final nameCtrl = TextEditingController();
     List<int> selectedWeekdays = [1, 2, 3, 4, 5];
-    int selectedMaxActive = kDefaultMaxActivePerUser; // défaut = 1
+    int selectedMaxActive = kDefaultMaxActivePerUser;
+    String? nameError;
 
-    final result = await showDialog<bool>(
+    final result = await showModalBottomSheet<bool>(
       context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setD) => AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          title: const Text('Créer une file d\'attente'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TextField(
-                  controller: nameCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Nom de la file',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.label),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Jours de la semaine',
-                  style: TextStyle(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  children: List.generate(7, (index) {
-                    final day = index + 1;
-                    const labels = [
-                      'Lun',
-                      'Mar',
-                      'Mer',
-                      'Jeu',
-                      'Ven',
-                      'Sam',
-                      'Dim',
-                    ];
-                    return FilterChip(
-                      label: Text(labels[index]),
-                      selected: selectedWeekdays.contains(day),
-                      selectedColor: _kLightGreen,
-                      checkmarkColor: _kGreen,
-                      onSelected: (selected) {
-                        setD(() {
-                          if (selected) {
-                            selectedWeekdays.add(day);
-                          } else {
-                            selectedWeekdays.remove(day);
-                          }
-                          selectedWeekdays.sort();
-                        });
-                      },
-                    );
-                  }),
-                ),
-
-                const SizedBox(height: 20),
-
-                // ── Réservations actives max par client ──────────
-                const Text(
-                  'Réservations actives max par client',
-                  style: TextStyle(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Nombre de créneaux actifs simultanés autorisés par personne dans cette file.',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
-                ),
-                const SizedBox(height: 10),
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: List.generate(5, (i) {
-                      final val = i + 1;
-                      final isSelected = selectedMaxActive == val;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: GestureDetector(
-                          onTap: () => setD(() => selectedMaxActive = val),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            width: 44,
-                            height: 44,
-                            decoration: BoxDecoration(
-                              color: isSelected
-                                  ? _kGreen
-                                  : Colors.grey.shade100,
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: isSelected
-                                    ? _kGreen
-                                    : Colors.grey.shade300,
-                                width: 1.5,
-                              ),
-                            ),
-                            alignment: Alignment.center,
-                            child: Text(
-                              '$val',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                                color: isSelected
-                                    ? Colors.white
-                                    : Colors.grey.shade700,
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    }),
-                  ),
-                ),
-                if (selectedMaxActive > 1) ...[
-                  const SizedBox(height: 8),
+        builder: (ctx, setD) {
+          const dayLabels = ['L', 'M', 'M', 'J', 'V', 'S', 'D'];
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(ctx).viewInsets.bottom +
+                  MediaQuery.of(ctx).padding.bottom,
+            ),
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(height: 12),
                   Container(
-                    padding: const EdgeInsets.all(10),
+                    width: 36,
+                    height: 4,
                     decoration: BoxDecoration(
-                      color: Colors.orange.shade50,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.orange.shade200),
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  Container(
+                    margin: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: _kGreen,
+                      borderRadius: BorderRadius.circular(14),
                     ),
                     child: Row(
                       children: [
-                        Icon(
-                          Icons.info_outline_rounded,
-                          color: Colors.orange.shade700,
-                          size: 16,
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.2),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(
+                            Icons.people_alt_rounded,
+                            color: Colors.white,
+                            size: 20,
+                          ),
                         ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Les créneaux de ce client ne devront pas se chevaucher.',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Colors.orange.shade800,
-                            ),
+                        const SizedBox(width: 12),
+                        const Text(
+                          'Nouvelle file d\'attente',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 16,
                           ),
                         ),
                       ],
                     ),
                   ),
+                  Flexible(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          TextField(
+                            controller: nameCtrl,
+                            textCapitalization: TextCapitalization.sentences,
+                            onChanged: (_) {
+                              if (nameError != null) {
+                                setD(() => nameError = null);
+                              }
+                            },
+                            decoration: InputDecoration(
+                              hintText: 'Ex : Consultation, Caisse principale…',
+                              errorText: nameError,
+                              hintStyle:
+                                  TextStyle(color: Colors.grey.shade400),
+                              prefixIcon: Icon(
+                                Icons.label_outline_rounded,
+                                color: _kGreen,
+                              ),
+                              filled: true,
+                              fillColor: Colors.grey.shade50,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide:
+                                    BorderSide(color: Colors.grey.shade200),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide:
+                                    BorderSide(color: Colors.grey.shade200),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(
+                                  color: _kGreen,
+                                  width: 1.5,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          const Text(
+                            'Jours d\'ouverture',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13,
+                              color: Color(0xFF1A1C2E),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: List.generate(7, (index) {
+                              final day = index + 1;
+                              final selected =
+                                  selectedWeekdays.contains(day);
+                              return GestureDetector(
+                                onTap: () => setD(() {
+                                  if (selected) {
+                                    selectedWeekdays.remove(day);
+                                  } else {
+                                    selectedWeekdays.add(day);
+                                  }
+                                  selectedWeekdays.sort();
+                                }),
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 180),
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: selected
+                                        ? _kGreen
+                                        : Colors.grey.shade100,
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(
+                                      color: selected
+                                          ? _kGreen
+                                          : Colors.grey.shade200,
+                                    ),
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Text(
+                                    dayLabels[index],
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: selected
+                                          ? Colors.white
+                                          : Colors.grey.shade500,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }),
+                          ),
+                          const SizedBox(height: 20),
+                          const Text(
+                            'Réservations simultanées max par client',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13,
+                              color: Color(0xFF1A1C2E),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Nombre de créneaux actifs en même temps dans cet établissement.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey.shade500,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          Row(
+                            children: List.generate(5, (i) {
+                              final val = i + 1;
+                              final isSelected = selectedMaxActive == val;
+                              return Expanded(
+                                child: Padding(
+                                  padding:
+                                      EdgeInsets.only(right: i < 4 ? 8 : 0),
+                                  child: GestureDetector(
+                                    onTap: () =>
+                                        setD(() => selectedMaxActive = val),
+                                    child: AnimatedContainer(
+                                      duration:
+                                          const Duration(milliseconds: 180),
+                                      height: 44,
+                                      decoration: BoxDecoration(
+                                        color: isSelected
+                                            ? _kGreen
+                                            : Colors.grey.shade100,
+                                        borderRadius:
+                                            BorderRadius.circular(10),
+                                        border: Border.all(
+                                          color: isSelected
+                                              ? _kGreen
+                                              : Colors.grey.shade200,
+                                        ),
+                                      ),
+                                      alignment: Alignment.center,
+                                      child: Text(
+                                        '$val',
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w700,
+                                          color: isSelected
+                                              ? Colors.white
+                                              : Colors.grey.shade500,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }),
+                          ),
+                          if (selectedMaxActive > 1) ...[
+                            const SizedBox(height: 10),
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: Colors.orange.shade50,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.info_outline_rounded,
+                                      color: Colors.orange.shade600,
+                                      size: 16),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      'Les créneaux d\'un même client ne pourront pas se chevaucher.',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.orange.shade800,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 24),
+                          SizedBox(
+                            width: double.infinity,
+                            height: 52,
+                            child: ElevatedButton(
+                              onPressed: () {
+                                if (nameCtrl.text.trim().isEmpty) {
+                                  setD(() =>
+                                      nameError = 'Veuillez entrer un nom');
+                                  return;
+                                }
+                                if (selectedWeekdays.isEmpty) {
+                                  ScaffoldMessenger.of(ctx).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Sélectionnez au moins un jour',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
+                                Navigator.pop(ctx, true);
+                              },
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: _kGreen,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                elevation: 0,
+                              ),
+                              child: const Text(
+                                'Créer la file',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 15,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                        ],
+                      ),
+                    ),
+                  ),
                 ],
-              ],
+              ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Annuler'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                if (nameCtrl.text.trim().isEmpty || selectedWeekdays.isEmpty) {
-                  ScaffoldMessenger.of(ctx).showSnackBar(
-                    const SnackBar(content: Text('Remplissez tous les champs')),
-                  );
-                  return;
-                }
-                Navigator.pop(ctx, true);
-              },
-              style: ElevatedButton.styleFrom(backgroundColor: _kGreen),
-              child: const Text('Créer', style: TextStyle(color: Colors.white)),
-            ),
-          ],
-        ),
+          );
+        },
       ),
     );
     if (result != true) return;
@@ -716,10 +898,10 @@ class _SettingsPageState extends State<SettingsPage> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('File créée ✅ Ajoutez maintenant une plage horaire'),
+          content:
+              Text('File créée ✅ Ajoutez maintenant une plage horaire'),
         ),
       );
-      // ── Enchaînement automatique → page plages avec dialog auto-ouvert
       await Navigator.push(
         context,
         MaterialPageRoute(
@@ -727,7 +909,7 @@ class _SettingsPageState extends State<SettingsPage> {
             companyId: _companyId!,
             queueId: docRef.id,
             queueName: nameCtrl.text.trim(),
-            autoOpenSlotDialog: true, // ← ouvre le dialog automatiquement
+            autoOpenSlotDialog: true,
           ),
         ),
       );
@@ -759,820 +941,99 @@ class QueueTimeSlotsPage extends StatefulWidget {
   State<QueueTimeSlotsPage> createState() => _QueueTimeSlotsPageState();
 }
 
-class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-
-  // Jours par défaut de la file parente (chargés une fois)
-  List<int> _queueWeekdays = [1, 2, 3, 4, 5];
-
-  @override
-  void initState() {
-    super.initState();
-    _loadQueueWeekdays();
-    // ── Auto-ouvre le dialog de création de plage si demandé
-    if (widget.autoOpenSlotDialog) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _showTimeSlotDialog();
-      });
-    }
-  }
-
-  Future<void> _loadQueueWeekdays() async {
-    try {
-      final doc = await _firestore
-          .collection('companies')
-          .doc(widget.companyId)
-          .collection('queues')
-          .doc(widget.queueId)
-          .get();
-      if (doc.exists) {
-        final data = doc.data() as Map<String, dynamic>;
-        final days = (data['weekdays'] as List<dynamic>?)
-            ?.map((e) => e as int)
-            .toList();
-        if (days != null && mounted) {
-          setState(() => _queueWeekdays = days);
-        }
-      }
-    } catch (_) {}
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.grey.shade50,
-      appBar: AppBar(
-        elevation: 0,
-        backgroundColor: _kGreen,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Plages horaires',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            Text(
-              widget.queueName,
-              style: const TextStyle(color: Colors.white70, fontSize: 14),
-            ),
-          ],
-        ),
-      ),
-      body: Column(
-        children: [
-          // ✅ MODIFICATION 3 — Bannière capacité groupée par jour
-          StreamBuilder<List<_DayCapacity>>(
-            stream: _calculateCapacityByDay(),
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const SizedBox.shrink();
-              }
-              final days = snapshot.data ?? [];
-              return Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      _kLightGreen.withOpacity(0.3),
-                      _kLightGreen.withOpacity(0.1),
-                    ],
-                  ),
-                  border: Border(
-                    bottom: BorderSide(color: Colors.grey.shade200, width: 1),
-                  ),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: _kGreen.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(Icons.groups, color: _kGreen, size: 24),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Capacité d\'accueil journalière',
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: Colors.black54,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          if (days.isEmpty)
-                            Text(
-                              'Aucune plage configurée',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.grey.shade500,
-                              ),
-                            )
-                          else
-                            ...days.map(
-                              (d) => Padding(
-                                padding: const EdgeInsets.only(bottom: 3),
-                                child: Text(
-                                  d.capacity > 0
-                                      ? '• ${d.label} : ${d.capacity} personnes'
-                                      : '• ${d.label} : Fermé',
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: d.capacity > 0
-                                        ? _kGreen
-                                        : Colors.grey.shade500,
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    if (days.isEmpty || days.every((d) => d.capacity == 0))
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.shade100,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.warning_amber,
-                              size: 16,
-                              color: Colors.orange.shade700,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'Créer des plages',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.orange.shade700,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              );
-            },
-          ),
-
-          // Liste des plages horaires
-          Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: _firestore
-                  .collection('companies')
-                  .doc(widget.companyId)
-                  .collection('queues')
-                  .doc(widget.queueId)
-                  .collection('timeSlots')
-                  .snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                final timeSlots = snapshot.data?.docs ?? [];
-                if (timeSlots.isEmpty) return _buildEmptyState();
-                return ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: timeSlots.length,
-                  itemBuilder: (context, index) {
-                    final slot = timeSlots[index];
-                    final slotData = slot.data() as Map<String, dynamic>;
-                    return _buildTimeSlotCard(slot.id, slotData);
-                  },
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showTimeSlotDialog,
-        backgroundColor: _kGreen,
-        icon: const Icon(Icons.add, color: Colors.white),
-        label: const Text(
-          'Ajouter une plage',
-          style: TextStyle(color: Colors.white),
-        ),
-      ),
-    );
-  }
-
-  // ==============================================================
-  // MODIFICATION 3 — CAPACITÉ GROUPÉE PAR JOUR
-  // Calcul fait une seule fois à partir des timeSlots (config)
-  // ==============================================================
-  Stream<List<_DayCapacity>> _calculateCapacityByDay() {
-    return _firestore
-        .collection('companies')
-        .doc(widget.companyId)
-        .collection('queues')
-        .doc(widget.queueId)
-        .collection('timeSlots')
-        .snapshots()
-        .map((snapshot) {
-          // Capacité totale par numéro de jour (1=Lun … 7=Dim)
-          final Map<int, int> capacityPerDay = {
-            1: 0,
-            2: 0,
-            3: 0,
-            4: 0,
-            5: 0,
-            6: 0,
-            7: 0,
-          };
-
-          for (final doc in snapshot.docs) {
-            final d = doc.data();
-            final workingDays =
-                (d['workingDays'] as List<dynamic>?)
-                    ?.map((e) => e as int)
-                    .toList() ??
-                _queueWeekdays; // hérite des jours de la file
-            final start = d['startTime'] as String? ?? '00:00';
-            final end = d['endTime'] as String? ?? '00:00';
-            final duration =
-                (d['serviceDurationMinutes'] as num?)?.toInt() ?? 0;
-            final capacity = (d['capacityPerSlot'] as num?)?.toInt() ?? 0;
-
-            if (duration <= 0) continue;
-            final slotsCount = _countSlots(start, end, duration);
-            final slotCapacity = slotsCount * capacity;
-
-            for (final day in workingDays) {
-              if (capacityPerDay.containsKey(day)) {
-                capacityPerDay[day] = capacityPerDay[day]! + slotCapacity;
-              }
-            }
-          }
-
-          return _groupDaysByCapacity(capacityPerDay);
-        });
-  }
-
-  /// Groupe les jours consécutifs ayant la même capacité
-  /// Ex: Lun=332, Mar=332, Mer=332, Jeu=220 → ["Lun–Mer: 332", "Jeu: 220"]
-  List<_DayCapacity> _groupDaysByCapacity(Map<int, int> perDay) {
-    const dayLabels = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'];
-    final result = <_DayCapacity>[];
-
-    int? groupStart;
-    int? groupEnd;
-    int? groupCapacity;
-
-    void flush() {
-      if (groupStart == null) return;
-      final label = groupStart == groupEnd
-          ? dayLabels[groupStart! - 1]
-          : '${dayLabels[groupStart! - 1]}–${dayLabels[groupEnd! - 1]}';
-      result.add(_DayCapacity(label: label, capacity: groupCapacity!));
-      groupStart = null;
-      groupEnd = null;
-      groupCapacity = null;
-    }
-
-    for (int day = 1; day <= 7; day++) {
-      final cap = perDay[day] ?? 0;
-      if (groupStart == null) {
-        groupStart = day;
-        groupEnd = day;
-        groupCapacity = cap;
-      } else if (cap == groupCapacity) {
-        groupEnd = day;
-      } else {
-        flush();
-        groupStart = day;
-        groupEnd = day;
-        groupCapacity = cap;
-      }
-    }
-    flush();
-
-    return result;
-  }
-
-  int _countSlots(String start, String end, int duration) {
-    try {
-      final sp = start.split(':');
-      final ep = end.split(':');
-      final startMin = int.parse(sp[0]) * 60 + int.parse(sp[1]);
-      final endMin = int.parse(ep[0]) * 60 + int.parse(ep[1]);
-      if (duration <= 0) return 0;
-      return ((endMin - startMin) / duration).floor();
-    } catch (_) {
-      return 0;
-    }
-  }
-
-  Widget _buildEmptyState() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.schedule, size: 80, color: Colors.grey.shade400),
-          const SizedBox(height: 24),
-          const Text(
-            'Aucune plage horaire',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w600,
-              color: Colors.black87,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Créez votre première plage horaire',
-            style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ==============================================================
-  // MODIFICATION 2 — CARTE PLAGE HORAIRE simplifiée
-  // Affiche uniquement la capacité totale (Z) pas X × Y = Z
-  // ==============================================================
-  Widget _buildTimeSlotCard(String slotId, Map<String, dynamic> slotData) {
-    final startTime = slotData['startTime'] ?? '00:00';
-    final endTime = slotData['endTime'] ?? '00:00';
-    final duration = slotData['serviceDurationMinutes'] ?? 0;
-    final capacity = slotData['capacityPerSlot'] ?? 0;
-    final workingDays =
-        (slotData['workingDays'] as List<dynamic>?)
-            ?.map((e) => e as int)
-            .toList() ??
-        _queueWeekdays;
-
-    // ✅ MODIFICATION 2 — uniquement la capacité totale
-    final slotsCount = _countSlots(startTime, endTime, duration);
-    final totalCapacity = slotsCount * capacity;
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: _kLightGreen.withOpacity(0.5),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Icon(
-                    Icons.access_time,
-                    color: _kGreen,
-                    size: 20,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '$startTime - $endTime',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      // ✅ MODIFICATION 2 — juste "X pers." pas "A × B = X pers."
-                      Text(
-                        '$totalCapacity pers.',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Colors.grey.shade600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                PopupMenuButton<String>(
-                  icon: Icon(Icons.more_vert, color: Colors.grey.shade600),
-                  onSelected: (value) {
-                    if (value == 'edit') {
-                      _showTimeSlotDialog(slotId: slotId, slotData: slotData);
-                    } else if (value == 'delete') {
-                      _deleteSlot(slotId);
-                    }
-                  },
-                  itemBuilder: (ctx) => [
-                    const PopupMenuItem(
-                      value: 'edit',
-                      child: Row(
-                        children: [
-                          Icon(Icons.edit, size: 20),
-                          SizedBox(width: 12),
-                          Text('Modifier'),
-                        ],
-                      ),
-                    ),
-                    const PopupMenuItem(
-                      value: 'delete',
-                      child: Row(
-                        children: [
-                          Icon(Icons.delete, size: 20, color: Colors.red),
-                          SizedBox(width: 12),
-                          Text(
-                            'Supprimer',
-                            style: TextStyle(color: Colors.red),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const Divider(height: 24),
-            Wrap(
-              spacing: 12,
-              runSpacing: 8,
-              children: [
-                _buildInfoChip(Icons.timer, '$duration min/créneau'),
-                _buildInfoChip(Icons.people, '$capacity pers./créneau'),
-                // ✅ Afficher les jours de cette plage
-                _buildInfoChip(
-                  Icons.calendar_today,
-                  _formatWeekdays(workingDays),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _formatWeekdays(List<int> weekdays) {
-    const labels = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'];
-    if (weekdays.length == 7) return 'Tous les jours';
-    return weekdays.map((i) => labels[i - 1]).join(', ');
-  }
-
-  Widget _buildInfoChip(IconData icon, String label) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: Colors.grey.shade700),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ==============================================================
-  // MODIFICATION 1 + 4 — DIALOG PLAGE HORAIRE
-  // • _generateSlots() supprimé → Cloud Function prend le relais
-  // • Ajout du sélecteur de jours ouvrés par plage
-  // ==============================================================
-  Future<void> _showTimeSlotDialog({
-    String? slotId,
-    Map<String, dynamic>? slotData,
-  }) async {
-    TimeOfDay startTime = slotData != null
-        ? _parseTimeOfDay(slotData['startTime'] ?? '09:00')
-        : const TimeOfDay(hour: 9, minute: 0);
-    TimeOfDay endTime = slotData != null
-        ? _parseTimeOfDay(slotData['endTime'] ?? '17:00')
-        : const TimeOfDay(hour: 17, minute: 0);
-
-    final durationCtrl = TextEditingController(
-      text: slotData?['serviceDurationMinutes']?.toString() ?? '15',
-    );
-    final capacityCtrl = TextEditingController(
-      text: slotData?['capacityPerSlot']?.toString() ?? '1',
-    );
-    final maxReservationsCtrl = TextEditingController(
-      text:
-          slotData?['maxReservationsPerPerson']?.toString() ??
-          '$kDefaultMaxReservationsPerPerson',
-    );
-    final deadlineCtrl = TextEditingController(
-      text: slotData?['reservationDeadlineMinutes']?.toString() ?? '10',
-    );
-    final advanceCtrl = TextEditingController(
-      text: slotData?['maxAdvanceDays']?.toString() ?? '7',
-    );
-
-    // ✅ MODIFICATION 4 — jours ouvrés par plage, hérite de la file
-    List<int> selectedWorkingDays = slotData?['workingDays'] != null
-        ? List<int>.from(slotData!['workingDays'])
-        : List<int>.from(_queueWeekdays);
-
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setD) => AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          title: Text(
-            slotId == null ? 'Créer une plage horaire' : 'Modifier la plage',
-          ),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Sélection heures
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () async {
-                          final t = await showTimePicker(
-                            context: ctx,
-                            initialTime: startTime,
-                          );
-                          if (t != null) setD(() => startTime = t);
-                        },
-                        icon: const Icon(Icons.access_time, size: 18),
-                        label: Text(_formatTime(startTime)),
-                      ),
-                    ),
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 8),
-                      child: Text('–'),
-                    ),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () async {
-                          final t = await showTimePicker(
-                            context: ctx,
-                            initialTime: endTime,
-                          );
-                          if (t != null) setD(() => endTime = t);
-                        },
-                        icon: const Icon(Icons.access_time, size: 18),
-                        label: Text(_formatTime(endTime)),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-
-                // ✅ MODIFICATION 4 — sélecteur jours ouvrés pour cette plage
-                const Text(
-                  'Jours d\'ouverture de cette plage',
-                  style: TextStyle(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Par défaut : hérite des jours de la file',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  children: List.generate(7, (index) {
-                    final day = index + 1;
-                    const labels = [
-                      'Lun',
-                      'Mar',
-                      'Mer',
-                      'Jeu',
-                      'Ven',
-                      'Sam',
-                      'Dim',
-                    ];
-                    return FilterChip(
-                      label: Text(labels[index]),
-                      selected: selectedWorkingDays.contains(day),
-                      selectedColor: _kLightGreen,
-                      checkmarkColor: _kGreen,
-                      onSelected: (selected) {
-                        setD(() {
-                          if (selected) {
-                            selectedWorkingDays.add(day);
-                          } else {
-                            selectedWorkingDays.remove(day);
-                          }
-                          selectedWorkingDays.sort();
-                        });
-                      },
-                    );
-                  }),
-                ),
-                const SizedBox(height: 16),
-
-                TextField(
-                  controller: durationCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Durée par créneau (minutes)',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.timer),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: capacityCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Capacité par créneau',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.people),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: maxReservationsCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Max réservations/personne (optionnel)',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.person_pin),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: deadlineCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Délai minimum (minutes)',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.schedule),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: advanceCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Anticipation max (jours)',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.calendar_today),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Annuler'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              style: ElevatedButton.styleFrom(backgroundColor: _kGreen),
-              child: Text(
-                slotId == null ? 'Créer' : 'Modifier',
-                style: const TextStyle(color: Colors.white),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    if (result != true) return;
-
-    // ✅ MODIFICATION 1 — plus de _generateSlots()
-    // La Cloud Function génère automatiquement chaque nuit à 2h30
-    final timeSlotData = {
-      'startTime': _formatTime(startTime),
-      'endTime': _formatTime(endTime),
-      'serviceDurationMinutes': int.tryParse(durationCtrl.text) ?? 10,
-      'capacityPerSlot': int.tryParse(capacityCtrl.text) ?? 1,
-      'workingDays': selectedWorkingDays, // ✅ MODIFICATION 4
-      'maxReservationsPerPerson':
-          int.tryParse(maxReservationsCtrl.text) ??
-          kDefaultMaxReservationsPerPerson,
-      'reservationDeadlineMinutes': int.tryParse(deadlineCtrl.text) ?? 0,
-      'maxAdvanceDays': int.tryParse(advanceCtrl.text) ?? 7,
-      'updatedAt': FieldValue.serverTimestamp(),
-    };
-
-    try {
-      final slotsRef = _firestore
-          .collection('companies')
-          .doc(widget.companyId)
-          .collection('queues')
-          .doc(widget.queueId)
-          .collection('timeSlots');
-
-      if (slotId == null) {
-        await slotsRef.add(timeSlotData);
-      } else {
-        await slotsRef.doc(slotId).update(timeSlotData);
-      }
-
-      // ✅ MODIFICATION 1 — Créneaux générés automatiquement par
-      // la Cloud Function (quotidienne à 2h30)
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Plage horaire enregistrée ✅')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
-    }
-  }
-
-  TimeOfDay _parseTimeOfDay(String time) {
-    final parts = time.split(':');
-    return TimeOfDay(hour: int.parse(parts[0]), minute: int.parse(parts[1]));
-  }
-
-  String _formatTime(TimeOfDay time) {
-    return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
-  }
-
-  Future<void> _deleteSlot(String slotId) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Supprimer cette plage ?'),
-        content: const Text(
-          'Les créneaux futurs associés seront supprimés automatiquement par la Cloud Function.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Annuler'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text(
-              'Supprimer',
-              style: TextStyle(color: Colors.white),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (confirm != true) return;
-    try {
-      await _firestore
-          .collection('companies')
-          .doc(widget.companyId)
-          .collection('queues')
-          .doc(widget.queueId)
-          .collection('timeSlots')
-          .doc(slotId)
-          .delete();
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Plage horaire supprimée')));
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
-    }
-  }
-}
-
 // ============================================================
 // MODÈLE INTERNE — un groupe de jours avec leur capacité
 // ============================================================
 class _DayCapacity {
-  final String label; // ex: "Lun–Mer" ou "Jeu"
-  final int capacity; // ex: 332 ou 0
+  final String label;
+  final int capacity;
 
   const _DayCapacity({required this.label, required this.capacity});
+}
+
+// ============================================================
+// WIDGET DÉFILANT POUR SÉLECTION NUMÉRIQUE
+// ============================================================
+class _NumberPickerDial extends StatefulWidget {
+  final int min;
+  final int max;
+  final int value;
+  final String suffix;
+  final ValueChanged<int> onChanged;
+
+  const _NumberPickerDial({
+    required this.min,
+    required this.max,
+    required this.value,
+    required this.suffix,
+    required this.onChanged,
+  });
+
+  @override
+  State<_NumberPickerDial> createState() => _NumberPickerDialState();
+}
+
+class _NumberPickerDialState extends State<_NumberPickerDial> {
+  late FixedExtentScrollController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = FixedExtentScrollController(
+      initialItem: (widget.value - widget.min).clamp(
+        0,
+        widget.max - widget.min,
+      ),
+    );
+  }
+
+  @override
+  void didUpdateWidget(_NumberPickerDial oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.value != widget.value) {
+      _ctrl.animateToItem(
+        (widget.value - widget.min).clamp(0, widget.max - widget.min),
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 110,
+      child: ListWheelScrollView.useDelegate(
+        controller: _ctrl,
+        itemExtent: 36,
+        physics: const FixedExtentScrollPhysics(),
+        perspective: 0.003,
+        onSelectedItemChanged: (i) => widget.onChanged(i + widget.min),
+        childDelegate: ListWheelChildBuilderDelegate(
+          childCount: widget.max - widget.min + 1,
+          builder: (context, index) {
+            final val = index + widget.min;
+            final isSelected = val == widget.value;
+            return Center(
+              child: Text(
+                '$val ${widget.suffix}',
+                style: TextStyle(
+                  fontSize: isSelected ? 18 : 13,
+                  fontWeight:
+                      isSelected ? FontWeight.bold : FontWeight.w400,
+                  color: isSelected ? _kGreen : Colors.grey.shade400,
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
 }

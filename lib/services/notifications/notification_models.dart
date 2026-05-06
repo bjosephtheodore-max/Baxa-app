@@ -100,12 +100,12 @@ class NotificationHistory {
       queueId: data['queueId'] ?? '',
       queueName: data['queueName'] ?? '',
       slotId: data['slotId'] ?? '',
-      slotStart: (data['slotStart'] as Timestamp).toDate(),
-      slotEnd: (data['slotEnd'] as Timestamp).toDate(),
+      slotStart: data['slotStart'] != null ? (data['slotStart'] as Timestamp).toDate() : DateTime.now(),
+      slotEnd: data['slotEnd'] != null ? (data['slotEnd'] as Timestamp).toDate() : DateTime.now(),
       totalReservations: data['totalReservations'] ?? 0,
       totalCancellations: data['totalCancellations'] ?? 0,
       servedEstimate: data['servedEstimate'] ?? 0,
-      createdAt: (data['createdAt'] as Timestamp).toDate(),
+      createdAt: data['createdAt'] != null ? (data['createdAt'] as Timestamp).toDate() : DateTime.now(),
     );
   }
 

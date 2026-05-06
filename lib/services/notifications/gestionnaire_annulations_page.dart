@@ -122,8 +122,29 @@ class CancellationHandler {
         transaction.update(reservationRef, {
           'status': 'cancelled',
           'cancelledAt': FieldValue.serverTimestamp(),
-          'cancellationSource': 'notification', // Tracer la source
+          'cancellationSource': 'notification',
         });
+
+        // 5. Mettre à jour dailyStats atomiquement
+        final slotStartTs = reservationData['slotStart'] as Timestamp?;
+        if (slotStartTs != null) {
+          final slotStart = slotStartTs.toDate().toLocal();
+          final dateStr = '${slotStart.year}-'
+              '${slotStart.month.toString().padLeft(2, '0')}-'
+              '${slotStart.day.toString().padLeft(2, '0')}';
+          final dailyStatsRef = _firestore
+              .collection('companies')
+              .doc(companyId)
+              .collection('queues')
+              .doc(queueId)
+              .collection('dailyStats')
+              .doc(dateStr);
+          transaction.set(dailyStatsRef, {
+            'reserved': FieldValue.increment(-1),
+            'available': FieldValue.increment(1),
+            'cancelled': FieldValue.increment(1),
+          }, SetOptions(merge: true));
+        }
       });
 
       // 5. Annuler toutes les notifications programmées pour cette réservation

@@ -41,6 +41,8 @@ class _SlotsPageState extends State<SlotsPage> {
 
   /// Config de la file (chargée une fois)
   int _maxActivePerUser = kDefaultMaxActivePerUser;
+  int _maxAdvanceDays = 5;
+  List<int> _queueWeekdays = [1, 2, 3, 4, 5, 6, 7];
   bool _configLoaded = false;
 
   @override
@@ -62,6 +64,12 @@ class _SlotsPageState extends State<SlotsPage> {
         setState(() {
           _maxActivePerUser =
               (data['maxActivePerUser'] as int?) ?? kDefaultMaxActivePerUser;
+          _maxAdvanceDays = (data['maxAdvanceDays'] as int?) ?? 5;
+          _queueWeekdays =
+              (data['weekdays'] as List<dynamic>?)
+                  ?.map((e) => e as int)
+                  .toList() ??
+              [1, 2, 3, 4, 5, 6, 7];
           _configLoaded = true;
         });
       }
@@ -92,6 +100,39 @@ class _SlotsPageState extends State<SlotsPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF6F8FA),
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor: Colors.white,
+        iconTheme: const IconThemeData(color: Color(0xFF1A1C2E)),
+        titleSpacing: 4,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Creneaux disponibles',
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.grey.shade400,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            Text(
+              widget.queueName,
+              style: const TextStyle(
+                fontSize: 15,
+                color: Color(0xFF1A1C2E),
+                fontWeight: FontWeight.w700,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(color: Colors.grey.shade100, height: 1),
+        ),
+      ),
       body: StreamBuilder<QuerySnapshot>(
         stream: _fs
             .collection('companies')
@@ -99,6 +140,16 @@ class _SlotsPageState extends State<SlotsPage> {
             .collection('queues')
             .doc(widget.queueId)
             .collection('slots')
+            .where(
+              'start',
+              isLessThan: Timestamp.fromDate(
+                DateTime(
+                  DateTime.now().year,
+                  DateTime.now().month,
+                  DateTime.now().day,
+                ).add(Duration(days: _maxAdvanceDays + 1)),
+              ),
+            )
             .orderBy('start')
             .snapshots(),
         builder: (context, snapshot) {
@@ -106,28 +157,30 @@ class _SlotsPageState extends State<SlotsPage> {
           List<QueryDocumentSnapshot> allFutureSlots = [];
           List<DateTime> availableDays = [];
 
-          if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
-            // Exclure créneaux déjà commencés ou passés
+          if (snapshot.hasData) {
             allFutureSlots = snapshot.data!.docs.where((doc) {
               final data = doc.data() as Map<String, dynamic>;
               final start = (data['start'] as Timestamp).toDate().toLocal();
-              return start.isAfter(now);
+              final end = (data['end'] as Timestamp).toDate().toLocal();
+              final deadlineMinutes =
+                  (data['reservationDeadlineMinutes'] as int?) ?? 0;
+              return end.isAfter(now) &&
+                  start.isAfter(
+                    now.add(Duration(minutes: deadlineMinutes)),
+                  );
             }).toList();
+          }
 
-            final daySet = <String>{};
-            for (final doc in allFutureSlots) {
-              final data = doc.data() as Map<String, dynamic>;
-              final start = (data['start'] as Timestamp).toDate().toLocal();
-              final key = '${start.year}-${start.month}-${start.day}';
-              if (daySet.add(key)) availableDays.add(_dateOnly(start));
+          // Toujours afficher tous les jours de la fenêtre (ouvrés ou fermés)
+          if (_configLoaded) {
+            final today = _dateOnly(now);
+            for (int i = 0; i <= _maxAdvanceDays; i++) {
+              availableDays.add(today.add(Duration(days: i)));
             }
-            availableDays.sort();
 
-            if (availableDays.isNotEmpty &&
-                !availableDays.any((d) => _isSameDay(d, _selectedDate))) {
+            if (!availableDays.any((d) => _isSameDay(d, _selectedDate))) {
               WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted)
-                  setState(() => _selectedDate = availableDays.first);
+                if (mounted) setState(() => _selectedDate = availableDays.first);
               });
             }
           }
@@ -144,68 +197,46 @@ class _SlotsPageState extends State<SlotsPage> {
           final hasPrev = currentIdx > 0;
           final hasNext = currentIdx < availableDays.length - 1;
 
-          return NestedScrollView(
-            headerSliverBuilder: (ctx, _) => [
-              _buildSliverAppBar(hasPrev, hasNext, availableDays, currentIdx),
+          // Contenu principal
+          final isClosedDay = !_queueWeekdays.contains(_selectedDate.weekday);
+
+          Widget content;
+          if (snapshot.connectionState == ConnectionState.waiting ||
+              !_configLoaded) {
+            content = Center(
+              child: CircularProgressIndicator(color: widget.primaryGreen),
+            );
+          } else if (isClosedDay) {
+            content = _buildClosedDayState();
+          } else if (dailySlots.isEmpty) {
+            content = _buildEmptyState(noSlots: allFutureSlots.isEmpty);
+          } else {
+            content = _buildSlotList(dailySlots);
+          }
+
+          return Column(
+            children: [
+              // Barre de navigation jours — visible seulement si des jours existent
+              if (availableDays.isNotEmpty)
+                Container(
+                  color: isClosedDay
+                      ? Colors.grey.shade500
+                      : widget.primaryGreen,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                  child: _buildDayNavigator(
+                    hasPrev,
+                    hasNext,
+                    availableDays,
+                    currentIdx,
+                  ),
+                ),
+              Expanded(child: content),
             ],
-            body:
-                snapshot.connectionState == ConnectionState.waiting ||
-                    !_configLoaded
-                ? Center(
-                    child: CircularProgressIndicator(
-                      color: widget.primaryGreen,
-                    ),
-                  )
-                : allFutureSlots.isEmpty
-                ? _buildEmptyState(noSlots: true)
-                : dailySlots.isEmpty
-                ? _buildEmptyState(noSlots: false)
-                : _buildSlotList(dailySlots),
           );
         },
-      ),
-    );
-  }
-
-  // ── SliverAppBar avec navigation jours ───────────────────────
-
-  SliverAppBar _buildSliverAppBar(
-    bool hasPrev,
-    bool hasNext,
-    List<DateTime> availableDays,
-    int currentIdx,
-  ) {
-    return SliverAppBar(
-      pinned: true,
-      elevation: 0,
-      backgroundColor: widget.primaryGreen,
-      iconTheme: const IconThemeData(color: Colors.white),
-      expandedHeight: 115,
-      flexibleSpace: FlexibleSpaceBar(
-        collapseMode: CollapseMode.pin,
-        background: Container(
-          color: widget.primaryGreen,
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              Text(
-                widget.queueName,
-                style: const TextStyle(color: Colors.white60, fontSize: 13),
-              ),
-              const SizedBox(height: 10),
-              _buildDayNavigator(hasPrev, hasNext, availableDays, currentIdx),
-            ],
-          ),
-        ),
-      ),
-      title: const Text(
-        'Créneaux disponibles',
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: 16,
-          fontWeight: FontWeight.w600,
-        ),
       ),
     );
   }
@@ -218,7 +249,7 @@ class _SlotsPageState extends State<SlotsPage> {
   ) {
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.13),
+        color: Colors.white.withValues(alpha:0.13),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -248,7 +279,7 @@ class _SlotsPageState extends State<SlotsPage> {
                     Text(
                       '${currentIdx + 1} / ${availableDays.length} jour${availableDays.length > 1 ? 's' : ''}',
                       style: TextStyle(
-                        color: Colors.white.withOpacity(0.6),
+                        color: Colors.white.withValues(alpha:0.6),
                         fontSize: 11,
                       ),
                     ),
@@ -334,7 +365,7 @@ class _SlotsPageState extends State<SlotsPage> {
                   borderRadius: BorderRadius.circular(10),
                 ),
                 tileColor: isSelected
-                    ? widget.primaryGreen.withOpacity(0.08)
+                    ? widget.primaryGreen.withValues(alpha:0.08)
                     : null,
                 leading: Icon(
                   Icons.calendar_today_rounded,
@@ -408,12 +439,12 @@ class _SlotsPageState extends State<SlotsPage> {
       decoration: BoxDecoration(
         color: isFull
             ? Colors.orange.shade50
-            : widget.primaryGreen.withOpacity(0.07),
+            : widget.primaryGreen.withValues(alpha:0.07),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: isFull
               ? Colors.orange.shade200
-              : widget.primaryGreen.withOpacity(0.2),
+              : widget.primaryGreen.withValues(alpha:0.2),
         ),
       ),
       child: Row(
@@ -524,13 +555,13 @@ class _SlotsPageState extends State<SlotsPage> {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: isAvailable
-              ? widget.primaryGreen.withOpacity(0.25)
+              ? widget.primaryGreen.withValues(alpha:0.25)
               : Colors.grey.shade200,
           width: 1.5,
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.04),
+            color: Colors.black.withValues(alpha:0.04),
             blurRadius: 10,
             offset: const Offset(0, 3),
           ),
@@ -559,7 +590,7 @@ class _SlotsPageState extends State<SlotsPage> {
                       padding: const EdgeInsets.all(11),
                       decoration: BoxDecoration(
                         color: isAvailable
-                            ? widget.lightGreen.withOpacity(0.25)
+                            ? widget.lightGreen.withValues(alpha:0.25)
                             : Colors.grey.shade100,
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -643,7 +674,7 @@ class _SlotsPageState extends State<SlotsPage> {
                           borderRadius: BorderRadius.circular(10),
                           boxShadow: [
                             BoxShadow(
-                              color: widget.primaryGreen.withOpacity(0.3),
+                              color: widget.primaryGreen.withValues(alpha:0.3),
                               blurRadius: 8,
                               offset: const Offset(0, 3),
                             ),
@@ -780,7 +811,7 @@ class _SlotsPageState extends State<SlotsPage> {
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 24),
               decoration: BoxDecoration(
-                color: widget.primaryGreen.withOpacity(0.08),
+                color: widget.primaryGreen.withValues(alpha:0.08),
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(24),
                 ),
@@ -790,7 +821,7 @@ class _SlotsPageState extends State<SlotsPage> {
                   Container(
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
-                      color: widget.primaryGreen.withOpacity(0.15),
+                      color: widget.primaryGreen.withValues(alpha:0.15),
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
@@ -1017,10 +1048,10 @@ class _SlotsPageState extends State<SlotsPage> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: widget.primaryGreen.withOpacity(0.06),
+                      color: widget.primaryGreen.withValues(alpha:0.06),
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
-                        color: widget.primaryGreen.withOpacity(0.2),
+                        color: widget.primaryGreen.withValues(alpha:0.2),
                       ),
                     ),
                     child: Row(
@@ -1310,6 +1341,46 @@ class _SlotsPageState extends State<SlotsPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildClosedDayState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(40),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(28),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.storefront_outlined,
+                size: 52,
+                color: Colors.grey.shade400,
+              ),
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              'Établissement fermé',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1A1A2E),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              "L'établissement n'est pas ouvert ce jour-là.\nChoisissez un autre jour.",
+              style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
     );
   }
 

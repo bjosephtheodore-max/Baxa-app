@@ -13,9 +13,13 @@ class NotificationsPage extends StatefulWidget {
 
 class _NotificationsPageState extends State<NotificationsPage>
     with AutomaticKeepAliveClientMixin {
-  // ── KeepAlive ─────────────────────────────────────────────
   @override
   bool get wantKeepAlive => true;
+
+  static const Color _green = Color(0xFF4B8B5E);
+  static const Color _greenLight = Color(0xFFE8F5ED);
+  static const Color _dark = Color(0xFF1A1C2E);
+
   final NotificationService _notifSvc = NotificationService();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final DateFormat _df = DateFormat('dd/MM/yyyy HH:mm');
@@ -87,82 +91,178 @@ class _NotificationsPageState extends State<NotificationsPage>
 
   Future<void> _clearLocalScheduledForAll() async {
     await _notifSvc.cancelAll();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Toutes les notifications locales programmées ont été annulées.',
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Toutes les notifications locales ont ete annulees.'),
         ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return Scaffold(
+      backgroundColor: Colors.grey.shade50,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        automaticallyImplyLeading: false,
+        title: const Text(
+          'Notifications',
+          style: TextStyle(
+            color: _dark,
+            fontWeight: FontWeight.w700,
+            fontSize: 23,
+          ),
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Tout effacer',
+            icon: Icon(
+              Icons.delete_sweep_outlined,
+              color: Colors.grey.shade600,
+            ),
+            onPressed: _clearLocalScheduledForAll,
+          ),
+          IconButton(
+            tooltip: 'Rafraichir',
+            icon: Icon(Icons.refresh_rounded, color: Colors.grey.shade600),
+            onPressed: _loadNotifications,
+          ),
+          const SizedBox(width: 4),
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(color: Colors.grey.shade100, height: 1),
+        ),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(color: _green))
+          : _items.isEmpty
+          ? _buildEmptyState()
+          : ListView.builder(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+              itemCount: _items.length,
+              itemBuilder: (ctx, i) => _buildNotifCard(_items[i]),
+            ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.notifications_none_rounded,
+              size: 48,
+              color: Colors.grey.shade400,
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Aucune notification',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: _dark,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Vos alertes de reservation apparaitront ici',
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
+          ),
+        ],
       ),
     );
   }
 
-  @override
-  @override
-  Widget build(BuildContext context) {
-    super.build(context); // requis par AutomaticKeepAliveClientMixin
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: const Color.fromARGB(255, 75, 139, 94),
-        title: const Text(
-          'Notifications',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
-        ),
-        automaticallyImplyLeading: false,
-        actions: [
-          IconButton(
-            tooltip: 'Annuler toutes les notifications locales',
-            icon: const Icon(Icons.notifications_off),
-            onPressed: _clearLocalScheduledForAll,
-          ),
-          IconButton(
-            tooltip: 'Rafraîchir',
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadNotifications,
+  Widget _buildNotifCard(Map<String, dynamic> it) {
+    final createdAt = it['createdAt'] as DateTime?;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
           ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _items.isEmpty
-          ? const Center(
-              child: Padding(
-                padding: EdgeInsets.all(20),
-                child: Text(
-                  'Aucune notification pour l’instant.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 16, color: Colors.black54),
-                ),
-              ),
-            )
-          : ListView.separated(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              itemCount: _items.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (ctx, i) {
-                final it = _items[i];
-                final createdAt = it['createdAt'] as DateTime?;
-                return ListTile(
-                  leading: const Icon(Icons.notifications),
-                  title: Text(it['title'] ?? ''),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if ((it['body'] ?? '').isNotEmpty) Text(it['body']),
-                      if (createdAt != null)
-                        Text(
-                          _df.format(createdAt),
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                    ],
-                  ),
-                  isThreeLine: true,
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => _deleteNotification(it['id'] as String),
-                  ),
-                );
-              },
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: _greenLight,
+              borderRadius: BorderRadius.circular(10),
             ),
+            child: const Icon(
+              Icons.notifications_rounded,
+              color: _green,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  it['title'] ?? '',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                    color: _dark,
+                  ),
+                ),
+                if ((it['body'] as String? ?? '').isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    it['body'] as String,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Colors.grey.shade600,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+                if (createdAt != null) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    _df.format(createdAt),
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          IconButton(
+            icon: Icon(
+              Icons.close_rounded,
+              size: 18,
+              color: Colors.grey.shade400,
+            ),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            onPressed: () => _deleteNotification(it['id'] as String),
+          ),
+        ],
+      ),
     );
   }
 }

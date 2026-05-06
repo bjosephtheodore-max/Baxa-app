@@ -28,12 +28,44 @@ class _SigninePageState extends State<SigninePage> {
   bool _isLoadingSignup = false;
   bool _isLoadingGoogle = false;
   bool _isLoginMode = true; // Pour basculer entre connexion et inscription
+  String? _errorMessage;
 
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  String _friendlyError(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'invalid-credential':
+      case 'wrong-password':
+      case 'user-not-found':
+        return 'Email ou mot de passe incorrect.';
+      case 'email-already-in-use':
+        return 'Un compte existe déjà avec cette adresse email.';
+      case 'invalid-email':
+        return 'Adresse email invalide.';
+      case 'weak-password':
+        return 'Mot de passe trop faible. Minimum 6 caractères.';
+      case 'network-request-failed':
+        return 'Vérifiez votre connexion internet.';
+      case 'too-many-requests':
+        return 'Trop de tentatives. Réessayez dans quelques minutes.';
+      case 'user-disabled':
+        return 'Ce compte a été désactivé.';
+      default:
+        return 'Une erreur est survenue. Réessayez.';
+    }
+  }
+
+  void _setError(String message) {
+    if (mounted) setState(() => _errorMessage = message);
+  }
+
+  void _clearError() {
+    if (_errorMessage != null && mounted) setState(() => _errorMessage = null);
   }
 
   Future<void> _postAuthActions(User user) async {
@@ -77,6 +109,7 @@ class _SigninePageState extends State<SigninePage> {
   }
 
   Future<void> _login() async {
+    _clearError();
     if (!_formKey.currentState!.validate()) return;
     setState(() => _isLoadingLogin = true);
     try {
@@ -92,28 +125,17 @@ class _SigninePageState extends State<SigninePage> {
         MaterialPageRoute(builder: (_) => const CustomerPage()),
       );
     } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message ?? 'Erreur authentification'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _setError(_friendlyError(e));
     } catch (e) {
       debugPrint('Login error: $e');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Erreur lors de la connexion'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _setError('Une erreur est survenue. Réessayez.');
     } finally {
       if (mounted) setState(() => _isLoadingLogin = false);
     }
   }
 
   Future<void> _signup() async {
+    _clearError();
     if (!_formKey.currentState!.validate()) return;
     setState(() => _isLoadingSignup = true);
     try {
@@ -129,28 +151,17 @@ class _SigninePageState extends State<SigninePage> {
         MaterialPageRoute(builder: (_) => const CustomerPage()),
       );
     } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message ?? 'Erreur inscription'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _setError(_friendlyError(e));
     } catch (e) {
       debugPrint('Signup error: $e');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Erreur lors de l\'inscription'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _setError('Une erreur est survenue. Réessayez.');
     } finally {
       if (mounted) setState(() => _isLoadingSignup = false);
     }
   }
 
   Future<void> _signInWithGoogle() async {
+    _clearError();
     setState(() => _isLoadingGoogle = true);
     try {
       // Popup natif Google — reste dans l'app
@@ -209,22 +220,10 @@ class _SigninePageState extends State<SigninePage> {
         MaterialPageRoute(builder: (_) => const CustomerPage()),
       );
     } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message ?? 'Erreur Google Sign-In'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _setError(_friendlyError(e));
     } catch (e) {
       debugPrint('Google Sign-In error: $e');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Erreur lors de la connexion Google'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _setError('Erreur lors de la connexion Google. Réessayez.');
     } finally {
       if (mounted) setState(() => _isLoadingGoogle = false);
     }
@@ -306,10 +305,49 @@ class _SigninePageState extends State<SigninePage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
+                          // Bannière d'erreur inline
+                          if (_errorMessage != null) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFF1F1),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: const Color(0xFFFFCDD2),
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.error_outline_rounded,
+                                    color: Color(0xFFE53935),
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      _errorMessage!,
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        color: Color(0xFFB71C1C),
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                          ],
+
                           // Champ Email
                           TextFormField(
                             controller: _emailController,
                             keyboardType: TextInputType.emailAddress,
+                            onChanged: (_) => _clearError(),
                             decoration: InputDecoration(
                               labelText: 'Adresse e-mail',
                               hintText: 'exemple@email.com',
@@ -332,6 +370,7 @@ class _SigninePageState extends State<SigninePage> {
                           TextFormField(
                             controller: _passwordController,
                             obscureText: _isObscure,
+                            onChanged: (_) => _clearError(),
                             decoration: InputDecoration(
                               labelText: 'Mot de passe',
                               hintText: 'Minimum 6 caractères',

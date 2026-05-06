@@ -444,7 +444,8 @@ class _MyReservationsPageState extends State<MyReservationsPage> {
     );
 
     if (confirmed == true) {
-      await _cancelReservation(reservationRef, companyId, queueId, slotId);
+      await _cancelReservation(
+        reservationRef, companyId, queueId, slotId, slotStart);
     }
   }
 
@@ -453,10 +454,21 @@ class _MyReservationsPageState extends State<MyReservationsPage> {
     String companyId,
     String queueId,
     String slotId,
+    DateTime slotStart,
   ) async {
+    final dateStr = '${slotStart.year}-'
+        '${slotStart.month.toString().padLeft(2, '0')}-'
+        '${slotStart.day.toString().padLeft(2, '0')}';
+    final dailyStatsRef = _firestore
+        .collection('companies')
+        .doc(companyId)
+        .collection('queues')
+        .doc(queueId)
+        .collection('dailyStats')
+        .doc(dateStr);
+
     try {
       await _firestore.runTransaction((transaction) async {
-        // 1. Récupérer la référence du slot
         final slotRef = _firestore
             .collection('companies')
             .doc(companyId)
@@ -465,17 +477,21 @@ class _MyReservationsPageState extends State<MyReservationsPage> {
             .collection('slots')
             .doc(slotId);
 
-        // 2. Décrémenter reserved ET incrémenter cancelled
         transaction.update(slotRef, {
-          'reserved': FieldValue.increment(-1), // ← DÉCRÉMENTER
-          'cancelled': FieldValue.increment(1), // ← INCRÉMENTER
+          'reserved': FieldValue.increment(-1),
+          'cancelled': FieldValue.increment(1),
         });
 
-        // 3. Marquer la réservation comme annulée
         transaction.update(reservationRef, {
           'status': 'cancelled',
           'cancelledAt': FieldValue.serverTimestamp(),
         });
+
+        transaction.set(dailyStatsRef, {
+          'reserved': FieldValue.increment(-1),
+          'available': FieldValue.increment(1),
+          'cancelled': FieldValue.increment(1),
+        }, SetOptions(merge: true));
       });
 
       if (!mounted) return;

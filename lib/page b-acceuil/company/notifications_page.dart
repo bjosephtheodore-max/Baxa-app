@@ -34,16 +34,19 @@ class _NotificationsPageState extends State<NotificationsPage> {
       backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
         elevation: 0,
-        backgroundColor: _primaryGreen,
-        title: const Text(
-          'Historique des notifications',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        backgroundColor: Colors.white,
+        title: Text(
+          'Notifications',
+          style: TextStyle(
+            color: _primaryGreen,
+            fontWeight: FontWeight.w700,
+            fontSize: 23,
+          ),
         ),
         automaticallyImplyLeading: false,
         actions: [
-          // Bouton "Supprimer tout"
           IconButton(
-            icon: const Icon(Icons.delete_sweep, color: Colors.white),
+            icon: Icon(Icons.delete_sweep_outlined, color: _primaryGreen),
             tooltip: 'Supprimer tout',
             onPressed: _showDeleteAllConfirmation,
           ),
@@ -354,34 +357,69 @@ class _NotificationsPageState extends State<NotificationsPage> {
   Future<bool?> _showDeleteConfirmation(String queueName) {
     return showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
+      builder: (ctx) => Dialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Row(
-          children: [
-            Icon(Icons.warning, color: Colors.orange, size: 28),
-            SizedBox(width: 12),
-            Text('Confirmer la suppression'),
-          ],
-        ),
-        content: Text(
-          'Voulez-vous supprimer la notification de "$queueName" ?\n\n'
-          'Cette action est irréversible.',
-          style: const TextStyle(fontSize: 15),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Annuler'),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.delete_rounded, color: Colors.red.shade400, size: 32),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Supprimer ?',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'La notification "$queueName" sera supprimee definitivement.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(ctx, false),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: Colors.grey.shade300),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      child: const Text('Annuler', style: TextStyle(color: Colors.black87)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(ctx, true),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade400,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      child: const Text('Supprimer'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Supprimer'),
-          ),
-        ],
+        ),
       ),
     );
   }

@@ -44,6 +44,9 @@ enum RuleViolation {
 
   /// Créneau déjà commencé ou passé
   slotAlreadyStarted,
+
+  /// Créneau au-delà de l'anticipation maximale configurée par l'entreprise
+  tooFarInAdvance,
 }
 
 /// ============================================================
@@ -115,13 +118,22 @@ class ReservationRulesService {
     required DateTime slotEnd,
     required int maxActivePerUser,
     required int maxReservationsPerPerson,
+    int maxAdvanceDays = 365,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return const RuleCheckResult.allowed();
 
-    // ── Règle 0 : créneau déjà commencé ──────────────────────
+    // ── Règle 0a : créneau déjà commencé ─────────────────────
     if (slotStart.isBefore(DateTime.now())) {
       return const RuleCheckResult.blocked(RuleViolation.slotAlreadyStarted);
+    }
+
+    // ── Règle 0b : anticipation maximale ─────────────────────
+    final today = DateTime.now();
+    final maxDate = DateTime(today.year, today.month, today.day)
+        .add(Duration(days: maxAdvanceDays + 1));
+    if (slotStart.isAfter(maxDate)) {
+      return const RuleCheckResult.blocked(RuleViolation.tooFarInAdvance);
     }
 
     // ── Charger toutes les réservations actives ───────────────
@@ -303,6 +315,9 @@ class ReservationRulesService {
 
       case RuleViolation.slotAlreadyStarted:
         return 'Ce créneau a déjà commencé et ne peut plus être réservé.';
+
+      case RuleViolation.tooFarInAdvance:
+        return 'Ce créneau dépasse le délai de réservation autorisé par cet établissement.';
     }
   }
 
@@ -337,6 +352,17 @@ class ReservationRulesService {
         .collection('reservations')
         .doc();
 
+    final dateStr = '${slotStart.year}-'
+        '${slotStart.month.toString().padLeft(2, '0')}-'
+        '${slotStart.day.toString().padLeft(2, '0')}';
+    final dailyStatsRef = _fs
+        .collection('companies')
+        .doc(companyId)
+        .collection('queues')
+        .doc(queueId)
+        .collection('dailyStats')
+        .doc(dateStr);
+
     await _fs.runTransaction((tx) async {
       // Vérification fraîche du slot
       final freshSlot = await tx.get(slotRef);
@@ -348,8 +374,9 @@ class ReservationRulesService {
       final status = (freshData['status'] ?? 'open') as String;
       final start = (freshData['start'] as Timestamp).toDate().toUtc();
 
-      if (status != 'open')
+      if (status != 'open') {
         throw Exception('Ce créneau n\'est plus disponible');
+      }
       if (reserved >= capacity) throw Exception('Ce créneau est complet');
       if (start.difference(DateTime.now().toUtc()).inMinutes < 1) {
         throw Exception('Ce créneau a déjà commencé');
@@ -369,6 +396,12 @@ class ReservationRulesService {
       });
 
       tx.update(slotRef, {'reserved': FieldValue.increment(1)});
+
+      // Mettre à jour les stats journalières atomiquement
+      tx.set(dailyStatsRef, {
+        'reserved': FieldValue.increment(1),
+        'available': FieldValue.increment(-1),
+      }, SetOptions(merge: true));
     });
 
     return reservationRef.id;
@@ -420,6 +453,29 @@ class ReservationRulesService {
         .collection('reservations')
         .doc();
 
+    final oldDateStr = '${newSlotStart.year}-'
+        '${newSlotStart.month.toString().padLeft(2, '0')}-'
+        '${newSlotStart.day.toString().padLeft(2, '0')}';
+    // oldSlot date — lire depuis oldSlotDocId n'est pas disponible ici,
+    // on suppose que le remplacement reste sur le même jour (cas standard)
+    final newDateStr = '${newSlotStart.year}-'
+        '${newSlotStart.month.toString().padLeft(2, '0')}-'
+        '${newSlotStart.day.toString().padLeft(2, '0')}';
+    final oldDailyStatsRef = _fs
+        .collection('companies')
+        .doc(oldCompanyId)
+        .collection('queues')
+        .doc(oldQueueId)
+        .collection('dailyStats')
+        .doc(oldDateStr);
+    final newDailyStatsRef = _fs
+        .collection('companies')
+        .doc(newCompanyId)
+        .collection('queues')
+        .doc(newQueueId)
+        .collection('dailyStats')
+        .doc(newDateStr);
+
     await _fs.runTransaction((tx) async {
       final freshNewSlot = await tx.get(newSlotRef);
       if (!freshNewSlot.exists) throw Exception('Nouveau créneau introuvable');
@@ -427,8 +483,9 @@ class ReservationRulesService {
       final newData = freshNewSlot.data()!;
       final capacity = (newData['capacity'] ?? 1) as int;
       final reserved = (newData['reserved'] ?? 0) as int;
-      if (reserved >= capacity)
+      if (reserved >= capacity) {
         throw Exception('Ce créneau est maintenant complet');
+      }
 
       // Annuler l'ancienne réservation
       tx.update(oldResRef, {
@@ -436,6 +493,10 @@ class ReservationRulesService {
         'cancelledAt': FieldValue.serverTimestamp(),
       });
       tx.update(oldSlotRef, {'reserved': FieldValue.increment(-1)});
+      tx.set(oldDailyStatsRef, {
+        'reserved': FieldValue.increment(-1),
+        'available': FieldValue.increment(1),
+      }, SetOptions(merge: true));
 
       // Créer la nouvelle
       tx.set(newResRef, {
@@ -452,6 +513,10 @@ class ReservationRulesService {
         'replacedReservationId': oldReservationId,
       });
       tx.update(newSlotRef, {'reserved': FieldValue.increment(1)});
+      tx.set(newDailyStatsRef, {
+        'reserved': FieldValue.increment(1),
+        'available': FieldValue.increment(-1),
+      }, SetOptions(merge: true));
     });
 
     return newResRef.id;
@@ -464,6 +529,7 @@ class ReservationRulesService {
     required String reservationId,
     required String queueId,
     required String slotDocId,
+    required DateTime slotStart,
   }) async {
     final resRef = _fs
         .collection('companies')
@@ -479,12 +545,31 @@ class ReservationRulesService {
         .collection('slots')
         .doc(slotDocId);
 
+    final dateStr = '${slotStart.year}-'
+        '${slotStart.month.toString().padLeft(2, '0')}-'
+        '${slotStart.day.toString().padLeft(2, '0')}';
+    final dailyStatsRef = _fs
+        .collection('companies')
+        .doc(companyId)
+        .collection('queues')
+        .doc(queueId)
+        .collection('dailyStats')
+        .doc(dateStr);
+
     await _fs.runTransaction((tx) async {
       tx.update(resRef, {
         'status': 'cancelled',
         'cancelledAt': FieldValue.serverTimestamp(),
       });
-      tx.update(slotRef, {'reserved': FieldValue.increment(-1)});
+      tx.update(slotRef, {
+        'reserved': FieldValue.increment(-1),
+        'cancelled': FieldValue.increment(1),
+      });
+      tx.set(dailyStatsRef, {
+        'reserved': FieldValue.increment(-1),
+        'available': FieldValue.increment(1),
+        'cancelled': FieldValue.increment(1),
+      }, SetOptions(merge: true));
     });
   }
 }

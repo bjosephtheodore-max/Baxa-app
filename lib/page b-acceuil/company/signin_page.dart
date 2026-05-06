@@ -36,6 +36,7 @@ class SigninPageState extends State<SigninPage> {
   bool _isLoadingLogin = false;
   bool _isLoadingSignup = false;
   bool _isLoginMode = true; // Pour basculer entre connexion et inscription
+  String? _errorMessage;
 
   @override
   void dispose() {
@@ -44,10 +45,41 @@ class SigninPageState extends State<SigninPage> {
     super.dispose();
   }
 
+  String _friendlyError(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'invalid-credential':
+      case 'wrong-password':
+      case 'user-not-found':
+        return 'Email ou mot de passe incorrect.';
+      case 'email-already-in-use':
+        return 'Un compte existe déjà avec cette adresse email.';
+      case 'invalid-email':
+        return 'Adresse email invalide.';
+      case 'weak-password':
+        return 'Mot de passe trop faible. Minimum 6 caractères.';
+      case 'network-request-failed':
+        return 'Vérifiez votre connexion internet.';
+      case 'too-many-requests':
+        return 'Trop de tentatives. Réessayez dans quelques minutes.';
+      case 'user-disabled':
+        return 'Ce compte a été désactivé.';
+      default:
+        return 'Une erreur est survenue. Réessayez.';
+    }
+  }
+
+  void _setError(String message) {
+    if (mounted) setState(() => _errorMessage = message);
+  }
+
+  void _clearError() {
+    if (_errorMessage != null && mounted) setState(() => _errorMessage = null);
+  }
+
   // Méthode de connexion
   Future<void> _handleLogin() async {
+    _clearError();
     if (!_formkey.currentState!.validate()) return;
-
     if (!mounted) return;
     setState(() => _isLoadingLogin = true);
 
@@ -63,13 +95,7 @@ class SigninPageState extends State<SigninPage> {
         MaterialPageRoute(builder: (context) => const CompanyPage()),
       );
     } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message ?? 'Erreur authentification'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _setError(_friendlyError(e));
     } finally {
       if (mounted) setState(() => _isLoadingLogin = false);
     }
@@ -77,6 +103,7 @@ class SigninPageState extends State<SigninPage> {
 
   // Méthode d'inscription
   Future<void> _handleSignup() async {
+    _clearError();
     if (!mounted) return;
     setState(() => _isLoadingSignup = true);
 
@@ -86,7 +113,6 @@ class SigninPageState extends State<SigninPage> {
         return;
       }
 
-      // Création du compte
       UserCredential userCredential = await FirebaseAuth.instance
           .createUserWithEmailAndPassword(
             email: _emailController.text.trim(),
@@ -95,7 +121,6 @@ class SigninPageState extends State<SigninPage> {
 
       final uid = userCredential.user?.uid;
       if (uid != null) {
-        // Préparation des données
         final entrepriseData = {
           "email": _emailController.text.trim(),
           "createdAt": FieldValue.serverTimestamp(),
@@ -107,7 +132,6 @@ class SigninPageState extends State<SigninPage> {
         if (widget.typeEntreprise != null) {
           entrepriseData["type"] = widget.typeEntreprise!;
         }
-        // ── Ville + locale détectés automatiquement ──────────────────
         if (widget.ville != null) {
           entrepriseData["ville"] = widget.ville!;
         }
@@ -121,7 +145,6 @@ class SigninPageState extends State<SigninPage> {
           entrepriseData["locale"] = widget.locale!;
         }
 
-        // Enregistrement entreprise (doc id = uid)
         await FirebaseFirestore.instance
             .collection("companies")
             .doc(uid)
@@ -134,28 +157,13 @@ class SigninPageState extends State<SigninPage> {
         MaterialPageRoute(builder: (context) => const CompanyPage()),
       );
     } on FirebaseAuthException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message ?? 'Erreur auth'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _setError(_friendlyError(e));
     } on FirebaseException catch (e) {
       debugPrint('Firestore error: ${e.code} ${e.message}');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Erreur Firestore: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _setError('Une erreur est survenue. Réessayez.');
     } catch (e, st) {
       debugPrint("SIGNUP ▶ Erreur inattendue: $e\n$st");
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Erreur : $e"), backgroundColor: Colors.red),
-      );
+      _setError('Une erreur est survenue. Réessayez.');
     } finally {
       if (mounted) setState(() => _isLoadingSignup = false);
     }
@@ -238,10 +246,49 @@ class SigninPageState extends State<SigninPage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
+                          // Bannière d'erreur inline
+                          if (_errorMessage != null) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFF1F1),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: const Color(0xFFFFCDD2),
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.error_outline_rounded,
+                                    color: Color(0xFFE53935),
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      _errorMessage!,
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        color: Color(0xFFB71C1C),
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                          ],
+
                           // Champ Email
                           TextFormField(
                             controller: _emailController,
                             keyboardType: TextInputType.emailAddress,
+                            onChanged: (_) => _clearError(),
                             decoration: InputDecoration(
                               labelText: 'Adresse e-mail professionnelle',
                               hintText: 'entreprise@email.com',
@@ -268,6 +315,7 @@ class SigninPageState extends State<SigninPage> {
                           TextFormField(
                             controller: _passwordController,
                             obscureText: _isObscure,
+                            onChanged: (_) => _clearError(),
                             decoration: InputDecoration(
                               labelText: 'Mot de passe',
                               hintText: 'Minimum 6 caractères',

@@ -159,7 +159,21 @@ exports.generateSlots = functions.pubsub
           continue;
         }
 
-        // ── ÉTAPE 1 : Supprimer les vieux créneaux (< J-7) ──────────
+        const slotsRef = db
+          .collection("companies")
+          .doc(companyId)
+          .collection("queues")
+          .doc(queueId)
+          .collection("slots");
+
+        const dailyStatsRef = db
+          .collection("companies")
+          .doc(companyId)
+          .collection("queues")
+          .doc(queueId)
+          .collection("dailyStats");
+
+        // ── ÉTAPE 1 : Supprimer les vieux créneaux et dailyStats (< J-7) ──
         const oldSlotsSnap = await db
           .collection("companies")
           .doc(companyId)
@@ -174,12 +188,10 @@ exports.generateSlots = functions.pubsub
           let deleteCount = 0;
 
           for (const slotDoc of oldSlotsSnap.docs) {
-            // Ne supprimer que si pas de réservation dessus
             const slotData = slotDoc.data();
             if ((slotData.reserved || 0) === 0) {
               deleteBatch.delete(slotDoc.ref);
               deleteCount++;
-
               if (deleteCount >= 500) {
                 await deleteBatch.commit();
                 deleteBatch = db.batch();
@@ -189,10 +201,67 @@ exports.generateSlots = functions.pubsub
           }
           if (deleteCount > 0) await deleteBatch.commit();
           totalDeleted += deleteCount;
+
+          // Supprimer les dailyStats obsolètes (< J-7)
+          const oldStatsSnap = await dailyStatsRef
+            .where("date", "<", deleteBeforeDate.toISOString().split("T")[0])
+            .get();
+          if (!oldStatsSnap.empty) {
+            let statsBatch = db.batch();
+            oldStatsSnap.docs.forEach((d) => statsBatch.delete(d.ref));
+            await statsBatch.commit();
+          }
+
           console.log(`🗑️ File ${queueId}: ${deleteCount} vieux créneaux supprimés`);
         }
 
-        // ── ÉTAPE 2 : Générer les créneaux manquants jusqu'à J+14 ───
+        // Helper : formater une date en "YYYY-MM-DD"
+        const fmtDate = (d) => {
+          const y = d.getFullYear();
+          const m = String(d.getMonth() + 1).padStart(2, "0");
+          const day = String(d.getDate()).padStart(2, "0");
+          return `${y}-${m}-${day}`;
+        };
+
+        // Helper : écrire/mettre à jour les dailyStats d'un jour en agrégeant les slots existants
+        const upsertDailyStats = async (targetDate) => {
+          const dayStart = new Date(targetDate);
+          dayStart.setHours(0, 0, 0, 0);
+          const dayEnd = new Date(dayStart);
+          dayEnd.setDate(dayEnd.getDate() + 1);
+
+          const allSlots = await slotsRef
+            .where("start", ">=", dayStart)
+            .where("start", "<", dayEnd)
+            .get();
+
+          if (allSlots.empty) return;
+
+          let totalSlots = 0;
+          let totalCapacity = 0;
+          let reserved = 0;
+          let cancelled = 0;
+
+          for (const s of allSlots.docs) {
+            const sd = s.data();
+            totalSlots++;
+            totalCapacity += sd.capacity || 0;
+            reserved += sd.reserved || 0;
+            cancelled += sd.cancelled || 0;
+          }
+
+          await dailyStatsRef.doc(fmtDate(targetDate)).set({
+            date: fmtDate(targetDate),
+            totalSlots,
+            totalCapacity,
+            available: totalCapacity - reserved,
+            reserved,
+            cancelled,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        };
+
+        // ── ÉTAPE 2 : Générer les créneaux manquants selon maxAdvanceDays ──
         for (const timeSlotDoc of timeSlotsSnap.docs) {
           const tsData = timeSlotDoc.data();
 
@@ -200,29 +269,18 @@ exports.generateSlots = functions.pubsub
           const endTime = tsData.endTime || "12:00";
           const duration = tsData.serviceDurationMinutes || 15;
           const capacity = tsData.capacityPerSlot || 1;
+          const maxAdvanceDays = Math.min(tsData.maxAdvanceDays || 7, 30);
 
           // Jours actifs pour cette plage (ou hérités de la file)
           const activeDays = tsData.workingDays || weekdays;
 
-          let createBatch = db.batch();
-          let createCount = 0;
-          const slotsRef = db
-            .collection("companies")
-            .doc(companyId)
-            .collection("queues")
-            .doc(queueId)
-            .collection("slots");
-
-          // Parcourir chaque jour de aujourd'hui jusqu'à J+14
-          for (let dayOffset = 0; dayOffset <= 14; dayOffset++) {
+          for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
             const targetDate = new Date(today);
             targetDate.setDate(targetDate.getDate() + dayOffset);
 
             // Vérifier si ce jour est ouvré (1=Lundi, 7=Dimanche)
-            const jsWeekday = targetDate.getDay(); // 0=Dim, 1=Lun...
-            // Convertir en format Dart (1=Lun, 7=Dim)
+            const jsWeekday = targetDate.getDay();
             const dartWeekday = jsWeekday === 0 ? 7 : jsWeekday;
-
             if (!activeDays.includes(dartWeekday)) continue;
 
             // Parser les heures
@@ -242,9 +300,19 @@ exports.generateSlots = functions.pubsub
               .limit(1)
               .get();
 
-            if (!existingSnap.empty) continue; // Déjà générés
+            if (!existingSnap.empty) {
+              // Slots déjà générés — créer dailyStats si absent (migration)
+              const statsDoc = await dailyStatsRef.doc(fmtDate(targetDate)).get();
+              if (!statsDoc.exists) {
+                await upsertDailyStats(targetDate);
+                console.log(`📊 File ${queueId}: dailyStats créé (migration) pour ${fmtDate(targetDate)}`);
+              }
+              continue;
+            }
 
-            // Générer les créneaux minute par minute
+            // Générer les créneaux pour ce jour
+            let createBatch = db.batch();
+            let createCount = 0;
             let cursor = new Date(plageStart);
 
             while (true) {
@@ -265,20 +333,20 @@ exports.generateSlots = functions.pubsub
               createCount++;
               cursor = new Date(slotEnd);
 
-              // Commit par batch de 450 (marge de sécurité)
               if (createCount >= 450) {
                 await createBatch.commit();
                 createBatch = db.batch();
                 createCount = 0;
               }
             }
-          }
 
-          // Commit final
-          if (createCount > 0) {
-            await createBatch.commit();
-            totalGenerated += createCount;
-            console.log(`✅ File ${queueId} / plage ${startTime}-${endTime}: ${createCount} créneaux générés`);
+            if (createCount > 0) {
+              await createBatch.commit();
+              totalGenerated += createCount;
+              // Écrire dailyStats précis en agrégeant les slots de ce jour
+              await upsertDailyStats(targetDate);
+              console.log(`✅ File ${queueId} / ${fmtDate(targetDate)}: ${createCount} créneaux + dailyStats`);
+            }
           }
         }
       }
@@ -294,4 +362,37 @@ exports.generateSlots = functions.pubsub
       totalDeleted,
       timestamp: new Date().toISOString(),
     };
+  });
+
+// ====================================================================
+// FONCTION 4 : Push FCM à la création d'une notification in-app client
+// ====================================================================
+exports.sendPushOnNotification = functions.firestore
+  .document("customers/{customerId}/notifications/{notificationId}")
+  .onCreate(async (snap, context) => {
+    const { customerId } = context.params;
+    const data = snap.data();
+
+    const title = data.title || "Baxa";
+    const body = data.body || "";
+
+    // Récupérer le token FCM du client
+    const userDoc = await db.collection("users").doc(customerId).get();
+    if (!userDoc.exists) return null;
+
+    const fcmToken = userDoc.data().fcmToken;
+    if (!fcmToken) return null;
+
+    try {
+      await admin.messaging().send({
+        token: fcmToken,
+        notification: { title, body },
+        android: { priority: "high" },
+        apns: { payload: { aps: { sound: "default" } } },
+      });
+      console.log(`✅ Push envoyé à ${customerId}: ${title}`);
+    } catch (e) {
+      console.error(`❌ Erreur push FCM pour ${customerId}:`, e.message);
+    }
+    return null;
   });
