@@ -2,12 +2,15 @@ import 'package:baxa/page%20b-acceuil/company/company_page.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:lottie/lottie.dart';
 
 class SigninPage extends StatefulWidget {
   final String? nomEntreprise;
   final String? typeEntreprise;
+  final String? typeCategorie;
   final String? ville;
   final String? country;
   final String? language;
@@ -17,6 +20,7 @@ class SigninPage extends StatefulWidget {
     super.key,
     this.nomEntreprise,
     this.typeEntreprise,
+    this.typeCategorie,
     this.ville,
     this.country,
     this.language,
@@ -31,18 +35,32 @@ class SigninPageState extends State<SigninPage> {
   final _formkey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _scrollController = ScrollController();
 
   bool _isObscure = true;
   bool _isLoadingLogin = false;
   bool _isLoadingSignup = false;
-  bool _isLoginMode = true; // Pour basculer entre connexion et inscription
+  bool _isLoginMode = false; // Pour basculer entre connexion et inscription
   String? _errorMessage;
 
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  void _scrollToBottom() {
+    Future.delayed(const Duration(milliseconds: 400), () {
+      if (mounted && _scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   String _friendlyError(FirebaseAuthException e) {
@@ -132,6 +150,9 @@ class SigninPageState extends State<SigninPage> {
         if (widget.typeEntreprise != null) {
           entrepriseData["type"] = widget.typeEntreprise!;
         }
+        if (widget.typeCategorie != null) {
+          entrepriseData["typeCategorie"] = widget.typeCategorie!;
+        }
         if (widget.ville != null) {
           entrepriseData["ville"] = widget.ville!;
         }
@@ -171,11 +192,48 @@ class SigninPageState extends State<SigninPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.grey.shade50,
-      body: SafeArea(
-        child: Center(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Color(0xFFEAF3ED),
+        statusBarIconBrightness: Brightness.dark,
+      ),
+      child: Scaffold(
+      backgroundColor: Colors.white,
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Color(0xFFEAF3ED),
+              Color(0xFFD6EBDe),
+              Color(0xFFFFFFFF),
+            ],
+            stops: [0.0, 0.35, 1.0],
+          ),
+        ),
+        child: SafeArea(
+        child: Stack(
+          children: [
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: Opacity(
+                opacity: 0.13,
+                child: SizedBox(
+                  height: 320,
+                  child: Lottie.asset(
+                    'assets/animations/Handshake Loop.json',
+                    repeat: true,
+                    fit: BoxFit.cover,
+                  ),
+                ),
+              ),
+            ),
+            Center(
           child: SingleChildScrollView(
+            controller: _scrollController,
             padding: const EdgeInsets.symmetric(horizontal: 24),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 440),
@@ -235,7 +293,7 @@ class SigninPageState extends State<SigninPage> {
                       borderRadius: BorderRadius.circular(20),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.08),
+                          color: Colors.black.withValues(alpha: 0.08),
                           blurRadius: 20,
                           offset: const Offset(0, 4),
                         ),
@@ -254,18 +312,20 @@ class SigninPageState extends State<SigninPage> {
                                 vertical: 12,
                               ),
                               decoration: BoxDecoration(
-                                color: const Color(0xFFFFF1F1),
-                                borderRadius: BorderRadius.circular(10),
+                                color: const Color(0xFFFFEBEB),
+                                borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
-                                  color: const Color(0xFFFFCDD2),
+                                  color: const Color(0xFFE57373),
+                                  width: 1.2,
                                 ),
                               ),
                               child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const Icon(
-                                    Icons.error_outline_rounded,
-                                    color: Color(0xFFE53935),
-                                    size: 18,
+                                    Icons.error_rounded,
+                                    color: Color(0xFFD32F2F),
+                                    size: 20,
                                   ),
                                   const SizedBox(width: 10),
                                   Expanded(
@@ -273,7 +333,8 @@ class SigninPageState extends State<SigninPage> {
                                       _errorMessage!,
                                       style: const TextStyle(
                                         fontSize: 13,
-                                        color: Color(0xFFB71C1C),
+                                        color: Color(0xFF7B1111),
+                                        fontWeight: FontWeight.w500,
                                         height: 1.4,
                                       ),
                                     ),
@@ -288,6 +349,7 @@ class SigninPageState extends State<SigninPage> {
                           TextFormField(
                             controller: _emailController,
                             keyboardType: TextInputType.emailAddress,
+                            onTap: _scrollToBottom,
                             onChanged: (_) => _clearError(),
                             decoration: InputDecoration(
                               labelText: 'Adresse e-mail professionnelle',
@@ -315,6 +377,7 @@ class SigninPageState extends State<SigninPage> {
                           TextFormField(
                             controller: _passwordController,
                             obscureText: _isObscure,
+                            onTap: _scrollToBottom,
                             onChanged: (_) => _clearError(),
                             decoration: InputDecoration(
                               labelText: 'Mot de passe',
@@ -404,13 +467,17 @@ class SigninPageState extends State<SigninPage> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Text(
-                        _isLoginMode
-                            ? 'Première fois sur Baxa ?'
-                            : 'Vous avez déjà un compte ?',
-                        style: TextStyle(
-                          color: Colors.grey.shade700,
-                          fontSize: 14,
+                      Flexible(
+                        child: Text(
+                          _isLoginMode
+                              ? 'Première fois sur Baxa ?'
+                              : 'Vous avez déjà un compte ?',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: Colors.grey.shade700,
+                            fontSize: 14,
+                          ),
                         ),
                       ),
                       TextButton(
@@ -466,9 +533,13 @@ class SigninPageState extends State<SigninPage> {
                 ],
               ),
             ),
-          ),
-        ),
+          ),  // SingleChildScrollView
+            ),  // Center
+          ],  // Stack children
+        ),  // Stack
       ),
-    );
+    ),     // Container gradient
+    ),     // Scaffold
+    );     // AnnotatedRegion
   }
 }

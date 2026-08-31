@@ -252,6 +252,17 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
     if (uid == null || _companyId == null) return;
 
     try {
+      // Sauvegarder le role dans users/{uid} D'ABORD : c'est ce document que
+      // les règles Firebase (isStaff) vérifient pour autoriser les écritures
+      // suivantes sur companies/{companyId}. Le créer après aurait laissé
+      // les écritures ci-dessous sans autorisation au moment où elles se jouent.
+      await FirebaseFirestore.instance.collection('users').doc(uid).set({
+        'role': 'staff',
+        'companyId': _companyId,
+        'companyName': _companyName ?? '',
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
       await FirebaseFirestore.instance
           .collection('companies')
           .doc(_companyId)
@@ -271,14 +282,6 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
       // Invalider le code (usage unique)
       await _markInviteUsed();
 
-      // Sauvegarder le role dans users/{uid} pour eviter collectionGroup au prochain login
-      await FirebaseFirestore.instance.collection('users').doc(uid).set({
-        'role': 'staff',
-        'companyId': _companyId,
-        'companyName': _companyName ?? '',
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-
       // Notifier l'admin
       await FirebaseFirestore.instance
           .collection('companies')
@@ -289,6 +292,10 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
             'title': 'Nouveau membre d\'equipe',
             'body': 'Un nouveau membre a rejoint votre equipe via le code d\'invitation.',
             'read': false,
+            // Destinataire de la notif : sans ce champ, la liste ET la pastille
+            // staff (qui filtrent sur staffId) restaient vides. NB : à terme,
+            // un événement "adressé à l'admin" gagnerait un feed distinct.
+            'staffId': uid,
             'createdAt': FieldValue.serverTimestamp(),
           });
 
@@ -478,6 +485,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           controller: _codeController,
           textCapitalization: TextCapitalization.characters,
           textAlign: TextAlign.center,
+          autofocus: true,
           onChanged: (_) => _clearError(),
           style: GoogleFonts.poppins(
             fontSize: 22,
@@ -575,6 +583,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
         TextField(
           controller: _phoneController,
           keyboardType: TextInputType.phone,
+          autofocus: true,
           onChanged: (_) => _clearError(),
           decoration: InputDecoration(
             labelText: 'Numero de telephone',
@@ -668,11 +677,15 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
                         ),
                       ),
                       SizedBox(width: 12),
-                      Text(
-                        'Continuer avec Google',
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w500,
+                      Flexible(
+                        child: Text(
+                          'Continuer avec Google',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
                       ),
                     ],
@@ -717,6 +730,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           controller: _otpController,
           keyboardType: TextInputType.number,
           textAlign: TextAlign.center,
+          autofocus: true,
           maxLength: 6,
           onChanged: (_) => _clearError(),
           style: GoogleFonts.poppins(

@@ -21,7 +21,7 @@ class RuleCheckResult {
 
 /// Types de violations possibles
 enum RuleViolation {
-  /// Max 5 réservations actives atteint sur toute l'app
+  /// Limite de 5 réservations créées aujourd'hui atteinte (recharge à minuit)
   globalLimitReached,
 
   /// Créneau actif dans cette file → proposer remplacement
@@ -29,12 +29,6 @@ enum RuleViolation {
 
   /// Cooldown 5 min non écoulé après fin de créneau dans cette file
   cooldownNotElapsed,
-
-  /// Max réservations par plage atteint (maxReservationsPerPerson)
-  slotRangeLimitReached,
-
-  /// Réservation active dans cette entreprise (maxActivePerUser = 1)
-  activeInSameCompany,
 
   /// Chevauchement horaire avec une réservation dans cette entreprise
   overlapInSameCompany,
@@ -57,19 +51,12 @@ class ReservationRulesService {
 
   // ── Helpers ──────────────────────────────────────────────────
 
-  // ignore: unused_element
-  bool _isActive(Map<String, dynamic> resData) {
-    final end = (resData['slotEnd'] as Timestamp).toDate();
-    return end.isAfter(DateTime.now()) && resData['status'] == 'confirmed';
-  }
-
   bool _isExpired(Map<String, dynamic> resData) {
     final end = (resData['slotEnd'] as Timestamp).toDate();
     final cooldownEnd = end.add(Duration(minutes: kCooldownSameQueueMinutes));
     return DateTime.now().isAfter(cooldownEnd);
   }
 
-  /// Vérifie si deux intervalles se chevauchent (avec tolérance de 0 min)
   bool _overlaps(
     DateTime aStart,
     DateTime aEnd,
@@ -79,7 +66,32 @@ class ReservationRulesService {
     return aStart.isBefore(bEnd) && bStart.isBefore(aEnd);
   }
 
-  // ── Chargement des réservations actives de l'utilisateur ─────
+  String _todayStr() {
+    final now = DateTime.now();
+    return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+  }
+
+  /// Concatène prénom + nom depuis un document `users/{uid}`.
+  /// Retourne null si aucun des deux n'est renseigné.
+  String? _fullName(Map<String, dynamic> userData) {
+    final prenom = (userData['prenom'] as String?)?.trim() ?? '';
+    final nom = (userData['nom'] as String?)?.trim() ?? '';
+    final full = [prenom, nom].where((s) => s.isNotEmpty).join(' ');
+    return full.isEmpty ? null : full;
+  }
+
+  // ── Quota journalier (pré-vérification) ──────────────────────
+
+  Future<int> _getDailyBookingCount(String userId) async {
+    final doc = await _fs.collection('users').doc(userId).get();
+    if (!doc.exists) return 0;
+    final data = doc.data()!;
+    final lastDate = data['lastBookingDate'] as String? ?? '';
+    if (lastDate != _todayStr()) return 0;
+    return (data['dailyBookingCount'] as int?) ?? 0;
+  }
+
+  // ── Réservations futures actives (pour règles 2-4) ───────────
 
   Future<List<QueryDocumentSnapshot>> _getUserActiveReservations(
     String userId,
@@ -92,8 +104,7 @@ class ReservationRulesService {
 
     final now = DateTime.now();
     return snap.docs.where((doc) {
-      // ignore: unnecessary_cast
-      final data = doc.data() as Map<String, dynamic>;
+      final data = doc.data();
       final end = (data['slotEnd'] as Timestamp).toDate();
       return end.isAfter(now);
     }).toList();
@@ -101,23 +112,12 @@ class ReservationRulesService {
 
   // ── VÉRIFICATION PRINCIPALE ───────────────────────────────────
 
-  /// Vérifie toutes les règles avant d'afficher le bouton / lancer la transaction.
-  ///
-  /// [companyId]   : entreprise du créneau cible
-  /// [queueId]     : file du créneau cible
-  /// [slotStart]   : début du créneau cible (local)
-  /// [slotEnd]     : fin du créneau cible (local)
-  /// [timeSlotId]  : id du timeSlot parent (plage horaire)
-  /// [maxActivePerUser] : valeur lue depuis queues/{queueId}.maxActivePerUser
-  /// [maxReservationsPerPerson] : valeur lue depuis timeSlots/{id}.maxReservationsPerPerson
   Future<RuleCheckResult> checkCanReserve({
     required String companyId,
     required String queueId,
     required String timeSlotId,
     required DateTime slotStart,
     required DateTime slotEnd,
-    required int maxActivePerUser,
-    required int maxReservationsPerPerson,
     int maxAdvanceDays = 365,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
@@ -130,21 +130,24 @@ class ReservationRulesService {
 
     // ── Règle 0b : anticipation maximale ─────────────────────
     final today = DateTime.now();
-    final maxDate = DateTime(today.year, today.month, today.day)
-        .add(Duration(days: maxAdvanceDays + 1));
+    final maxDate = DateTime(
+      today.year,
+      today.month,
+      today.day,
+    ).add(Duration(days: maxAdvanceDays + 1));
     if (slotStart.isAfter(maxDate)) {
       return const RuleCheckResult.blocked(RuleViolation.tooFarInAdvance);
     }
 
-    // ── Charger toutes les réservations actives ───────────────
-    final allActive = await _getUserActiveReservations(user.uid);
-
-    // ── Règle 1 : limite globale (5 max toute l'app) ──────────
-    if (allActive.length >= kMaxDailyReservations) {
+    // ── Règle 1 : quota journalier (5 réservations créées aujourd'hui max) ──
+    final dailyCount = await _getDailyBookingCount(user.uid);
+    if (dailyCount >= kMaxDailyReservations) {
       return const RuleCheckResult.blocked(RuleViolation.globalLimitReached);
     }
 
-    // ── Séparer par entreprise ────────────────────────────────
+    // ── Charger les réservations futures actives (règles 2-4) ────
+    final allActive = await _getUserActiveReservations(user.uid);
+
     final sameCompany = allActive
         .where((d) => (d.data() as Map)['companyId'] == companyId)
         .toList();
@@ -178,18 +181,13 @@ class ReservationRulesService {
     if (sameQueue.isNotEmpty) {
       final res = sameQueue.first;
       final data = res.data() as Map<String, dynamic>;
-      // ignore: unused_local_variable
-      final resEnd = (data['slotEnd'] as Timestamp).toDate();
 
-      // Cooldown écoulé ? → peut réserver (après remplacement)
       if (!_isExpired(data)) {
-        // Créneau encore actif → proposer remplacement
         return RuleCheckResult.blocked(
           RuleViolation.activeInSameQueue,
           conflictingReservation: res,
         );
       }
-      // Cooldown non écoulé
       return RuleCheckResult.blocked(
         RuleViolation.cooldownNotElapsed,
         conflictingReservation: res,
@@ -197,77 +195,33 @@ class ReservationRulesService {
     }
 
     // ── Règle 4 : même entreprise, files différentes ──────────
+    // Le client peut réserver dans plusieurs files de l'entreprise, du
+    // moment que les créneaux ne se chevauchent pas (+ 5 min d'écart).
+    // Le nombre total est déjà plafonné par la règle 1
+    // (kMaxDailyReservations par jour, toutes entreprises confondues).
     final sameCompanyOtherQueues = sameCompany
         .where((d) => (d.data() as Map)['queueId'] != queueId)
         .toList();
 
-    if (maxActivePerUser == 1) {
-      // Défaut : 1 seule résa active dans toute l'entreprise
-      if (sameCompanyOtherQueues.isNotEmpty) {
+    for (final res in sameCompanyOtherQueues) {
+      final data = res.data() as Map<String, dynamic>;
+      final resStart = (data['slotStart'] as Timestamp).toDate();
+      final resEnd = (data['slotEnd'] as Timestamp).toDate();
+
+      if (_overlaps(slotStart, slotEnd, resStart, resEnd)) {
         return RuleCheckResult.blocked(
-          RuleViolation.activeInSameCompany,
-          conflictingReservation: sameCompanyOtherQueues.first,
+          RuleViolation.overlapInSameCompany,
+          conflictingReservation: res,
         );
       }
-    } else {
-      // maxActivePerUser > 1 : vérifier les chevauchements
-      for (final res in sameCompanyOtherQueues) {
-        final data = res.data() as Map<String, dynamic>;
-        final resStart = (data['slotStart'] as Timestamp).toDate();
-        final resEnd = (data['slotEnd'] as Timestamp).toDate();
 
-        if (_overlaps(slotStart, slotEnd, resStart, resEnd)) {
-          return RuleCheckResult.blocked(
-            RuleViolation.overlapInSameCompany,
-            conflictingReservation: res,
-          );
-        }
-
-        // Gap minimum 5 min entre files même entreprise
-        final gapAfter = slotStart.difference(resEnd).inMinutes;
-        final gapBefore = resStart.difference(slotEnd).inMinutes;
-        if (gapAfter < kMinGapSameCompanyMinutes &&
-            gapBefore < kMinGapSameCompanyMinutes) {
-          return RuleCheckResult.blocked(
-            RuleViolation.overlapInSameCompany,
-            conflictingReservation: res,
-          );
-        }
-      }
-
-      // Vérifier que le nombre de résas actives dans cette entreprise
-      // ne dépasse pas maxActivePerUser
-      if (sameCompanyOtherQueues.length >= maxActivePerUser) {
+      final gapAfter = slotStart.difference(resEnd).inMinutes;
+      final gapBefore = resStart.difference(slotEnd).inMinutes;
+      if (gapAfter < kMinGapSameCompanyMinutes &&
+          gapBefore < kMinGapSameCompanyMinutes) {
         return RuleCheckResult.blocked(
-          RuleViolation.activeInSameCompany,
-          conflictingReservation: sameCompanyOtherQueues.first,
-        );
-      }
-    }
-
-    // ── Règle 5 : max réservations par plage (timeSlot) ───────
-    // ⚠️ TODO : activé uniquement si timeSlotId est présent dans les slots.
-    // Ajouter 'timeSlotId' dans la Cloud Function qui génère les slots,
-    // puis supprimer la condition timeSlotId.isNotEmpty ci-dessous.
-    if (timeSlotId.isNotEmpty) {
-      final sameTimeSlot = await _fs
-          .collection('companies')
-          .doc(companyId)
-          .collection('reservations')
-          .where('customerId', isEqualTo: user.uid)
-          .where('timeSlotId', isEqualTo: timeSlotId)
-          .where('status', isEqualTo: 'confirmed')
-          .get();
-
-      final activeInSlotRange = sameTimeSlot.docs.where((doc) {
-        final data = doc.data();
-        final end = (data['slotEnd'] as Timestamp).toDate();
-        return end.isAfter(DateTime.now());
-      }).length;
-
-      if (activeInSlotRange >= maxReservationsPerPerson) {
-        return const RuleCheckResult.blocked(
-          RuleViolation.slotRangeLimitReached,
+          RuleViolation.overlapInSameCompany,
+          conflictingReservation: res,
         );
       }
     }
@@ -277,17 +231,16 @@ class ReservationRulesService {
 
   // ── MESSAGE UI ────────────────────────────────────────────────
 
-  /// Retourne le message à afficher à l'utilisateur selon la violation
   static String violationMessage(
     RuleViolation violation, {
     Map<String, dynamic>? conflictData,
   }) {
     switch (violation) {
       case RuleViolation.globalLimitReached:
-        return 'Vous avez atteint la limite de $kMaxDailyReservations réservations actives. Annulez-en une pour continuer.';
+        return 'Vous avez atteint votre limite de $kMaxDailyReservations réservations pour aujourd\'hui. Revenez demain pour réserver à nouveau.';
 
       case RuleViolation.activeInSameQueue:
-        return ''; // géré par le dialog de remplacement
+        return '';
 
       case RuleViolation.cooldownNotElapsed:
         if (conflictData != null) {
@@ -300,12 +253,6 @@ class ReservationRulesService {
           return 'Vous pourrez réserver à nouveau dans cette file à partir de $h:$m.';
         }
         return 'Veuillez attendre la fin de votre créneau actuel avant de réserver à nouveau.';
-
-      case RuleViolation.slotRangeLimitReached:
-        return 'Vous avez atteint le nombre maximum de réservations pour cette plage horaire.';
-
-      case RuleViolation.activeInSameCompany:
-        return 'Vous avez déjà une réservation active dans cet établissement. Terminez ou annulez-la d\'abord.';
 
       case RuleViolation.overlapInSameCompany:
         return 'Vous avez déjà un rendez-vous prévu à cet horaire.';
@@ -323,8 +270,6 @@ class ReservationRulesService {
 
   // ── TRANSACTION : RÉSERVER ────────────────────────────────────
 
-  /// Réserve un créneau de façon atomique avec toutes les vérifications
-  /// en transaction Firestore (double sécurité).
   Future<String> reserveSlot({
     required String companyId,
     required String queueId,
@@ -332,19 +277,19 @@ class ReservationRulesService {
     required String slotDocId,
     required DateTime slotStart,
     required DateTime slotEnd,
-    required int maxActivePerUser,
-    required int maxReservationsPerPerson,
+    String? companyName,
+    String? queueName,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) throw Exception('Utilisateur non connecté');
 
-    final slotRef = _fs
+    final queueRef = _fs
         .collection('companies')
         .doc(companyId)
         .collection('queues')
-        .doc(queueId)
-        .collection('slots')
-        .doc(slotDocId);
+        .doc(queueId);
+
+    final slotRef = queueRef.collection('slots').doc(slotDocId);
 
     final reservationRef = _fs
         .collection('companies')
@@ -352,7 +297,8 @@ class ReservationRulesService {
         .collection('reservations')
         .doc();
 
-    final dateStr = '${slotStart.year}-'
+    final dateStr =
+        '${slotStart.year}-'
         '${slotStart.month.toString().padLeft(2, '0')}-'
         '${slotStart.day.toString().padLeft(2, '0')}';
     final dailyStatsRef = _fs
@@ -363,10 +309,28 @@ class ReservationRulesService {
         .collection('dailyStats')
         .doc(dateStr);
 
+    final userRef = _fs.collection('users').doc(user.uid);
+
     await _fs.runTransaction((tx) async {
-      // Vérification fraîche du slot
+      // Reads d'abord (obligation Firestore)
       final freshSlot = await tx.get(slotRef);
+      final freshUser = await tx.get(userRef);
+      final freshQueue = await tx.get(queueRef);
+
       if (!freshSlot.exists) throw Exception('Créneau introuvable');
+
+      // File fermée par l'entreprise (fermeture planifiée ou immédiate) :
+      // aucune nouvelle réservation possible, même depuis une page déjà
+      // ouverte ou un client de mauvaise foi.
+      final qd = freshQueue.data();
+      if (isQueueClosedNow(
+        (qd?['closureStart'] as Timestamp?)?.toDate(),
+        (qd?['closureEnd'] as Timestamp?)?.toDate(),
+      )) {
+        throw Exception(
+          'Les réservations pour cette file sont fermées pour le moment.',
+        );
+      }
 
       final freshData = freshSlot.data()!;
       final capacity = (freshData['capacity'] ?? 1) as int;
@@ -382,6 +346,22 @@ class ReservationRulesService {
         throw Exception('Ce créneau a déjà commencé');
       }
 
+      // Double vérification atomique du quota journalier
+      final userData = freshUser.data() ?? {};
+      final today = _todayStr();
+      final lastDate = userData['lastBookingDate'] as String? ?? '';
+      final dailyCount = lastDate == today
+          ? (userData['dailyBookingCount'] as int? ?? 0)
+          : 0;
+      if (dailyCount >= kMaxDailyReservations) {
+        throw Exception(
+          'Limite de $kMaxDailyReservations réservations atteinte pour aujourd\'hui',
+        );
+      }
+
+      final customerName = _fullName(userData);
+
+      // Writes
       tx.set(reservationRef, {
         'companyId': companyId,
         'queueId': queueId,
@@ -389,18 +369,27 @@ class ReservationRulesService {
         'slotId': slotDocId,
         'customerId': user.uid,
         'customerEmail': user.email,
+        if (customerName != null) 'customerName': customerName,
         'slotStart': Timestamp.fromDate(slotStart.toUtc()),
         'slotEnd': Timestamp.fromDate(slotEnd.toUtc()),
         'createdAt': FieldValue.serverTimestamp(),
         'status': 'confirmed',
+        if (companyName != null && companyName.isNotEmpty)
+          'companyName': companyName,
+        if (queueName != null && queueName.isNotEmpty) 'queueName': queueName,
       });
 
       tx.update(slotRef, {'reserved': FieldValue.increment(1)});
 
-      // Mettre à jour les stats journalières atomiquement
       tx.set(dailyStatsRef, {
         'reserved': FieldValue.increment(1),
         'available': FieldValue.increment(-1),
+      }, SetOptions(merge: true));
+
+      // Incrémenter le quota journalier (les annulations ne restituent pas)
+      tx.set(userRef, {
+        'lastBookingDate': today,
+        'dailyBookingCount': lastDate == today ? FieldValue.increment(1) : 1,
       }, SetOptions(merge: true));
     });
 
@@ -421,6 +410,8 @@ class ReservationRulesService {
     required String newSlotDocId,
     required DateTime newSlotStart,
     required DateTime newSlotEnd,
+    String? companyName,
+    String? queueName,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) throw Exception('Utilisateur non connecté');
@@ -439,13 +430,13 @@ class ReservationRulesService {
         .collection('slots')
         .doc(oldSlotDocId);
 
-    final newSlotRef = _fs
+    final newQueueRef = _fs
         .collection('companies')
         .doc(newCompanyId)
         .collection('queues')
-        .doc(newQueueId)
-        .collection('slots')
-        .doc(newSlotDocId);
+        .doc(newQueueId);
+
+    final newSlotRef = newQueueRef.collection('slots').doc(newSlotDocId);
 
     final newResRef = _fs
         .collection('companies')
@@ -453,12 +444,14 @@ class ReservationRulesService {
         .collection('reservations')
         .doc();
 
-    final oldDateStr = '${newSlotStart.year}-'
+    final oldDateStr =
+        '${newSlotStart.year}-'
         '${newSlotStart.month.toString().padLeft(2, '0')}-'
         '${newSlotStart.day.toString().padLeft(2, '0')}';
     // oldSlot date — lire depuis oldSlotDocId n'est pas disponible ici,
     // on suppose que le remplacement reste sur le même jour (cas standard)
-    final newDateStr = '${newSlotStart.year}-'
+    final newDateStr =
+        '${newSlotStart.year}-'
         '${newSlotStart.month.toString().padLeft(2, '0')}-'
         '${newSlotStart.day.toString().padLeft(2, '0')}';
     final oldDailyStatsRef = _fs
@@ -476,16 +469,37 @@ class ReservationRulesService {
         .collection('dailyStats')
         .doc(newDateStr);
 
+    final userRef = _fs.collection('users').doc(user.uid);
+
     await _fs.runTransaction((tx) async {
+      // Reads d'abord (obligation Firestore)
       final freshNewSlot = await tx.get(newSlotRef);
+      final freshUser = await tx.get(userRef);
+      final freshNewQueue = await tx.get(newQueueRef);
       if (!freshNewSlot.exists) throw Exception('Nouveau créneau introuvable');
+
+      final nq = freshNewQueue.data();
+      if (isQueueClosedNow(
+        (nq?['closureStart'] as Timestamp?)?.toDate(),
+        (nq?['closureEnd'] as Timestamp?)?.toDate(),
+      )) {
+        throw Exception(
+          'Les réservations pour cette file sont fermées pour le moment.',
+        );
+      }
 
       final newData = freshNewSlot.data()!;
       final capacity = (newData['capacity'] ?? 1) as int;
       final reserved = (newData['reserved'] ?? 0) as int;
+      final newStatus = (newData['status'] ?? 'open') as String;
+      if (newStatus != 'open') {
+        throw Exception('Ce créneau n\'est plus disponible');
+      }
       if (reserved >= capacity) {
         throw Exception('Ce créneau est maintenant complet');
       }
+
+      final customerName = _fullName(freshUser.data() ?? {});
 
       // Annuler l'ancienne réservation
       tx.update(oldResRef, {
@@ -506,11 +520,15 @@ class ReservationRulesService {
         'slotId': newSlotDocId,
         'customerId': user.uid,
         'customerEmail': user.email,
+        if (customerName != null) 'customerName': customerName,
         'slotStart': Timestamp.fromDate(newSlotStart.toUtc()),
         'slotEnd': Timestamp.fromDate(newSlotEnd.toUtc()),
         'createdAt': FieldValue.serverTimestamp(),
         'status': 'confirmed',
         'replacedReservationId': oldReservationId,
+        if (companyName != null && companyName.isNotEmpty)
+          'companyName': companyName,
+        if (queueName != null && queueName.isNotEmpty) 'queueName': queueName,
       });
       tx.update(newSlotRef, {'reserved': FieldValue.increment(1)});
       tx.set(newDailyStatsRef, {
@@ -545,7 +563,8 @@ class ReservationRulesService {
         .collection('slots')
         .doc(slotDocId);
 
-    final dateStr = '${slotStart.year}-'
+    final dateStr =
+        '${slotStart.year}-'
         '${slotStart.month.toString().padLeft(2, '0')}-'
         '${slotStart.day.toString().padLeft(2, '0')}';
     final dailyStatsRef = _fs

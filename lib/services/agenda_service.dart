@@ -50,6 +50,18 @@ class QueueStats {
   });
 }
 
+/// Entrée cliente avec source (entreprise ou app customer)
+class CustomerEntry {
+  final String id;
+  final String name;
+  final bool isCompanyManual;
+  const CustomerEntry({
+    required this.id,
+    required this.name,
+    required this.isCompanyManual,
+  });
+}
+
 /// Modèle de données d'un créneau tel que lu depuis Firestore
 class AgendaSlot {
   final String id;
@@ -203,6 +215,34 @@ class AgendaService {
                 'Client',
           )
           .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Charge les clients d'un créneau avec leur source (entreprise ou app).
+  /// Lit `companies/{companyId}/reservations`, la collection où sont
+  /// réellement écrites toutes les réservations (client comme manuelles).
+  Future<List<CustomerEntry>> loadCustomers(
+    String slotId, {
+    required String companyId,
+  }) async {
+    try {
+      final snap = await _firestore
+          .collection('companies')
+          .doc(companyId)
+          .collection('reservations')
+          .where('slotId', isEqualTo: slotId)
+          .where('status', isEqualTo: 'confirmed')
+          .get();
+      return snap.docs.map((d) {
+        final data = d.data();
+        return CustomerEntry(
+          id: d.id,
+          name: data['customerName'] as String? ?? 'Client',
+          isCompanyManual: data['source'] == 'company_manual',
+        );
+      }).toList();
     } catch (_) {
       return [];
     }
@@ -383,10 +423,12 @@ class AgendaService {
 
       final docs = timeSlotId != null
           ? slotsSnap.docs
-              .where((d) =>
-                  (d.data() as Map<String, dynamic>)['timeSlotId'] ==
-                  timeSlotId)
-              .toList()
+                .where(
+                  (d) =>
+                      (d.data() as Map<String, dynamic>)['timeSlotId'] ==
+                      timeSlotId,
+                )
+                .toList()
           : slotsSnap.docs;
 
       final batch = _firestore.batch();
@@ -395,8 +437,9 @@ class AgendaService {
       for (final doc in docs) {
         final reserved =
             ((doc.data() as Map<String, dynamic>)['reserved'] as num).toInt();
-        final effectiveCapacity =
-            newCapacity < reserved ? reserved : newCapacity;
+        final effectiveCapacity = newCapacity < reserved
+            ? reserved
+            : newCapacity;
         batch.update(doc.reference, {'capacity': effectiveCapacity});
         affected++;
       }
@@ -414,7 +457,11 @@ class AgendaService {
         }
         if (applyToFuture) {
           await _applyCapacityToFutureDays(
-              queueId, newCapacity, date, timeSlotId: timeSlotId);
+            queueId,
+            newCapacity,
+            date,
+            timeSlotId: timeSlotId,
+          );
         }
       }
 
@@ -431,103 +478,7 @@ class AgendaService {
   }
 
   // ==============================================================
-  // 8. BLOQUER UNE PLAGE
-  //    • Annulation automatique de toutes les réservations
-  //    • Notification aux clients avec la raison
-  // ==============================================================
-
-  Future<ModificationResult> blockPlage({
-    required String queueId,
-    required DateTime date,
-    required String reason,
-  }) async {
-    try {
-      final startOfDay = DateTime(date.year, date.month, date.day);
-      final endOfDay = startOfDay.add(const Duration(days: 1));
-
-      final slotsSnap = await _slotsRef(queueId)
-          .where('start', isGreaterThanOrEqualTo: startOfDay)
-          .where('start', isLessThan: endOfDay)
-          .get();
-
-      final batch = _firestore.batch();
-      int totalAnnulees = 0;
-      final clientsToNotify = <Map<String, dynamic>>[];
-
-      // Récupérer le nom de la file une seule fois
-      final queueDoc = await _queueRef(queueId).get();
-      final queueName = queueDoc.exists
-          ? (queueDoc.data() as Map<String, dynamic>)['name'] as String? ??
-                'File'
-          : 'File';
-
-      for (final slotDoc in slotsSnap.docs) {
-        final slotData = slotDoc.data() as Map<String, dynamic>;
-        final slotReserved = (slotData['reserved'] as num).toInt();
-
-        // Bloquer le créneau
-        batch.update(slotDoc.reference, {
-          'status': 'blocked',
-          'blockReason': reason,
-          'blockedAt': FieldValue.serverTimestamp(),
-        });
-
-        // Si des réservations existent sur ce créneau
-        if (slotReserved > 0) {
-          final resSnap = await _reservationsRef()
-              .where('slotId', isEqualTo: slotDoc.id)
-              .where('status', isEqualTo: 'confirmed')
-              .get();
-
-          for (final resDoc in resSnap.docs) {
-            final resData = resDoc.data() as Map<String, dynamic>;
-
-            // Annuler la réservation
-            batch.update(resDoc.reference, {
-              'status': 'cancelled',
-              'cancelledAt': FieldValue.serverTimestamp(),
-              'cancellationSource': 'company_block',
-              'cancellationReason': reason,
-            });
-
-            totalAnnulees++;
-
-            // Collecter pour notification
-            clientsToNotify.add({
-              'customerId': resData['customerId'],
-              'queueName': queueName,
-              'slotStart': (slotData['start'] as Timestamp).toDate(),
-              'slotEnd': (slotData['end'] as Timestamp).toDate(),
-              'reason': reason,
-            });
-          }
-
-          // Réinitialiser compteurs sur le slot
-          batch.update(slotDoc.reference, {
-            'cancelled': (slotData['cancelled'] as num).toInt() + slotReserved,
-            'reserved': 0,
-          });
-        }
-      }
-
-      await batch.commit();
-
-      // Envoyer notifications (best-effort, ne bloque pas si échoue)
-      _sendBlockNotifications(clientsToNotify);
-
-      return ModificationResult(
-        success: true,
-        message: 'Plage bloquée. $totalAnnulees réservation(s) annulée(s).',
-        reservationsAnnulees: totalAnnulees,
-      );
-    } catch (e) {
-      debugPrint('❌ blockPlage: $e');
-      return ModificationResult(success: false, message: 'Erreur : $e');
-    }
-  }
-
-  // ==============================================================
-  // 9. DÉBLOQUER UNE PLAGE
+  // 8. DÉBLOQUER UNE PLAGE
   // ==============================================================
 
   Future<ModificationResult> unblockPlage({
@@ -737,66 +688,20 @@ class AgendaService {
   }
 
   // ==============================================================
-  // NOTIFICATIONS AUX CLIENTS (best-effort)
-  // ==============================================================
-
-  /// Écrit une notification dans l'historique du client dans Firestore.
-  /// Le client la verra la prochaine fois qu'il ouvre l'appli.
-  Future<void> _sendBlockNotifications(
-    List<Map<String, dynamic>> clients,
-  ) async {
-    await Future.wait(
-      clients.map((client) async {
-        final customerId = client['customerId'] as String?;
-        if (customerId == null) return;
-
-        try {
-          final slotStart = client['slotStart'] as DateTime;
-          final slotEnd = client['slotEnd'] as DateTime;
-          final queueName = client['queueName'] as String;
-          final reason = client['reason'] as String;
-
-          final startStr =
-              '${slotStart.day.toString().padLeft(2, '0')}/'
-              '${slotStart.month.toString().padLeft(2, '0')} '
-              '${slotStart.hour.toString().padLeft(2, '0')}:'
-              '${slotStart.minute.toString().padLeft(2, '0')}';
-          final endStr =
-              '${slotEnd.hour.toString().padLeft(2, '0')}:'
-              '${slotEnd.minute.toString().padLeft(2, '0')}';
-
-          await _firestore
-              .collection('customers')
-              .doc(customerId)
-              .collection('notifications')
-              .add({
-                'title': '❌ Réservation annulée',
-                'body':
-                    'File : $queueName\n'
-                    'Créneau : $startStr – $endStr\n\n'
-                    'Raison : $reason\n\n'
-                    'Nous nous excusons pour ce désagrément.',
-                'type': 'reservation_cancelled_by_company',
-                'read': false,
-                'createdAt': FieldValue.serverTimestamp(),
-              });
-        } catch (e) {
-          debugPrint('⚠️ Notification échouée pour $customerId : $e');
-        }
-      }),
-    );
-  }
-
-  // ==============================================================
   // CALCUL DES STATISTIQUES D'UNE FILE (à partir des slots déjà chargés)
   // ==============================================================
 
   /// Calcule les 3 indicateurs clés à partir d'une liste de slots.
   /// Appelé après loadSlotsForDate() — aucune requête Firestore supplémentaire.
-  QueueStats computeStats(List<AgendaSlot> slots) {
+  ///
+  /// [now] sert de référence pour déterminer si un créneau est déjà passé.
+  /// Par défaut : l'heure actuelle.
+  QueueStats computeStats(List<AgendaSlot> slots, {DateTime? now}) {
     if (slots.isEmpty) {
       return const QueueStats();
     }
+
+    final effectiveNow = now ?? DateTime.now();
 
     // Séparer ouverts vs bloqués
     final openSlots = slots.where((s) => !s.isBlocked).toList();
@@ -807,8 +712,13 @@ class AgendaService {
     int personnesEnAttente = 0;
 
     for (final slot in slots) {
-      // Backlog = cancelled sur TOUS les créneaux (même bloqués)
-      personnesEnAttente += slot.cancelled;
+      // Backlog = clients réservés dont le créneau n'est pas encore passé
+      // (même bloqué : un client déjà réservé reste "en attente" tant que
+      // son heure n'est pas dépassée). Une annulation n'y contribue pas :
+      // elle a déjà fait baisser `reserved` au moment où elle a eu lieu.
+      if (!slot.end.isBefore(effectiveNow)) {
+        personnesEnAttente += slot.reserved;
+      }
 
       // Places restantes et réservées = uniquement sur les créneaux OUVERTS
       if (!slot.isBlocked) {
@@ -844,16 +754,63 @@ class AgendaService {
   ) async {
     final slots = await loadSlotsForDate(queueId, date);
     final now = DateTime.now();
-    final available = slots
-        .where(
-          (s) =>
-              !s.isBlocked &&
-              s.reserved < s.capacity &&
-              s.start.isAfter(now),
-        )
-        .toList()
-      ..sort((a, b) => a.start.compareTo(b.start));
+    final available =
+        slots
+            .where(
+              (s) =>
+                  !s.isBlocked &&
+                  s.reserved < s.capacity &&
+                  s.start.isAfter(now),
+            )
+            .toList()
+          ..sort((a, b) => a.start.compareTo(b.start));
     return available.isEmpty ? null : available.first;
+  }
+
+  // ==============================================================
+  // ESPACES LIBRES — calcul partagé entre modes ponctuel et permanent
+  // ==============================================================
+  /// Retourne les intervalles de [rangeStart, rangeEnd] qui ne sont PAS
+  /// occupés par un créneau déjà réservé (reserved > 0). Les créneaux vides
+  /// existants sont ignorés ici — ils sont destinés à être recréés dans
+  /// ces mêmes espaces avec la nouvelle configuration (durée/capacité).
+  List<({DateTime start, DateTime end})> freeSpans(
+    List<AgendaSlot> existingSlots,
+    DateTime rangeStart,
+    DateTime rangeEnd,
+  ) {
+    final reservedSlots = existingSlots.where((s) => s.reserved > 0).toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
+
+    final spans = <({DateTime start, DateTime end})>[];
+    DateTime cursor = rangeStart;
+    for (final rs in reservedSlots) {
+      if (cursor.isBefore(rs.start)) {
+        spans.add((start: cursor, end: rs.start));
+      }
+      if (rs.end.isAfter(cursor)) cursor = rs.end;
+    }
+    if (cursor.isBefore(rangeEnd)) {
+      spans.add((start: cursor, end: rangeEnd));
+    }
+    return spans;
+  }
+
+  // ==============================================================
+  // ARRONDI AU PROCHAIN MULTIPLE DE 5 MINUTES
+  // ==============================================================
+  /// Arrondit [t] vers l'avant (jamais vers l'arrière) au prochain multiple
+  /// de 5 minutes. Si [t] est déjà exactement sur un multiple de 5, il est
+  /// renvoyé inchangé. Gère nativement les débordements d'heure/jour
+  /// (ex: 12:58 → 13:00) via l'arithmétique normalisée de [DateTime.add].
+  DateTime roundUpToNext5Minutes(DateTime t) {
+    final remainder = t.minute % 5;
+    final hasSubMinutePart =
+        t.second != 0 || t.millisecond != 0 || t.microsecond != 0;
+    if (remainder == 0 && !hasSubMinutePart) return t;
+    final minutesToAdd = 5 - remainder;
+    final truncated = DateTime(t.year, t.month, t.day, t.hour, t.minute);
+    return truncated.add(Duration(minutes: minutesToAdd));
   }
 
   // ==============================================================
@@ -868,12 +825,15 @@ class AgendaService {
     required int capacity,
     required List<int> workingDays,
     required int maxAdvanceDays,
-    required int maxReservationsPerPerson,
     required int reservationDeadlineMinutes,
     String? companyId,
+    // Ancre horaire optionnelle : figée par l'appelant (ex: revert d'une
+    // édition en direct) pour un résultat stable au lieu de recalculer
+    // "maintenant" à chaque appel. Par défaut, l'instant présent.
+    DateTime? anchorNow,
   }) async {
     final cid = companyId ?? _companyId;
-    final today = DateTime.now();
+    final today = anchorNow ?? DateTime.now();
     final queuePath = _firestore
         .collection('companies')
         .doc(cid)
@@ -891,74 +851,103 @@ class AgendaService {
     final endParts = endTimeStr.split(':');
 
     for (int i = 0; i <= 7; i++) {
-      final date =
-          DateTime(today.year, today.month, today.day).add(Duration(days: i));
+      final date = DateTime(
+        today.year,
+        today.month,
+        today.day,
+      ).add(Duration(days: i));
       if (!workingDays.contains(date.weekday)) continue;
       processedDays.add(date);
 
       final startOfDay = date;
       final endOfDay = date.add(const Duration(days: 1));
-      Set<DateTime> existingStarts = {};
+      List<AgendaSlot> existingSlots = [];
       try {
         final existingSnap = await slotsRef
             .where('start', isGreaterThanOrEqualTo: startOfDay)
             .where('start', isLessThan: endOfDay)
             .get(const GetOptions(source: Source.cache));
-        existingStarts = existingSnap.docs
-            .map((d) => d.data()['start'] as Timestamp)
-            .map((ts) => ts.toDate())
-            .toSet();
+        existingSlots = existingSnap.docs
+            .where((d) => d.data()['timeSlotId'] == timeSlotId)
+            .map((d) => slotFromDoc(d, queueId: queueId))
+            .toList();
       } catch (_) {}
 
       final plageStart = DateTime(
-        date.year, date.month, date.day,
-        int.parse(startParts[0]), int.parse(startParts[1]),
+        date.year,
+        date.month,
+        date.day,
+        int.parse(startParts[0]),
+        int.parse(startParts[1]),
       );
       final plageEnd = endTimeStr == '24:00'
-          ? DateTime(date.year, date.month, date.day)
-              .add(const Duration(days: 1))
-          : DateTime(date.year, date.month, date.day,
-              int.parse(endParts[0]), int.parse(endParts[1]));
+          ? DateTime(
+              date.year,
+              date.month,
+              date.day,
+            ).add(const Duration(days: 1))
+          : DateTime(
+              date.year,
+              date.month,
+              date.day,
+              int.parse(endParts[0]),
+              int.parse(endParts[1]),
+            );
 
-      DateTime cursor = plageStart;
-      if (i == 0) {
-        final now = DateTime.now();
-        while (cursor.isBefore(now) &&
-            cursor.add(Duration(minutes: duration)).compareTo(plageEnd) <= 0) {
-          cursor = cursor.add(Duration(minutes: duration));
-        }
-      }
-
-      while (cursor.add(Duration(minutes: duration)).compareTo(plageEnd) <= 0) {
-        final slotEnd = cursor.add(Duration(minutes: duration));
-        if (!existingStarts.contains(cursor)) {
-          batch.set(slotsRef.doc(), {
-            'start': cursor,
-            'end': slotEnd,
-            'capacity': capacity,
-            'reserved': 0,
-            'cancelled': 0,
-            'status': 'open',
-            'duration': duration,
-            'isLegacy': false,
-            'timeSlotId': timeSlotId,
-            'maxReservationsPerPerson': maxReservationsPerPerson,
-            'reservationDeadlineMinutes': reservationDeadlineMinutes,
-          });
+      // Créneaux vides existants dans cette plage : recréés ci-dessous avec
+      // la nouvelle configuration, dans les mêmes espaces libres. Les
+      // créneaux réservés, eux, ne sont jamais touchés.
+      for (final s in existingSlots) {
+        if (s.reserved == 0) {
+          batch.delete(slotsRef.doc(s.id));
           batchCount++;
-          created++;
           if (batchCount >= 400) {
             await batch.commit();
             batch = _firestore.batch();
             batchCount = 0;
           }
         }
-        cursor = slotEnd;
+      }
+
+      final now = today;
+      final roundedNow = roundUpToNext5Minutes(now);
+      for (final span in freeSpans(existingSlots, plageStart, plageEnd)) {
+        var cursor = span.start.isBefore(now) ? roundedNow : span.start;
+        while (true) {
+          final slotEnd = cursor.add(Duration(minutes: duration));
+          if (!slotEnd.isAfter(span.end) &&
+              slotEnd.difference(cursor).inMinutes >= 5) {
+            batch.set(slotsRef.doc(), {
+              'start': Timestamp.fromDate(cursor),
+              'end': Timestamp.fromDate(slotEnd),
+              'capacity': capacity,
+              'reserved': 0,
+              'cancelled': 0,
+              'status': 'open',
+              'duration': duration,
+              'isLegacy': false,
+              'timeSlotId': timeSlotId,
+              'reservationDeadlineMinutes': reservationDeadlineMinutes,
+            });
+            batchCount++;
+            created++;
+            if (batchCount >= 400) {
+              await batch.commit();
+              batch = _firestore.batch();
+              batchCount = 0;
+            }
+            cursor = slotEnd;
+          } else {
+            break;
+          }
+        }
       }
     }
 
     if (batchCount > 0) await batch.commit();
-    await queuePath.update({'slotsLastGenerated': FieldValue.serverTimestamp()});
+    await queuePath.update({
+      'slotsLastGenerated': FieldValue.serverTimestamp(),
+    });
 
     try {
       for (final date in processedDays) {
@@ -1003,8 +992,11 @@ class AgendaService {
     String? companyId,
   }) async {
     final cid = companyId ?? _companyId;
-    final today =
-        DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+    final today = DateTime(
+      DateTime.now().year,
+      DateTime.now().month,
+      DateTime.now().day,
+    );
     final slotsRef = _firestore
         .collection('companies')
         .doc(cid)
@@ -1014,8 +1006,7 @@ class AgendaService {
 
     QuerySnapshot snap;
     try {
-      snap =
-          await slotsRef.where('start', isGreaterThanOrEqualTo: today).get();
+      snap = await slotsRef.where('start', isGreaterThanOrEqualTo: today).get();
     } on FirebaseException catch (e) {
       if (e.code == 'unavailable') {
         snap = await slotsRef
@@ -1044,72 +1035,23 @@ class AgendaService {
   }
 
   // ==============================================================
-  // 12. SUPPRIMER LES CRÉNEAUX VIDES AU-DELÀ D'UN HORIZON
-  // ==============================================================
-  Future<void> deleteEmptyFutureSlotsForTimeSlotBeyondHorizon(
-    String timeSlotId,
-    String queueId,
-    int maxAdvanceDays, {
-    String? companyId,
-  }) async {
-    final cid = companyId ?? _companyId;
-    final today =
-        DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
-    final horizon = today.add(const Duration(days: 8));
-    final slotsRef = _firestore
-        .collection('companies')
-        .doc(cid)
-        .collection('queues')
-        .doc(queueId)
-        .collection('slots');
-
-    QuerySnapshot snap;
-    try {
-      snap =
-          await slotsRef.where('start', isGreaterThanOrEqualTo: horizon).get();
-    } on FirebaseException catch (e) {
-      if (e.code == 'unavailable') {
-        snap = await slotsRef
-            .where('start', isGreaterThanOrEqualTo: horizon)
-            .get(const GetOptions(source: Source.cache));
-      } else {
-        rethrow;
-      }
-    }
-
-    WriteBatch batch = _firestore.batch();
-    int batchCount = 0;
-    for (final doc in snap.docs) {
-      final data = doc.data() as Map<String, dynamic>;
-      if (data['timeSlotId'] != timeSlotId) continue;
-      if ((data['reserved'] as int? ?? 0) > 0) continue;
-      batch.delete(doc.reference);
-      batchCount++;
-      if (batchCount >= 400) {
-        await batch.commit();
-        batch = _firestore.batch();
-        batchCount = 0;
-      }
-    }
-    if (batchCount > 0) await batch.commit();
-  }
-
-  // ==============================================================
-  // 13. MISE À JOUR DES PARAMÈTRES SUR LES CRÉNEAUX EXISTANTS
+  // 12. MISE À JOUR DES PARAMÈTRES SUR LES CRÉNEAUX EXISTANTS
   // ==============================================================
   Future<int> updateSlotParameters({
     required String timeSlotId,
     required String queueId,
     required int capacity,
     required int duration,
-    required int maxReservationsPerPerson,
     required int reservationDeadlineMinutes,
     required int maxAdvanceDays,
     String? companyId,
   }) async {
     final cid = companyId ?? _companyId;
-    final today =
-        DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+    final today = DateTime(
+      DateTime.now().year,
+      DateTime.now().month,
+      DateTime.now().day,
+    );
     final maxDate = today.add(const Duration(days: 8));
     final slotsRef = _firestore
         .collection('companies')
@@ -1147,7 +1089,6 @@ class AgendaService {
       batch.update(doc.reference, {
         'capacity': safeCapacity,
         'duration': duration,
-        'maxReservationsPerPerson': maxReservationsPerPerson,
         'reservationDeadlineMinutes': reservationDeadlineMinutes,
       });
       batchCount++;

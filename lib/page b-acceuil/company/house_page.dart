@@ -1,13 +1,16 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/agenda_service.dart';
-import 'package:baxa/page b-acceuil/company/settings_page.dart';
 import 'package:baxa/page b-acceuil/company/team_page.dart';
 import 'package:baxa/main.dart' show routeObserver;
+import 'package:baxa/services/onboarding_service.dart';
+import 'package:baxa/widgets/onboarding_widgets.dart';
+import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 
 part 'house_widgets.dart';
 part 'house_dialogs.dart';
@@ -39,6 +42,8 @@ class _HousePageState extends State<HousePage>
   late PageController _pageController;
   final Map<String, ScrollController> _scrollControllers = {};
   bool _quickAddLoading = false;
+  final Map<String, bool> _pastExpanded = {};
+  final Map<String, bool> _headerExpanded = {};
 
   @override
   bool get wantKeepAlive => true;
@@ -60,9 +65,6 @@ class _HousePageState extends State<HousePage>
   }
 
   @override
-  void didPopNext() => _n.refreshSilent();
-
-  @override
   void dispose() {
     routeObserver.unsubscribe(this);
     _n.dispose();
@@ -74,12 +76,22 @@ class _HousePageState extends State<HousePage>
   }
 
   // ── Scroll infini : un controller par file ────────────────
+  // Seuil de scroll (px) au-delà duquel le panneau "Modifier" de l'en-tête
+  // se replie automatiquement — évite de le refermer sur un micro-mouvement.
+  static const double _autoCollapseScrollThreshold = 30;
+
   ScrollController _scrollControllerFor(String queueId) {
     return _scrollControllers.putIfAbsent(queueId, () {
       final sc = ScrollController();
       sc.addListener(() {
         if (sc.position.pixels >= sc.position.maxScrollExtent - 200) {
           _n.loadMoreSlots(queueId);
+        }
+        // Repli auto du panneau "Modifier" dès qu'on scrolle vers le bas —
+        // même état que le bouton "Masquer", donc même animation fluide.
+        if ((_headerExpanded[queueId] ?? false) &&
+            sc.position.pixels > _autoCollapseScrollThreshold) {
+          setState(() => _headerExpanded[queueId] = false);
         }
       });
       return sc;
@@ -92,8 +104,31 @@ class _HousePageState extends State<HousePage>
     super.build(context);
     return ListenableBuilder(
       listenable: _n,
-      builder: (context, _) => Scaffold(
-        backgroundColor: Colors.grey.shade50,
+      builder: (context, _) {
+        // Staff retiré de l'équipe (détecté à l'ouverture ou en direct) :
+        // déconnexion déjà faite côté notifier, il ne reste qu'à renvoyer
+        // vers l'écran de choix, en vidant toute la pile de navigation.
+        if (_n.revoked) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(builder: (_) => const ChoosePage()),
+              (route) => false,
+            );
+          });
+          return const Scaffold(
+            backgroundColor: Color(0xFFF6FAF7),
+            body: Center(child: CircularProgressIndicator(color: _green)),
+          );
+        }
+        return _buildScaffold();
+      },
+    );
+  }
+
+  Widget _buildScaffold() {
+    return Scaffold(
+        backgroundColor: const Color(0xFFF6FAF7),
         appBar: _buildAppBar(),
         body: _n.isLoading
             ? const Center(child: CircularProgressIndicator(color: _green))
@@ -124,7 +159,6 @@ class _HousePageState extends State<HousePage>
               )
             : null,
         floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-      ),
     );
   }
 
@@ -135,34 +169,14 @@ class _HousePageState extends State<HousePage>
       backgroundColor: Colors.white,
       automaticallyImplyLeading: false,
       toolbarHeight: 48,
-      title: Row(
-        children: [
-          Text(
-            'Baxa',
-            style: GoogleFonts.poppins(
-              color: _green,
-              fontSize: 25,
-              fontWeight: FontWeight.w800,
-              letterSpacing: -0.5,
-            ),
-          ),
-          if (_n.companyName.isNotEmpty) ...[
-            const SizedBox(width: 8),
-            Container(width: 1, height: 16, color: Colors.grey.shade300),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                _n.companyName,
-                style: const TextStyle(
-                  color: Colors.black54,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ],
+      title: Text(
+        'Baxa',
+        style: GoogleFonts.poppins(
+          color: _green,
+          fontSize: 25,
+          fontWeight: FontWeight.w800,
+          letterSpacing: -0.5,
+        ),
       ),
       actions: [
         if (!_n.isStaff)
@@ -186,14 +200,14 @@ class _HousePageState extends State<HousePage>
         _n.selectedDate.day == now.day;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       decoration: BoxDecoration(
         color: Colors.white,
         boxShadow: [
           BoxShadow(
-            color: Colors.grey.shade200,
-            blurRadius: 4,
-            offset: const Offset(0, 2),
+            color: Colors.black.withValues(alpha: 0.07),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
@@ -227,12 +241,16 @@ class _HousePageState extends State<HousePage>
                       color: isToday ? _green : Colors.grey.shade600,
                     ),
                     const SizedBox(width: 8),
-                    Text(
-                      _dateFormat.format(_n.selectedDate),
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14,
-                        color: isToday ? _green : Colors.black87,
+                    Flexible(
+                      child: Text(
+                        _dateFormat.format(_n.selectedDate),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                          color: isToday ? _green : Colors.black87,
+                        ),
                       ),
                     ),
                     if (isToday) ...[
@@ -339,21 +357,57 @@ class _HousePageState extends State<HousePage>
 
   Widget _buildRetryState() => _RetryState(onRetry: _n.refreshSilent);
 
-  Widget _buildEmptyState() => _EmptyState(
-    onCreateQueue: () async {
-      await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => SettingsPage(autoOpenCreateDialog: true),
-        ),
-      );
-      // Le stream détecte la création de file automatiquement.
-      // initialize() causerait un double-init avec _isLoading bloqué.
-      if (mounted) _n.refreshSilent();
-    },
-  );
+  Widget _buildEmptyState() => const _EmptyState();
 
   // ── Vue complète d'une file ───────────────────────────────
+  // Construit la liste de widgets (cartes + séparateurs) pour un groupe de créneaux.
+  List<Widget> _buildSlotWidgetList(
+    List<AgendaSlot> slots,
+    Map<String, int> plageOrder,
+    bool hasMultiplePlages,
+    _QueueAgenda queue,
+  ) {
+    final widgets = <Widget>[];
+    for (int i = 0; i < slots.length; i++) {
+      final current = slots[i];
+
+      if (i > 0 && hasMultiplePlages && current.timeSlotId.isNotEmpty) {
+        final prev = slots[i - 1];
+        if (prev.timeSlotId != current.timeSlotId) {
+          widgets.add(_PlageSeparator(
+            plageNumber: plageOrder[current.timeSlotId]!,
+            startTime: current.start,
+            timeFormat: _timeFormat,
+          ));
+        }
+      }
+
+      widgets.add(_SlotCard(
+        slot: current,
+        timeFormat: _timeFormat,
+        isPast: _isPastSlot(current),
+        onTap: () => _showSlotDetails(current, queue),
+      ));
+
+      if (i < slots.length - 1) {
+        final next = slots[i + 1];
+        final sameTimeslot = current.timeSlotId.isNotEmpty &&
+            current.timeSlotId == next.timeSlotId;
+        if (sameTimeslot) {
+          final gap = next.start.difference(current.end);
+          if (gap.inMinutes > 0) {
+            widgets.add(_TimeslotSeparator(
+              endTime: current.end,
+              startTime: next.start,
+              timeFormat: _timeFormat,
+            ));
+          }
+        }
+      }
+    }
+    return widgets;
+  }
+
   Widget _buildQueueView(_QueueAgenda queue) {
     final slotsForQueue = queue.slots.toList()
       ..sort((a, b) => a.start.compareTo(b.start));
@@ -366,52 +420,6 @@ class _HousePageState extends State<HousePage>
     }
     final hasMultiplePlages = plageOrder.length >= 2;
 
-    final slotWidgets = <Widget>[];
-    for (int i = 0; i < slotsForQueue.length; i++) {
-      final current = slotsForQueue[i];
-
-      if (i > 0 && hasMultiplePlages && current.timeSlotId.isNotEmpty) {
-        final prev = slotsForQueue[i - 1];
-        if (prev.timeSlotId != current.timeSlotId) {
-          slotWidgets.add(
-            _PlageSeparator(
-              plageNumber: plageOrder[current.timeSlotId]!,
-              startTime: current.start,
-              timeFormat: _timeFormat,
-            ),
-          );
-        }
-      }
-
-      slotWidgets.add(
-        _SlotCard(
-          slot: current,
-          timeFormat: _timeFormat,
-          onTap: () => _showSlotDetails(current, queue),
-        ),
-      );
-
-      if (i < slotsForQueue.length - 1) {
-        final next = slotsForQueue[i + 1];
-        final sameTimeslot = current.timeSlotId.isNotEmpty &&
-            current.timeSlotId == next.timeSlotId;
-        if (sameTimeslot) {
-          final gap = next.start.difference(current.end);
-          if (gap.inMinutes > 0) {
-            slotWidgets.add(
-              _TimeslotSeparator(
-                endTime: current.end,
-                startTime: next.start,
-                timeFormat: _timeFormat,
-              ),
-            );
-          }
-        }
-      }
-    }
-
-    final isWorkingDay = queue.weekdays.isEmpty ||
-        queue.weekdays.contains(_n.selectedDate.weekday);
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final selectedDay = DateTime(
@@ -420,9 +428,28 @@ class _HousePageState extends State<HousePage>
       _n.selectedDate.day,
     );
     final isToday = selectedDay == today;
+    final isWorkingDay = queue.weekdays.isEmpty ||
+        queue.weekdays.contains(_n.selectedDate.weekday);
     final isDayOver = isToday && isWorkingDay;
-    final isBeyondHorizon = selectedDay.isAfter(today.add(const Duration(days: 7)));
-    final isBeforeHistory = selectedDay.isBefore(today.subtract(const Duration(days: 7)));
+    final isBeyondHorizon =
+        selectedDay.isAfter(today.add(const Duration(days: 7)));
+    final isBeforeHistory =
+        selectedDay.isBefore(today.subtract(const Duration(days: 7)));
+
+    // Séparation passé / à venir uniquement pour aujourd'hui.
+    final pastSlots = isToday
+        ? slotsForQueue.where((s) => s.end.isBefore(now)).toList()
+        : <AgendaSlot>[];
+    final upcomingSlots = isToday
+        ? slotsForQueue.where((s) => !s.end.isBefore(now)).toList()
+        : slotsForQueue;
+
+    final pastWidgets = _buildSlotWidgetList(
+        pastSlots, plageOrder, hasMultiplePlages, queue);
+    final upcomingWidgets = _buildSlotWidgetList(
+        upcomingSlots, plageOrder, hasMultiplePlages, queue);
+
+    final isExpanded = _pastExpanded[queue.id] ?? false;
 
     return RefreshIndicator(
       onRefresh: () async => _n.refreshSilent(),
@@ -503,8 +530,27 @@ class _HousePageState extends State<HousePage>
                 ],
               ),
             )
-          else
-            ...slotWidgets,
+          else ...[
+            // ── Créneaux dépassés (aujourd'hui uniquement) ──────────────
+            if (isToday && pastSlots.isNotEmpty) ...[
+              _PastSlotsToggle(
+                count: pastSlots.length,
+                isCountApproximate:
+                    upcomingSlots.isEmpty && _n.hasMore(queue.id),
+                isExpanded: isExpanded,
+                onTap: () => setState(
+                  () => _pastExpanded[queue.id] = !isExpanded,
+                ),
+              ),
+              _PastSlotsSection(
+                isExpanded: isExpanded,
+                children: pastWidgets,
+              ),
+            ],
+
+            // ── Créneaux à venir ─────────────────────────────────────────
+            ...upcomingWidgets,
+          ],
 
           const SizedBox(height: 8),
           if (_n.isLoadingMore(queue.id))
@@ -536,6 +582,13 @@ class _HousePageState extends State<HousePage>
 
   // ── Carte en-tête de file ─────────────────────────────────
   Widget _buildQueueHeaderCard(_QueueAgenda queue) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final sel = _n.selectedDate;
+    final selectedDay = DateTime(sel.year, sel.month, sel.day);
+    final isExpanded = _headerExpanded[queue.id] ?? false;
+    final pendingRevert = _n.mostRecentPendingRevert(queue);
+
     return _QueueHeaderCard(
       queue: queue,
       currentDuration:
@@ -546,7 +599,27 @@ class _HousePageState extends State<HousePage>
       onCapacityChanged: (delta) => _onCapacityChanged(queue, delta),
       onBlock: () => _onBlockRequest(queue),
       onUnblock: () => _onUnblock(queue),
+      isPastDay: selectedDay.isBefore(today) ||
+          (queue.weekdays.isNotEmpty &&
+              !queue.weekdays.contains(_n.selectedDate.weekday)),
+      isExpanded: isExpanded,
+      onToggle: () => setState(() => _headerExpanded[queue.id] = !isExpanded),
+      readOnly: _n.isStaff,
+      onRevertDuration: pendingRevert != null
+          ? () => _onRevertDuration(pendingRevert.tsInfo.id)
+          : null,
     );
+  }
+
+  bool _isPastSlot(AgendaSlot slot) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final sel = _n.selectedDate;
+    final selectedDay = DateTime(sel.year, sel.month, sel.day);
+
+    if (selectedDay.isBefore(today)) return true;
+    if (selectedDay.isAfter(today)) return false;
+    return slot.end.isBefore(now);
   }
 
   // ── Détail d'un créneau (lazy loading noms) ───────────────
@@ -560,8 +633,12 @@ class _HousePageState extends State<HousePage>
         queue: queue,
         timeFormat: _timeFormat,
         agenda: _n.agenda,
+        companyId: _n.companyId ?? '',
         green: _green,
+        isPast: _isPastSlot(slot),
         onAddClient: (name) => _createManualAppointmentForSlot(name, queue, slot),
+        onDeleteClient: (customer) =>
+            _deleteManualClientForSlot(customer, queue, slot),
       ),
     );
   }
@@ -594,30 +671,73 @@ class _HousePageState extends State<HousePage>
   // ── Ajout rapide (FAB) — carousel des créneaux disponibles ──
   Future<void> _showQuickAddDialog() async {
     final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final selectedDay = DateTime(
+      _n.selectedDate.year,
+      _n.selectedDate.month,
+      _n.selectedDate.day,
+    );
+    // Borne basse : "maintenant" seulement si on regarde aujourd'hui
+    // (exclut les créneaux déjà passés) — sinon le début du jour affiché,
+    // pour ne jamais proposer un créneau d'un autre jour que celui-ci.
+    final lowerBound = selectedDay.isAfter(today) ? selectedDay : now;
 
-    // 1. Trouver la file avec le prochain créneau (depuis la mémoire, rapide)
-    _QueueAgenda? bestQueue;
-    AgendaSlot? bestSlot;
-    for (final queue in _n.queues.whereType<_QueueAgenda>()) {
-      if (queue.isBlocked) continue;
-      final candidates = queue.slots
-          .where((s) =>
-              !s.isBlocked && s.reserved < s.capacity && s.start.isAfter(now))
-          .toList()
-        ..sort((a, b) => a.start.compareTo(b.start));
-      if (candidates.isNotEmpty &&
-          (bestSlot == null ||
-              candidates.first.start.isBefore(bestSlot.start))) {
-        bestSlot = candidates.first;
-        bestQueue = queue;
-      }
+    // 1. File actuellement affichée (page visible du PageView, ou l'unique
+    // file s'il n'y en a qu'une) — le bouton + agit toujours sur ce que
+    // l'utilisateur a sous les yeux, jamais sur une autre file.
+    final queues = _n.queues.whereType<_QueueAgenda>().toList();
+    if (queues.isEmpty) return;
+    var currentIndex = 0;
+    if (queues.length > 1 && _pageController.hasClients) {
+      currentIndex =
+          (_pageController.page ?? 0).round().clamp(0, queues.length - 1);
     }
+    final bestQueue = queues[currentIndex];
 
-    if (bestQueue == null) {
+    final hasCandidate = !bestQueue.isBlocked &&
+        bestQueue.slots.any((s) =>
+            !s.isBlocked && s.reserved < s.capacity && s.start.isAfter(lowerBound));
+
+    if (!hasCandidate) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Aucune place disponible en ce moment.')),
+          SnackBar(
+            content: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(7),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade100,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(
+                    Icons.event_busy_rounded,
+                    color: Colors.orange.shade700,
+                    size: 16,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Aucune place disponible en ce moment.',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w500,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: const Color(0xFF1A1C2E),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+            margin: const EdgeInsets.all(16),
+            elevation: 4,
+            duration: const Duration(seconds: 3),
+          ),
         );
       }
       return;
@@ -636,8 +756,43 @@ class _HousePageState extends State<HousePage>
     if (available.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Aucune place disponible en ce moment.')),
+          SnackBar(
+            content: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(7),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade100,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(
+                    Icons.event_busy_rounded,
+                    color: Colors.orange.shade700,
+                    size: 16,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Aucune place disponible en ce moment.',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w500,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: const Color(0xFF1A1C2E),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+            margin: const EdgeInsets.all(16),
+            elevation: 4,
+            duration: const Duration(seconds: 3),
+          ),
         );
       }
       return;
@@ -666,11 +821,106 @@ class _HousePageState extends State<HousePage>
   ) async {
     final error = await _n.createManualAppointment(clientName, queue, slot);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(error ?? 'Client ajouté avec succès'),
-      backgroundColor: error != null ? Colors.red.shade600 : null,
-    ));
-    _n.refreshSilent();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(7),
+              decoration: BoxDecoration(
+                color: error != null
+                    ? Colors.red.shade100
+                    : const Color(0xFFE8F5ED),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(
+                error != null
+                    ? Icons.error_rounded
+                    : Icons.check_circle_rounded,
+                color: error != null ? Colors.red.shade600 : _green,
+                size: 16,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                error ?? 'Client ajouté avec succès',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w500,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: const Color(0xFF1A1C2E),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+        ),
+        margin: const EdgeInsets.all(16),
+        elevation: 4,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  Future<bool> _deleteManualClientForSlot(
+    CustomerEntry customer,
+    _QueueAgenda queue,
+    AgendaSlot slot,
+  ) async {
+    final error = await _n.deleteManualReservation(
+      reservationId: customer.id,
+      queue: queue,
+      slot: slot,
+    );
+    if (!mounted) return false;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(7),
+              decoration: BoxDecoration(
+                color: error != null
+                    ? Colors.red.shade100
+                    : const Color(0xFFE8F5ED),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(
+                error != null
+                    ? Icons.error_rounded
+                    : Icons.check_circle_rounded,
+                color: error != null ? Colors.red.shade600 : _green,
+                size: 16,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                error ?? 'Client retiré du créneau',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w500,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: const Color(0xFF1A1C2E),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+        ),
+        margin: const EdgeInsets.all(16),
+        elevation: 4,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+    return error == null;
   }
 
   // ── Blocage ───────────────────────────────────────────────
@@ -692,6 +942,7 @@ class _HousePageState extends State<HousePage>
       isScrollControlled: true,
       builder: (_) => _BlockSheet(
         timeslots: timeslots,
+        daySlots: queue.slots,
         onConfirm: ({required String? timeSlotId, required String reason}) async {
           final error = await _n.blockTimeSlot(
             queueId: queue.id,
@@ -730,12 +981,21 @@ class _HousePageState extends State<HousePage>
             !s.start.isBefore(plageStart) && !s.end.isAfter(plageEnd))
         .toList();
 
+    final now = DateTime.now();
+    final isViewingToday = _n.selectedDate.year == now.year &&
+        _n.selectedDate.month == now.month &&
+        _n.selectedDate.day == now.day;
+    final todayDone = isViewingToday &&
+        (slotsInRange.isEmpty ||
+            slotsInRange.every((s) => s.end.isBefore(now)));
+
     final res = await _showModifDialog(
       context,
       title: 'Modifier la durée',
       preview: 'Durée : ${tsInfo.duration} min → $newDuration min',
       hasReservations: _n.hasReservationsInSlots(slotsInRange),
       isCapacity: false,
+      todayDone: todayDone,
     );
     if (res == null) return;
 
@@ -751,6 +1011,33 @@ class _HousePageState extends State<HousePage>
     if (mounted) {
       _snackBar(result);
       _n.refreshSilent();
+      // Cette modification vient de créer une trace de révocation — si
+      // c'est la 1ère fois que l'icône de retour apparaît pour cette
+      // entreprise, on le signale une seule fois.
+      if (result.success) {
+        final seen = await _n.hasSeenRevertHint();
+        if (!seen && mounted) {
+          await showIconDiscoverySpotlight(
+            context,
+            mockIcon: Icons.timer,
+            badgeIcon: Icons.undo_rounded,
+            title: 'Nouveau : bouton retour',
+            body: 'Cette icône apparaît après une modification de durée en '
+                'direct. Vous avez 5 minutes pour l\'annuler en appuyant '
+                'simplement dessus.',
+          );
+          if (mounted) await _n.markRevertHintSeen();
+        }
+      }
+    }
+  }
+
+  // ── Révocation durée (undo 5 min) ──────────────────────────
+  Future<void> _onRevertDuration(String timeSlotId) async {
+    final result = await _n.revertDurationChange(timeSlotId);
+    if (mounted) {
+      _snackBar(result);
+      if (result.success) _n.refreshSilent();
     }
   }
 
@@ -788,12 +1075,21 @@ class _HousePageState extends State<HousePage>
       }
     }
 
+    final now = DateTime.now();
+    final isViewingToday = _n.selectedDate.year == now.year &&
+        _n.selectedDate.month == now.month &&
+        _n.selectedDate.day == now.day;
+    final todayDone = isViewingToday &&
+        (slotsInRange.isEmpty ||
+            slotsInRange.every((s) => s.end.isBefore(now)));
+
     final res = await _showModifDialog(
       context,
       title: 'Modifier la capacité',
       preview: 'Capacité : ${tsInfo.capacity} pers. → $newCapacity pers.',
       hasReservations: _n.hasReservationsInSlots(slotsInRange),
       isCapacity: true,
+      todayDone: todayDone,
     );
     if (res == null) return;
 
@@ -816,7 +1112,25 @@ class _HousePageState extends State<HousePage>
   Future<_TimeSlotInfo?> _selectTimeSlot(_QueueAgenda queue) async {
     final timeslots = await _n.fetchTimeSlots(queue.id);
     if (timeslots.isEmpty) return null;
-    if (timeslots.length == 1) return timeslots.first;
+
+    // Les plages en cours de suppression programmée ne sont pas modifiables.
+    final editable = timeslots.where((ts) => ts.deleteAfter == null).toList();
+    if (editable.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Toutes les plages de cette file sont en cours de suppression.',
+            ),
+          ),
+        );
+      }
+      return null;
+    }
+    // Sélection directe uniquement si la file n'a qu'une plage (et qu'elle
+    // est modifiable) ; sinon on montre le sélecteur, où les plages en
+    // suppression apparaissent grisées.
+    if (timeslots.length == 1) return editable.first;
     if (!mounted) return null;
     return showModalBottomSheet<_TimeSlotInfo>(
       context: context,
@@ -866,16 +1180,22 @@ class _SlotDetailDialog extends StatefulWidget {
   final _QueueAgenda queue;
   final DateFormat timeFormat;
   final AgendaService agenda;
+  final String companyId;
   final Color green;
+  final bool isPast;
   final Future<void> Function(String name)? onAddClient;
+  final Future<bool> Function(CustomerEntry customer)? onDeleteClient;
 
   const _SlotDetailDialog({
     required this.slot,
     required this.queue,
     required this.timeFormat,
     required this.agenda,
+    required this.companyId,
     required this.green,
+    this.isPast = false,
     this.onAddClient,
+    this.onDeleteClient,
   });
 
   @override
@@ -883,15 +1203,18 @@ class _SlotDetailDialog extends StatefulWidget {
 }
 
 class _SlotDetailDialogState extends State<_SlotDetailDialog> {
-  List<String>? _customerNames;
+  List<CustomerEntry>? _customers;
   bool _loadingNames = false;
   bool _showAddForm = false;
   final _nameCtrl = TextEditingController();
+  String? _nameError;
+  late int _reservedCount;
 
   @override
   void initState() {
     super.initState();
-    if (widget.slot.reserved > 0) _loadNames();
+    _reservedCount = widget.slot.reserved;
+    if (_reservedCount > 0) _loadNames();
   }
 
   @override
@@ -900,13 +1223,53 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
     super.dispose();
   }
 
+  Future<void> _confirmDeleteCustomer(CustomerEntry customer) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Supprimer ce client ?'),
+        content: Text(
+          '${customer.name} sera retiré de ce créneau. Cette action est irréversible.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red.shade600,
+            ),
+            child: const Text(
+              'Supprimer',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted || widget.onDeleteClient == null) return;
+
+    final ok = await widget.onDeleteClient!(customer);
+    if (!mounted || !ok) return;
+    setState(() {
+      _customers?.removeWhere((c) => c.id == customer.id);
+      _reservedCount--;
+    });
+  }
+
   Future<void> _loadNames() async {
     setState(() => _loadingNames = true);
     try {
-      final names = await widget.agenda.loadCustomerNames(widget.slot.id);
-      if (mounted) setState(() => _customerNames = names);
+      final customers = await widget.agenda.loadCustomers(
+        widget.slot.id,
+        companyId: widget.companyId,
+      );
+      if (mounted) setState(() => _customers = customers);
     } catch (_) {
-      if (mounted) setState(() => _customerNames = []);
+      if (mounted) setState(() => _customers = []);
     } finally {
       if (mounted) setState(() => _loadingNames = false);
     }
@@ -916,10 +1279,10 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
   Widget build(BuildContext context) {
     final slot = widget.slot;
     final tf = widget.timeFormat;
-    final isFull = slot.reserved >= slot.capacity;
+    final isFull = _reservedCount >= slot.capacity;
     final isBlocked = slot.isBlocked;
-    final canAdd = !isFull && !isBlocked && widget.onAddClient != null;
-    final remaining = slot.capacity - slot.reserved;
+    final canAdd = !isFull && !isBlocked && !widget.isPast && widget.onAddClient != null;
+    final remaining = slot.capacity - _reservedCount;
 
     final bottomPadding = 28.0 + MediaQuery.of(context).padding.bottom;
     return Padding(
@@ -989,7 +1352,7 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                 const SizedBox(width: 8),
                 _infoChip(
                   Icons.people_outline_rounded,
-                  '${slot.reserved}/${slot.capacity} places',
+                  '$_reservedCount/${slot.capacity} places',
                 ),
               ],
             ),
@@ -997,7 +1360,7 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
             const Divider(height: 28),
 
             // Section clients
-            if (slot.reserved > 0) ...[
+            if (_reservedCount > 0) ...[
               const Text(
                 'Clients',
                 style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
@@ -1027,30 +1390,66 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                     ],
                   ),
                 )
-              else if (_customerNames != null && _customerNames!.isNotEmpty)
-                ..._customerNames!.map(
-                  (name) => Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
+              else if (_customers != null && _customers!.isNotEmpty)
+                ..._customers!.asMap().entries.map((entry) {
+                  final c = entry.value;
+                  final initial = c.name.isNotEmpty
+                      ? c.name.trim()[0].toUpperCase()
+                      : '?';
+                  final circleBg = c.isCompanyManual
+                      ? Colors.blue.shade50
+                      : const Color(0xFFE8F5ED);
+                  final circleText = c.isCompanyManual
+                      ? Colors.blue.shade400
+                      : _green;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
                     child: Row(
                       children: [
                         Container(
-                          padding: const EdgeInsets.all(6),
+                          width: 32,
+                          height: 32,
                           decoration: BoxDecoration(
-                            color: const Color(0xFFE8F5ED),
-                            borderRadius: BorderRadius.circular(8),
+                            color: circleBg,
+                            shape: BoxShape.circle,
                           ),
-                          child: Icon(
-                            Icons.person_rounded,
-                            size: 14,
-                            color: widget.green,
+                          alignment: Alignment.center,
+                          child: Text(
+                            initial,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: circleText,
+                            ),
                           ),
                         ),
                         const SizedBox(width: 10),
-                        Text(name, style: const TextStyle(fontSize: 14)),
+                        Expanded(
+                          child: Text(
+                            c.name,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        if (c.isCompanyManual && widget.onDeleteClient != null)
+                          IconButton(
+                            icon: Icon(
+                              Icons.delete_outline_rounded,
+                              color: Colors.red.shade400,
+                              size: 20,
+                            ),
+                            tooltip: 'Supprimer',
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(),
+                            padding: const EdgeInsets.all(6),
+                            onPressed: () => _confirmDeleteCustomer(c),
+                          ),
                       ],
                     ),
-                  ),
-                )
+                  );
+                })
               else
                 Text(
                   'Aucun nom trouvé',
@@ -1072,12 +1471,16 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
             if (_showAddForm) ...[
               TextField(
                 controller: _nameCtrl,
-                autofocus: true,
                 textCapitalization: TextCapitalization.words,
+                autofocus: true,
+                onChanged: (_) {
+                  if (_nameError != null) setState(() => _nameError = null);
+                },
                 decoration: InputDecoration(
                   labelText: 'Nom du client',
                   hintText: 'Ex : Jean Dupont',
                   prefixIcon: const Icon(Icons.person_outline_rounded),
+                  errorText: _nameError,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
@@ -1092,6 +1495,7 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                     onPressed: () => setState(() {
                       _showAddForm = false;
                       _nameCtrl.clear();
+                      _nameError = null;
                     }),
                     child: const Text('Annuler'),
                   ),
@@ -1099,9 +1503,11 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                   Expanded(
                     child: ElevatedButton.icon(
                       onPressed: () async {
-                        final name = _nameCtrl.text.trim().isEmpty
-                            ? 'Client'
-                            : _nameCtrl.text.trim();
+                        final name = _nameCtrl.text.trim();
+                        if (name.isEmpty) {
+                          setState(() => _nameError = 'Veuillez entrer un nom');
+                          return;
+                        }
                         Navigator.pop(context);
                         await widget.onAddClient!(name);
                       },
@@ -1275,6 +1681,11 @@ class _TimeSlotInfo {
   final int maxReservationsPerPerson;
   final int reservationDeadlineMinutes;
 
+  /// Non-null si une suppression programmée est en cours sur cette plage :
+  /// elle est alors verrouillée (aucune modification possible tant que la
+  /// suppression n'est pas restituée).
+  final DateTime? deleteAfter;
+
   _TimeSlotInfo({
     required this.id,
     required this.startTime,
@@ -1282,9 +1693,10 @@ class _TimeSlotInfo {
     this.capacity = 1,
     this.duration = 15,
     this.workingDays = const [],
-    this.maxAdvanceDays = 5,
+    this.maxAdvanceDays = 3,
     this.maxReservationsPerPerson = 1,
     this.reservationDeadlineMinutes = 10,
+    this.deleteAfter,
   });
 }
 

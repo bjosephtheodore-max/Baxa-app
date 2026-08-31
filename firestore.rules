@@ -1,0 +1,170 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin(companyId) {
+      return signedIn() && request.auth.uid == companyId;
+    }
+
+    // Staff = users/{uid} pointe vers cette entreprise ET son document
+    // companies/{companyId}/staff/{uid} existe encore avec isActive == true.
+    // Ce 2e critère est ce qui coupe réellement l'accès dès qu'un membre
+    // est retiré depuis "Mon équipe" — avant, seul le premier critère
+    // comptait, donc un membre retiré gardait un accès complet.
+    function isStaff(companyId) {
+      let u = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return signedIn()
+        && u.get('role', '') == 'staff'
+        && u.get('companyId', '') == companyId
+        && exists(/databases/$(database)/documents/companies/$(companyId)/staff/$(request.auth.uid))
+        && get(/databases/$(database)/documents/companies/$(companyId)/staff/$(request.auth.uid)).data.get('isActive', false) == true;
+    }
+
+    function hasAccess(companyId) {
+      return isAdmin(companyId) || isStaff(companyId);
+    }
+
+    match /companies/{companyId} {
+      allow read: if true;
+      allow write: if isAdmin(companyId);
+
+      // Slots : les customers peuvent incrémenter reserved/cancelled lors d'une réservation
+      match /queues/{queueId}/slots/{slotId} {
+        allow read: if true;
+        allow write: if hasAccess(companyId);
+        allow update: if signedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['reserved', 'cancelled']);
+      }
+
+      // File d'attente elle-même : suppression désormais explicite (plus couverte par le wildcard générique)
+      match /queues/{queueId} {
+        allow read: if true;
+        allow write: if hasAccess(companyId);
+      }
+
+      // Plages horaires (config) : suppression désormais explicite
+      match /queues/{queueId}/timeSlots/{timeSlotId} {
+        allow read: if true;
+        allow write: if hasAccess(companyId);
+      }
+
+      // Stats journalières : le customer peut seulement toucher les compteurs
+      // (réservation/annulation), l'entreprise a la main complète.
+      match /queues/{queueId}/dailyStats/{dateStr} {
+        allow read: if hasAccess(companyId);
+        allow write: if hasAccess(companyId) || (
+          signedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['reserved', 'available', 'cancelled'])
+        );
+      }
+
+      // Réservations : le client gère les siennes (création + annulation via
+      // update de status), l'entreprise gère tout — mais ne peut SUPPRIMER
+      // que ce qu'elle a ajouté elle-même (source == 'company_manual').
+      // La lecture est autorisée plus bas via {path=**}/reservations
+      // (nécessaire pour les collectionGroup queries côté client).
+      match /reservations/{reservationId} {
+        allow create: if signedIn() && (
+          hasAccess(companyId) ||
+          request.resource.data.get('customerId', '') == request.auth.uid
+        );
+        allow update: if signedIn() && (
+          hasAccess(companyId) ||
+          resource.data.customerId == request.auth.uid
+        );
+        allow delete: if hasAccess(companyId) &&
+          resource.data.get('source', '') == 'company_manual';
+      }
+
+      // Invitations : la lecture publique est autorisée plus bas via
+      // {path=**}/invitations (nécessaire pour le collectionGroup query
+      // fait AVANT connexion, quand un nouveau membre vérifie son code).
+      match /invitations/{inviteId} {
+        allow create, delete: if hasAccess(companyId);
+        allow update: if hasAccess(companyId) || (
+          signedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active'])
+        );
+      }
+
+      // Membres du staff : un nouveau membre doit pouvoir créer SON PROPRE
+      // document en rejoignant (il n'est pas encore "staff" à ce moment précis,
+      // donc hasAccess() ne peut pas encore être vrai pour lui) — d'où un accès
+      // dédié restreint à son propre uid. Modifier/retirer un membre (isActive)
+      // reste réservé à l'admin, jamais au staff lui-même.
+      match /staff/{uid} {
+        allow read: if true;
+        allow create: if signedIn() && request.auth.uid == uid;
+        allow update, delete: if isAdmin(companyId);
+      }
+
+      // Historique de notifications : usage interne entreprise, jamais public
+      match /notificationsHistory/{notifId} {
+        allow read, write: if hasAccess(companyId);
+      }
+
+      // Tout le reste du sous-arbre (prereception, notificationsAdmin,
+      // config diverse...) : lecture publique, écriture réservée à
+      // l'entreprise. Suppression volontairement RETIRÉE d'ici — elle doit
+      // être déclarée explicitement par collection (voir blocs ci-dessus).
+      match /{document=**} {
+        allow read: if true;
+        allow create, update: if hasAccess(companyId);
+      }
+    }
+
+    // Lecture transversale nécessaire pour les collectionGroup queries (recherche
+    // à travers toutes les entreprises sans connaître le chemin à l'avance).
+    match /{path=**}/reservations/{reservationId} {
+      allow read: if signedIn();
+    }
+
+    match /{path=**}/invitations/{inviteId} {
+      allow read: if true;
+    }
+
+    // Les notifications d'annulation par une entreprise
+    // (customers/{id}/notifications) sont écrites UNIQUEMENT côté serveur,
+    // par la Cloud Function `onReservationCancelledByCompany` (Admin SDK,
+    // contourne ces règles) — aucune règle spécifique n'est donc ajoutée
+    // ici pour l'entreprise. Le client garde son accès complet habituel à
+    // son propre arbre `customers/{son propre uid}` via la règle générique
+    // ci-dessous (inchangée).
+    match /customers/{customerId}/{document=**} {
+      allow read, write: if signedIn() && request.auth.uid == customerId;
+    }
+
+    match /users/{userId} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+
+      match /favorites/{favId} {
+        allow read, write: if signedIn() && request.auth.uid == userId;
+      }
+
+      match /recentCompanies/{companyId} {
+        allow read, write: if signedIn() && request.auth.uid == userId;
+      }
+    }
+
+    // Demande de suppression de compte entreprise (1 doc par entreprise, id = companyId).
+    // Réservé à l'admin (pas au staff). L'admin crée sa demande et peut la
+    // supprimer (= annuler) pendant le délai de grâce ; le passage à
+    // `approved` / `completed` est fait côté serveur uniquement (Admin SDK).
+    match /deletionRequests/{companyId} {
+      allow read, create, delete: if isAdmin(companyId);
+    }
+
+    // Alertes internes plateforme (demandes de départ, etc.) — écrites
+    // uniquement par les Cloud Functions (Admin SDK), consultées en console.
+    // Aucun accès client.
+    match /adminAlerts/{alertId} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,4 +1,9 @@
+import 'dart:io';
 import 'package:baxa/services/firebase/auth.dart';
+import 'package:baxa/services/support_constants.dart';
+import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
+import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
+import 'package:baxa/page%20b-acceuil/customer/notification_settings_page.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -22,7 +27,6 @@ class _PersonaPageState extends State<PersonaPage> {
   String? _uid;
   Map<String, dynamic>? _userData;
   bool _isLoading = true;
-  bool _notificationsEnabled = true;
 
   @override
   void initState() {
@@ -40,7 +44,6 @@ class _PersonaPageState extends State<PersonaPage> {
       if (doc.exists && mounted) {
         setState(() {
           _userData = doc.data();
-          _notificationsEnabled = _userData?['notificationsEnabled'] ?? true;
           _isLoading = false;
         });
       } else {
@@ -78,32 +81,6 @@ class _PersonaPageState extends State<PersonaPage> {
     }
   }
 
-  Future<void> _updateNotification(bool enabled) async {
-    if (_uid == null) return;
-    try {
-      await _firestore.collection('users').doc(_uid).update({
-        'notificationsEnabled': enabled,
-      });
-      setState(() => _notificationsEnabled = enabled);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              enabled ? 'Notifications activées' : 'Notifications désactivées',
-            ),
-            backgroundColor: _green,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
-            ),
-          ),
-        );
-      }
-    } catch (e) {
-      debugPrint('Erreur notifications: $e');
-    }
-  }
-
   Future<void> _confirmAndLogout() async {
     final shouldLogout = await showDialog<bool>(
       context: context,
@@ -131,9 +108,9 @@ class _PersonaPageState extends State<PersonaPage> {
       try {
         await Auth().logout();
         if (mounted) {
-          Navigator.pushNamedAndRemoveUntil(
+          Navigator.pushAndRemoveUntil(
             context,
-            '/login',
+            MaterialPageRoute(builder: (_) => const ChoosePage()),
             (route) => false,
           );
         }
@@ -156,33 +133,110 @@ class _PersonaPageState extends State<PersonaPage> {
     bool optional = false,
   }) async {
     final controller = TextEditingController(text: currentValue);
-    final newValue = await showDialog<String>(
+    final newValue = await showModalBottomSheet<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: Text(title),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          textCapitalization: TextCapitalization.words,
-          decoration: InputDecoration(
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                title,
+                style: GoogleFonts.poppins(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0xFF1A1A2E),
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                textCapitalization: TextCapitalization.words,
+                decoration: InputDecoration(
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.grey.shade300),
+                  ),
+                  focusedBorder: const OutlineInputBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(12)),
+                    borderSide: BorderSide(color: _green, width: 1.5),
+                  ),
+                  filled: true,
+                  fillColor: Colors.grey.shade50,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        side: BorderSide(color: Colors.grey.shade300),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: Text(
+                        'Annuler',
+                        style: TextStyle(
+                          color: Colors.grey.shade700,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _green,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+                      child: const Text(
+                        'Enregistrer',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Annuler'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: _green),
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text(
-              'Enregistrer',
-              style: TextStyle(color: Colors.white),
-            ),
-          ),
-        ],
       ),
     );
     if (newValue != null && (optional || newValue.isNotEmpty)) {
@@ -190,71 +244,28 @@ class _PersonaPageState extends State<PersonaPage> {
     }
   }
 
-  Future<void> _showNotificationDisableDialog() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: const Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 26),
-            SizedBox(width: 10),
-            Text('Désactiver ?'),
-          ],
-        ),
-        content: const Text(
-          'Vous ne recevrez plus d\'alertes sur vos réservations.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Annuler'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text(
-              'Désactiver',
-              style: TextStyle(color: Colors.white),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (confirm == true) await _updateNotification(false);
-  }
-
   // ── Liens externes ───────────────────────────────────────────────────────
 
   Future<void> _openAvis() async {
-    // TODO: remplacer par votre email de feedback
-    const email = 'feedback@baxa.app';
-    final url = Uri.parse(
-      'mailto:$email?subject=${Uri.encodeComponent('Avis sur Baxa')}&body=${Uri.encodeComponent('Bonjour,\n\nVoici mon avis sur l\'application Baxa :\n\n')}',
-    );
-    if (await canLaunchUrl(url)) {
-      await launchUrl(url);
-    } else {
+    if (Platform.isIOS && kAppStoreUrl.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Impossible d\'ouvrir l\'application mail'),
+            content: Text('Bientôt disponible sur l\'App Store'),
           ),
         );
       }
+      return;
     }
-  }
-
-  Future<void> _openWhatsApp() async {
-    // TODO: remplacer par votre numéro WhatsApp (format international sans +)
-    const numero = '000000000000';
-    final url = Uri.parse('https://wa.me/$numero');
+    final url = Uri.parse(
+      Platform.isIOS && kAppStoreUrl.isNotEmpty ? kAppStoreUrl : kPlayStoreUrl,
+    );
     if (await canLaunchUrl(url)) {
       await launchUrl(url, mode: LaunchMode.externalApplication);
     } else {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Impossible d\'ouvrir WhatsApp')),
+          const SnackBar(content: Text('Impossible d\'ouvrir le store')),
         );
       }
     }
@@ -293,6 +304,10 @@ class _PersonaPageState extends State<PersonaPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // ── Bannière compte anonyme ────────────────────────────
+                  if (_auth.currentUser?.isAnonymous == true)
+                    _buildAnonymousBanner(),
+
                   // ── Avatar card ────────────────────────────────────────
                   _buildAvatarCard(),
 
@@ -353,60 +368,16 @@ class _PersonaPageState extends State<PersonaPage> {
                     title: 'Préférences',
                     icon: Icons.tune_rounded,
                     children: [
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                        child: Row(
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(8),
-                              decoration: BoxDecoration(
-                                color: _green.withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: const Icon(
-                                Icons.notifications_active_rounded,
-                                color: _green,
-                                size: 20,
-                              ),
-                            ),
-                            const SizedBox(width: 14),
-                            const Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Notifications',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 15,
-                                    ),
-                                  ),
-                                  SizedBox(height: 2),
-                                  Text(
-                                    'Alertes réservations et annulations',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Switch(
-                              value: _notificationsEnabled,
-                              activeColor: _green,
-                              onChanged: (value) {
-                                if (!value) {
-                                  _showNotificationDisableDialog();
-                                } else {
-                                  _updateNotification(true);
-                                }
-                              },
-                            ),
-                          ],
+                      _buildTappableRow(
+                        icon: Icons.notifications_active_rounded,
+                        iconColor: _green,
+                        label: 'Rappels de réservation',
+                        subtitle: 'Choisir quand recevoir tes rappels',
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const NotificationSettingsPage(),
+                          ),
                         ),
                       ),
                     ],
@@ -425,14 +396,6 @@ class _PersonaPageState extends State<PersonaPage> {
                         label: 'Laisser un avis',
                         subtitle: 'Partagez votre expérience avec nous',
                         onTap: _openAvis,
-                      ),
-                      _buildDivider(),
-                      _buildTappableRow(
-                        icon: Icons.chat_bubble_outline_rounded,
-                        iconColor: const Color(0xFF25D366),
-                        label: 'Aide & Support',
-                        subtitle: 'Contactez-nous sur WhatsApp',
-                        onTap: _openWhatsApp,
                       ),
                     ],
                   ),
@@ -476,6 +439,73 @@ class _PersonaPageState extends State<PersonaPage> {
 
   // ── Widgets helpers ──────────────────────────────────────────────────────
 
+  Widget _buildAnonymousBanner() {
+    return GestureDetector(
+      onTap: () async {
+        final result = await Navigator.push<bool>(
+          context,
+          MaterialPageRoute(builder: (_) => const SigninePage()),
+        );
+        if (result == true && mounted) {
+          setState(() {
+            _uid = _auth.currentUser?.uid;
+            _userData = null;
+            _isLoading = true;
+          });
+          _loadUserData();
+        }
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 20),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: _green.withValues(alpha: 0.07),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: _green.withValues(alpha: 0.2)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: _green.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.shield_outlined, color: _green, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Sécurisez votre compte',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1A1A2E),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Créez un compte pour ne pas perdre vos réservations',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey.shade600,
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            const Icon(Icons.chevron_right_rounded, color: _green, size: 22),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildAvatarCard() {
     final nom = (_userData?['nom'] as String?) ?? '';
     final prenom = (_userData?['prenom'] as String?) ?? '';
@@ -493,7 +523,7 @@ class _PersonaPageState extends State<PersonaPage> {
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 12,
             offset: const Offset(0, 3),
           ),
@@ -505,26 +535,15 @@ class _PersonaPageState extends State<PersonaPage> {
           Container(
             width: 64,
             height: 64,
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFF4B8B5E), Color(0xFF1A2E20)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
+            decoration: const BoxDecoration(
+              color: Color(0xFFD4E8DC),
               shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: _green.withOpacity(0.3),
-                  blurRadius: 12,
-                  offset: const Offset(0, 4),
-                ),
-              ],
             ),
             child: Center(
               child: Text(
                 initiales.isNotEmpty ? initiales : '?',
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: Color(0xFF2D6A45),
                   fontSize: 22,
                   fontWeight: FontWeight.bold,
                 ),
@@ -557,7 +576,7 @@ class _PersonaPageState extends State<PersonaPage> {
                       vertical: 3,
                     ),
                     decoration: BoxDecoration(
-                      color: _green.withOpacity(0.1),
+                      color: _green.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
@@ -590,13 +609,17 @@ class _PersonaPageState extends State<PersonaPage> {
           children: [
             Icon(icon, size: 15, color: Colors.grey.shade500),
             const SizedBox(width: 7),
-            Text(
-              title.toUpperCase(),
-              style: GoogleFonts.poppins(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: Colors.grey.shade500,
-                letterSpacing: 0.8,
+            Expanded(
+              child: Text(
+                title.toUpperCase(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.poppins(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.grey.shade500,
+                  letterSpacing: 0.8,
+                ),
               ),
             ),
           ],
@@ -608,7 +631,7 @@ class _PersonaPageState extends State<PersonaPage> {
             borderRadius: BorderRadius.circular(14),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.04),
+                color: Colors.black.withValues(alpha: 0.04),
                 blurRadius: 10,
                 offset: const Offset(0, 2),
               ),
@@ -655,7 +678,7 @@ class _PersonaPageState extends State<PersonaPage> {
             child: Container(
               padding: const EdgeInsets.all(6),
               decoration: BoxDecoration(
-                color: _green.withOpacity(0.08),
+                color: _green.withValues(alpha: 0.08),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: const Icon(Icons.edit_rounded, size: 15, color: _green),
@@ -733,7 +756,7 @@ class _PersonaPageState extends State<PersonaPage> {
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: iconColor.withOpacity(0.1),
+                color: iconColor.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Icon(icon, color: iconColor, size: 20),

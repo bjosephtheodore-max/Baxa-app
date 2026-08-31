@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:intl/intl.dart';
 import 'package:baxa/services/booking_constants.dart';
+import 'package:baxa/services/slot_generation_service.dart';
+import 'package:baxa/services/onboarding_service.dart';
+import 'package:baxa/widgets/onboarding_widgets.dart';
 
 part 'queue_timeslots_page.dart';
 part 'queue_timeslots_dialogs.dart';
@@ -13,10 +17,40 @@ part 'queue_timeslots_logic.dart';
 const Color _kGreen = Color.fromARGB(255, 75, 139, 94);
 const Color _kLightGreen = Color.fromARGB(255, 178, 211, 194);
 
+// ============================================================
+// Suppression d'une file : efface ses sous-collections (Firestore ne
+// cascade pas) puis le doc file. N'est appelé que sur une file sans plage
+// et sans réservation à venir — le balayage récupère d'éventuels restes
+// d'anciennes suppressions.
+// ============================================================
+Future<void> _sweepAndDeleteQueue(
+  FirebaseFirestore fs,
+  String companyId,
+  String queueId,
+) async {
+  final queueRef = fs
+      .collection('companies')
+      .doc(companyId)
+      .collection('queues')
+      .doc(queueId);
+  for (final sub in const ['slots', 'timeSlots', 'dailyStats']) {
+    QuerySnapshot<Map<String, dynamic>> snap;
+    do {
+      snap = await queueRef.collection(sub).limit(400).get();
+      if (snap.docs.isEmpty) break;
+      final batch = fs.batch();
+      for (final doc in snap.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+    } while (snap.docs.length == 400);
+  }
+  await queueRef.delete();
+}
+
 // ==================== PAGE PRINCIPALE : LISTE DES FILES ====================
 class SettingsPage extends StatefulWidget {
-  final bool autoOpenCreateDialog;
-  const SettingsPage({super.key, this.autoOpenCreateDialog = false});
+  const SettingsPage({super.key});
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
@@ -25,18 +59,24 @@ class _SettingsPageState extends State<SettingsPage> {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   String? _companyId;
   bool _isLoading = true;
+  int _queueCount = 0;
+  bool _isCreatingQueue = false;
+  late final Stream<QuerySnapshot> _queuesStream;
+  final Map<String, Stream<int>> _capacityStreams = {};
 
   @override
   void initState() {
     super.initState();
     final user = FirebaseAuth.instance.currentUser;
     _companyId = user?.uid;
-    setState(() => _isLoading = false);
-    if (widget.autoOpenCreateDialog) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _showCreateQueueDialog();
-      });
-    }
+    _queuesStream = _companyId != null
+        ? _firestore
+              .collection('companies')
+              .doc(_companyId)
+              .collection('queues')
+              .snapshots()
+        : const Stream.empty();
+    _isLoading = false;
   }
 
   @override
@@ -54,8 +94,11 @@ class _SettingsPageState extends State<SettingsPage> {
         automaticallyImplyLeading: false,
         leading: Navigator.canPop(context)
             ? IconButton(
-                icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                    color: Colors.black87, size: 20),
+                icon: const Icon(
+                  Icons.arrow_back_ios_new_rounded,
+                  color: Colors.black87,
+                  size: 20,
+                ),
                 onPressed: () => Navigator.pop(context),
               )
             : null,
@@ -72,45 +115,65 @@ class _SettingsPageState extends State<SettingsPage> {
           child: Container(color: Colors.grey.shade100, height: 1),
         ),
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : StreamBuilder<QuerySnapshot>(
-              stream: _firestore
-                  .collection('companies')
-                  .doc(_companyId)
-                  .collection('queues')
-                  .snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                if (snapshot.hasError) {
-                  return Center(child: Text('Erreur : ${snapshot.error}'));
-                }
-                final queues = snapshot.data?.docs ?? [];
-                if (queues.isEmpty) return _buildEmptyState();
-                return ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(16, 20, 16, 100),
-                  itemCount: queues.length,
-                  itemBuilder: (context, index) {
-                    final queue = queues[index];
-                    final queueData = queue.data() as Map<String, dynamic>;
-                    return _buildQueueCard(queue.id, queueData);
-                  },
-                );
-              },
+      body: ListenableBuilder(
+        listenable: OnboardingService(),
+        builder: (context, child) {
+          if (OnboardingService().step != 3) return child!;
+          return Stack(
+            children: [
+              child!,
+              Positioned.fill(
+                child: AbsorbPointer(
+                  child: Container(color: Colors.black.withValues(alpha: 0.58)),
+                ),
+              ),
+            ],
+          );
+        },
+        child: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : StreamBuilder<QuerySnapshot>(
+                stream: _queuesStream,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (snapshot.hasError) {
+                    return Center(child: Text('Erreur : ${snapshot.error}'));
+                  }
+                  final queues = snapshot.data?.docs ?? [];
+                  _queueCount = queues.length;
+                  if (queues.isEmpty) return _buildEmptyState();
+                  return ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 100),
+                    itemCount: queues.length,
+                    itemBuilder: (context, index) {
+                      final queue = queues[index];
+                      final queueData = queue.data() as Map<String, dynamic>;
+                      return _buildQueueCard(queue.id, queueData);
+                    },
+                  );
+                },
+              ),
+      ),
+      floatingActionButton: ListenableBuilder(
+        listenable: OnboardingService(),
+        builder: (_, child) {
+          final active = OnboardingService().step == 3;
+          return active ? PulsingGlow(child: child!) : child!;
+        },
+        child: FloatingActionButton.extended(
+          onPressed: _isCreatingQueue ? null : _showCreateQueueDialog,
+          backgroundColor: _kGreen,
+          elevation: 3,
+          icon: const Icon(Icons.add_rounded, color: Colors.white),
+          label: const Text(
+            'Nouvelle file',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
             ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showCreateQueueDialog,
-        backgroundColor: _kGreen,
-        elevation: 3,
-        icon: const Icon(Icons.add_rounded, color: Colors.white),
-        label: const Text(
-          'Nouvelle file',
-          style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.3,
           ),
         ),
       ),
@@ -122,7 +185,18 @@ class _SettingsPageState extends State<SettingsPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.queue_outlined, size: 80, color: Colors.grey.shade400),
+          Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: _kGreen.withValues(alpha: 0.08),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.queue_outlined,
+              size: 64,
+              color: _kGreen.withValues(alpha: 0.6),
+            ),
+          ),
           const SizedBox(height: 24),
           const Text(
             'Aucune file d\'attente',
@@ -134,8 +208,19 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Créez votre première file pour commencer',
-            style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+            'Appuyez sur le bouton ci-dessous\npour créer votre première file',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 14,
+              color: Colors.grey.shade600,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 32),
+          Icon(
+            Icons.arrow_downward_rounded,
+            size: 28,
+            color: _kGreen.withValues(alpha: 0.65),
           ),
         ],
       ),
@@ -143,208 +228,85 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _buildQueueCard(String queueId, Map<String, dynamic> queueData) {
-    final name = queueData['name'] ?? 'File sans nom';
+    final name = queueData['name'] as String? ?? 'File sans nom';
     final weekdays =
         (queueData['weekdays'] as List<dynamic>?)
             ?.map((e) => e as int)
             .toList() ??
         [1, 2, 3, 4, 5, 6, 7];
-    final isActive = queueData['isActive'] ?? true;
+    final closureStart = (queueData['closureStart'] as Timestamp?)?.toDate();
+    final closureEnd = (queueData['closureEnd'] as Timestamp?)?.toDate();
+    final closedNow = isQueueClosedNow(closureStart, closureEnd);
+    final closurePlannedFor =
+        (closureStart != null && closureStart.isAfter(DateTime.now()))
+        ? closureStart
+        : null;
+    final deleteAfter = (queueData['deleteAfter'] as Timestamp?)?.toDate();
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
+    final card = _AnimatedQueueCard(
+      name: name,
+      weekdays: _formatWeekdays(weekdays),
+      open: !closedNow,
+      closurePlannedFor: closurePlannedFor,
+      deleteAfter: deleteAfter,
+      capacityStream: _capacityStreams.putIfAbsent(
+        queueId,
+        () => _calculateTotalCapacity(queueId),
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(14),
-        child: IntrinsicHeight(
-          child: Row(
-            children: [
-              Container(
-                width: 4,
-                color: isActive ? _kGreen : Colors.grey.shade300,
-              ),
-              Expanded(
-                child: InkWell(
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => QueueTimeSlotsPage(
-                        companyId: _companyId!,
-                        queueId: queueId,
-                        queueName: name,
-                      ),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 20, 8, 20),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 44,
-                          height: 44,
-                          decoration: BoxDecoration(
-                            color: isActive
-                                ? _kGreen.withValues(alpha: 0.1)
-                                : Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Icon(
-                            Icons.people_alt_rounded,
-                            color: isActive ? _kGreen : Colors.grey.shade400,
-                            size: 22,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Flexible(
-                                    child: Text(
-                                      name,
-                                      style: const TextStyle(
-                                        fontSize: 15,
-                                        fontWeight: FontWeight.w700,
-                                        color: Color(0xFF1A1C2E),
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                  if (!isActive) ...[
-                                    const SizedBox(width: 8),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 7,
-                                        vertical: 2,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: Colors.orange.shade50,
-                                        borderRadius: BorderRadius.circular(6),
-                                      ),
-                                      child: Text(
-                                        'Pause',
-                                        style: TextStyle(
-                                          fontSize: 10,
-                                          color: Colors.orange.shade700,
-                                          fontWeight: FontWeight.w700,
-                                          letterSpacing: 0.3,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                              const SizedBox(height: 10),
-                              Text(
-                                _formatWeekdays(weekdays),
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey.shade500,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        StreamBuilder<int>(
-                          stream: _calculateTotalCapacity(queueId),
-                          builder: (context, snap) {
-                            if (snap.connectionState ==
-                                ConnectionState.waiting) {
-                              return const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              );
-                            }
-                            final total = snap.data ?? 0;
-                            if (total == 0) return const SizedBox.shrink();
-                            return Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 10,
-                              ),
-                              decoration: BoxDecoration(
-                                color: _kGreen.withValues(alpha: 0.08),
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.groups_rounded,
-                                      size: 20, color: _kGreen),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    '$total',
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w700,
-                                      color: _kGreen,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                        const SizedBox(width: 6),
-                        GestureDetector(
-                          onTap: () => _showQueueActions(queueId, queueData),
-                          child: Container(
-                            width: 36,
-                            height: 36,
-                            decoration: BoxDecoration(
-                              color: Colors.grey.shade100,
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Icon(
-                              Icons.more_vert_rounded,
-                              color: Colors.grey.shade500,
-                              size: 20,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ],
+      onTap: () {
+        if (OnboardingService().step == 4) {
+          OnboardingService().advance(4); // 4 → 5
+        }
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => QueueTimeSlotsPage(
+              companyId: _companyId!,
+              queueId: queueId,
+              queueName: name,
+            ),
           ),
-        ),
-      ),
+        );
+      },
+      onMoreTap: () => _showQueueActions(queueId, queueData),
+    );
+
+    return ListenableBuilder(
+      listenable: OnboardingService(),
+      builder: (_, child) {
+        if (OnboardingService().step == 4) {
+          return PulsingGlow(
+            borderRadius: BorderRadius.circular(14),
+            child: child!,
+          );
+        }
+        return child!;
+      },
+      child: card,
     );
   }
 
   void _showQueueActions(String queueId, Map<String, dynamic> queueData) {
-    final isActive = queueData['isActive'] ?? true;
     final name = queueData['name'] ?? 'File';
+    final closedNow = isQueueClosedNow(
+      (queueData['closureStart'] as Timestamp?)?.toDate(),
+      (queueData['closureEnd'] as Timestamp?)?.toDate(),
+    );
 
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (_) => Container(
+      builder: (sheetCtx) => Container(
         decoration: const BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+        padding: EdgeInsets.fromLTRB(
+          20,
+          12,
+          20,
+          24 + MediaQuery.of(sheetCtx).padding.bottom,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -356,43 +318,246 @@ class _SettingsPageState extends State<SettingsPage> {
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
-            const SizedBox(height: 16),
-            Text(
-              name,
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w700,
-                color: Color(0xFF1A1C2E),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    name,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1A1C2E),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () {
+                    Navigator.pop(context);
+                    _renameQueue(queueId, name);
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(
+                      Icons.edit_rounded,
+                      size: 18,
+                      color: Colors.grey.shade600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            if (!closedNow)
+              _actionTile(
+                icon: Icons.pause_circle_outline_rounded,
+                label: 'Stopper les réservations',
+                color: Colors.orange.shade700,
+                onTap: () {
+                  Navigator.pop(context);
+                  _confirmStopReservations(queueId, queueData);
+                },
+              )
+            else
+              _actionTile(
+                icon: Icons.play_circle_outline_rounded,
+                label: 'Rouvrir immédiatement',
+                color: _kGreen,
+                onTap: () {
+                  Navigator.pop(context);
+                  _reopenQueue(queueId);
+                },
               ),
-            ),
-            const SizedBox(height: 20),
-            _actionTile(
-              icon: isActive
-                  ? Icons.pause_circle_outline_rounded
-                  : Icons.play_circle_outline_rounded,
-              label: isActive
-                  ? 'Suspendre les réservations'
-                  : 'Réactiver la file',
-              color: isActive ? Colors.orange.shade600 : _kGreen,
-              onTap: () {
-                Navigator.pop(context);
-                _toggleQueueActive(queueId, queueData);
-              },
-            ),
             const SizedBox(height: 10),
-            _actionTile(
-              icon: Icons.delete_outline_rounded,
-              label: 'Supprimer la file',
-              color: Colors.red.shade400,
-              onTap: () {
-                Navigator.pop(context);
-                _deleteQueue(queueId);
-              },
-            ),
+            if (queueData['deleteAfter'] == null)
+              _actionTile(
+                icon: Icons.delete_outline_rounded,
+                label: 'Supprimer la file',
+                color: Colors.red.shade400,
+                onTap: () {
+                  Navigator.pop(context);
+                  _deleteQueue(queueId, name, queueData);
+                },
+              )
+            else
+              _actionTile(
+                icon: Icons.restore_from_trash_outlined,
+                label: 'Restituer la file',
+                color: _kGreen,
+                onTap: () {
+                  Navigator.pop(context);
+                  _restoreQueueDeletion(queueId);
+                },
+              ),
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _renameQueue(String queueId, String currentName) async {
+    final controller = TextEditingController(text: currentName);
+    String? errorText;
+
+    final newName = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: EdgeInsets.only(
+            bottom:
+                MediaQuery.of(ctx).viewInsets.bottom +
+                MediaQuery.of(ctx).padding.bottom,
+          ),
+          child: Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: _kGreen.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(
+                        Icons.edit_rounded,
+                        color: _kGreen,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    const Expanded(
+                      child: Text(
+                        'Renommer la file',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF1A1C2E),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: controller,
+                  textCapitalization: TextCapitalization.sentences,
+                  autofocus: true,
+                  onChanged: (_) {
+                    if (errorText != null) {
+                      setSheet(() => errorText = null);
+                    }
+                  },
+                  decoration: InputDecoration(
+                    hintText: 'Nom de la file',
+                    errorText: errorText,
+                    hintStyle: TextStyle(color: Colors.grey.shade400),
+                    prefixIcon: const Icon(
+                      Icons.label_outline_rounded,
+                      color: _kGreen,
+                    ),
+                    filled: true,
+                    fillColor: Colors.grey.shade50,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: _kGreen, width: 1.5),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      final value = controller.text.trim();
+                      if (value.isEmpty) {
+                        setSheet(() => errorText = 'Veuillez entrer un nom');
+                        return;
+                      }
+                      Navigator.pop(ctx, value);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _kGreen,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    child: const Text(
+                      'Enregistrer',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (newName == null || newName.isEmpty || newName == currentName) {
+      return;
+    }
+
+    try {
+      await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .doc(queueId)
+          .update({'name': newName});
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('File renommée')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+    }
   }
 
   Widget _actionTile({
@@ -415,12 +580,16 @@ class _SettingsPageState extends State<SettingsPage> {
           children: [
             Icon(icon, color: color, size: 22),
             const SizedBox(width: 14),
-            Text(
-              label,
-              style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.w600,
-                fontSize: 15,
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 15,
+                ),
               ),
             ),
           ],
@@ -429,28 +598,64 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Future<void> _toggleQueueActive(
-    String queueId,
-    Map<String, dynamic> queueData,
-  ) async {
-    final isActive = queueData['isActive'] ?? true;
+  // ── Rouvrir une file fermée, immédiatement ─────────────────────
+  Future<void> _reopenQueue(String queueId) async {
+    final companyId = _companyId;
+    if (companyId == null) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: const Text('Rouvrir immédiatement ?'),
+        content: const Text(
+          'Les réservations rouvrent tout de suite et les créneaux sont '
+          'régénérés. Toute date de réouverture prévue est annulée.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Retour'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _kGreen,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Rouvrir'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
     try {
       await _firestore
           .collection('companies')
-          .doc(_companyId)
+          .doc(companyId)
           .collection('queues')
           .doc(queueId)
-          .update({'isActive': !isActive});
+          .update({
+            'closureStart': FieldValue.delete(),
+            'closureEnd': FieldValue.delete(),
+          });
+
+      try {
+        await regenerateSlotsForQueue(
+          firestore: _firestore,
+          companyId: companyId,
+          queueId: queueId,
+        );
+      } catch (_) {
+        // La CF de nuit rattrapera si la régénération immédiate échoue.
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            isActive
-                ? '🚫 Réservations désactivées'
-                : '✅ Réservations réactivées',
-          ),
-          backgroundColor: isActive ? Colors.orange.shade700 : _kGreen,
+        const SnackBar(
+          content: Text('✅ Réservations rouvertes'),
+          backgroundColor: _kGreen,
         ),
       );
     } catch (e) {
@@ -461,66 +666,314 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Future<void> _deleteQueue(String queueId) async {
-    final reservationsSnap = await _firestore
-        .collection('reservations')
-        .where('queueId', isEqualTo: queueId)
-        .where('status', isEqualTo: 'confirmed')
-        .limit(1)
-        .get();
-
-    if (!mounted) return;
-
-    if (reservationsSnap.docs.isNotEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('❌ Cette file contient des réservations'),
-          duration: Duration(milliseconds: 1500),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
-
+  // ── Confirmation « Stopper les réservations » ───────────────────
+  // Raccourci de la fermeture : cette file, dès maintenant, sans date de
+  // fin, sans annuler les réservations en cours (on reste ouvert pour les
+  // clients déjà réservés, on bloque seulement les nouvelles).
+  Future<void> _confirmStopReservations(
+    String queueId,
+    Map<String, dynamic> queueData,
+  ) async {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: const Text('Supprimer cette file ?'),
+        title: const Text('Stopper les réservations ?'),
         content: const Text(
-          'Cette action est irréversible. La file et toutes ses plages horaires seront supprimées définitivement.',
+          'Dès maintenant, vos clients ne pourront plus prendre de nouvelle '
+          'réservation sur cette file.\n\n'
+          'Les réservations déjà confirmées ne sont pas touchées : vos clients '
+          'gardent leur créneau.\n\n'
+          'C\'est réversible à tout moment : « Rouvrir les réservations ».',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Annuler'),
+            child: const Text('Non'),
           ),
           ElevatedButton(
             onPressed: () => Navigator.pop(ctx, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.orange.shade700,
+            ),
             child: const Text(
-              'Supprimer',
+              'Oui, stopper',
               style: TextStyle(color: Colors.white),
             ),
           ),
         ],
       ),
     );
-
     if (confirm != true) return;
-
     try {
       await _firestore
           .collection('companies')
           .doc(_companyId)
           .collection('queues')
           .doc(queueId)
-          .delete();
-
+          .update({
+            'closureStart': Timestamp.fromDate(DateTime.now()),
+            'closureEnd': FieldValue.delete(),
+          });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('🚫 Réservations stoppées'),
+          backgroundColor: Colors.orange.shade700,
+        ),
+      );
+    } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('🗑️ File supprimée')));
+      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+    }
+  }
+
+  // ── Suppression d'une file ──────────────────────────────────────
+  // Une file ne se supprime que lorsqu'elle n'a plus AUCUNE plage (donc
+  // plus aucune réservation possible). Tant qu'il reste des plages, on
+  // renvoie l'entreprise vers la page des plages — où elle découvre
+  // « Programmer la suppression », qui retire une plage sans casser les
+  // réservations en cours.
+  Future<void> _deleteQueue(
+    String queueId,
+    String queueName,
+    Map<String, dynamic> queueData,
+  ) async {
+    // Une file en cours de suppression programmée est gérée par le bouton
+    // « Restituer la file » du menu — pas ici.
+    if (queueData['deleteAfter'] != null) return;
+
+    // ── État des plages de la file ────────────────────────────────
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> timeSlots;
+    try {
+      final snap = await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .doc(queueId)
+          .collection('timeSlots')
+          .get();
+      timeSlots = snap.docs;
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erreur lors de la vérification : $e')),
+      );
+      return;
+    }
+    if (!mounted) return;
+
+    // ── Cas 1 : aucune plage → suppression directe ────────────────
+    if (timeSlots.isEmpty) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+          title: const Text('Supprimer cette file ?'),
+          content: Text(
+            'La file « $queueName » sera supprimée définitivement.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annuler'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text(
+                'Supprimer',
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (confirm == true) await _performQueueDeletion(queueId, queueName);
+      return;
+    }
+
+    // ── Cas 2/3 : des plages existent ────────────────────────────
+    final deferredDates = timeSlots
+        .where((d) => d.data()['deleteAfter'] != null)
+        .map((d) => (d.data()['deleteAfter'] as Timestamp).toDate())
+        .toList();
+    final n = timeSlots.length;
+    final allDeferred = deferredDates.length == n;
+
+    // ── Cas 2 : au moins une plage encore active → rediriger ──────
+    if (!allDeferred) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          title: const Text('Supprimez d\'abord les plages'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Cette file contient $n plage${n > 1 ? 's' : ''} horaire'
+                '${n > 1 ? 's' : ''}. Supprimez-${n > 1 ? 'les' : 'la'} '
+                'd\'abord pour pouvoir supprimer la file.',
+                style: const TextStyle(fontSize: 14),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.blue.shade100),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.lightbulb_outline_rounded,
+                      color: Colors.blue.shade600,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Sur chaque plage, « Programmer la suppression » la '
+                        'retire sans annuler les réservations en cours de vos '
+                        'clients.',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          color: Colors.blue.shade800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annuler'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(backgroundColor: _kGreen),
+              child: const Text(
+                'Voir les plages',
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (go == true && mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => QueueTimeSlotsPage(
+              companyId: _companyId!,
+              queueId: queueId,
+              queueName: queueName,
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    // ── Cas 3 : toutes les plages sont programmées pour suppression ─
+    deferredDates.sort();
+    final lastDate = deferredDates.last;
+    final f = DateFormat('EEE d MMM', 'fr_FR').format(lastDate);
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Supprimer aussi la file ?'),
+        content: Text(
+          'Toutes les plages de cette file sont programmées pour suppression '
+          '(dernière le $f). Voulez-vous que la file elle-même soit supprimée '
+          'automatiquement à cette date, une fois la dernière plage partie ?',
+          style: const TextStyle(fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Non'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: _kGreen),
+            child: Text(
+              'Oui, le $f',
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    try {
+      await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .doc(queueId)
+          .update({'deleteAfter': Timestamp.fromDate(lastDate)});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Suppression de la file programmée pour le $f.'),
+          backgroundColor: _kGreen,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+    }
+  }
+
+  // ── Exécution de la suppression d'une file (coquille vide) ──────
+  Future<void> _performQueueDeletion(String queueId, String queueName) async {
+    try {
+      await _sweepAndDeleteQueue(_firestore, _companyId!, queueId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('🗑️ File « $queueName » supprimée')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+    }
+  }
+
+  // ── Restituer une suppression de file programmée ────────────────
+  // N'efface QUE le marqueur de la file ; les plages qui ont leur propre
+  // suppression programmée la gardent (leur restitution, elle, lève aussi
+  // celle de la file — voir _restorePendingDeletion).
+  Future<void> _restoreQueueDeletion(String queueId) async {
+    try {
+      await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .doc(queueId)
+          .update({'deleteAfter': FieldValue.delete()});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Suppression de la file annulée.')),
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -575,9 +1028,22 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _showCreateQueueDialog() async {
+    if (_isCreatingQueue) return;
+    setState(() => _isCreatingQueue = true);
+    if (_queueCount >= 5) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Maximum 5 files d\'attente atteint'),
+          backgroundColor: Colors.orange.shade700,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      setState(() => _isCreatingQueue = false);
+      return;
+    }
+
     final nameCtrl = TextEditingController();
     List<int> selectedWeekdays = [1, 2, 3, 4, 5];
-    int selectedMaxActive = kDefaultMaxActivePerUser;
     String? nameError;
 
     final result = await showModalBottomSheet<bool>(
@@ -589,7 +1055,8 @@ class _SettingsPageState extends State<SettingsPage> {
           const dayLabels = ['L', 'M', 'M', 'J', 'V', 'S', 'D'];
           return Padding(
             padding: EdgeInsets.only(
-              bottom: MediaQuery.of(ctx).viewInsets.bottom +
+              bottom:
+                  MediaQuery.of(ctx).viewInsets.bottom +
                   MediaQuery.of(ctx).padding.bottom,
             ),
             child: Container(
@@ -631,12 +1098,16 @@ class _SettingsPageState extends State<SettingsPage> {
                           ),
                         ),
                         const SizedBox(width: 12),
-                        const Text(
-                          'Nouvelle file d\'attente',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 16,
+                        const Expanded(
+                          child: Text(
+                            'Nom de la file d\'attente',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                            ),
                           ),
                         ),
                       ],
@@ -651,6 +1122,7 @@ class _SettingsPageState extends State<SettingsPage> {
                           TextField(
                             controller: nameCtrl,
                             textCapitalization: TextCapitalization.sentences,
+                            autofocus: true,
                             onChanged: (_) {
                               if (nameError != null) {
                                 setD(() => nameError = null);
@@ -659,8 +1131,7 @@ class _SettingsPageState extends State<SettingsPage> {
                             decoration: InputDecoration(
                               hintText: 'Ex : Consultation, Caisse principale…',
                               errorText: nameError,
-                              hintStyle:
-                                  TextStyle(color: Colors.grey.shade400),
+                              hintStyle: TextStyle(color: Colors.grey.shade400),
                               prefixIcon: Icon(
                                 Icons.label_outline_rounded,
                                 color: _kGreen,
@@ -669,13 +1140,15 @@ class _SettingsPageState extends State<SettingsPage> {
                               fillColor: Colors.grey.shade50,
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide:
-                                    BorderSide(color: Colors.grey.shade200),
+                                borderSide: BorderSide(
+                                  color: Colors.grey.shade200,
+                                ),
                               ),
                               enabledBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide:
-                                    BorderSide(color: Colors.grey.shade200),
+                                borderSide: BorderSide(
+                                  color: Colors.grey.shade200,
+                                ),
                               ),
                               focusedBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
@@ -700,8 +1173,7 @@ class _SettingsPageState extends State<SettingsPage> {
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: List.generate(7, (index) {
                               final day = index + 1;
-                              final selected =
-                                  selectedWeekdays.contains(day);
+                              final selected = selectedWeekdays.contains(day);
                               return GestureDetector(
                                 onTap: () => setD(() {
                                   if (selected) {
@@ -741,95 +1213,6 @@ class _SettingsPageState extends State<SettingsPage> {
                               );
                             }),
                           ),
-                          const SizedBox(height: 20),
-                          const Text(
-                            'Réservations simultanées max par client',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                              color: Color(0xFF1A1C2E),
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Nombre de créneaux actifs en même temps dans cet établissement.',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey.shade500,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          Row(
-                            children: List.generate(5, (i) {
-                              final val = i + 1;
-                              final isSelected = selectedMaxActive == val;
-                              return Expanded(
-                                child: Padding(
-                                  padding:
-                                      EdgeInsets.only(right: i < 4 ? 8 : 0),
-                                  child: GestureDetector(
-                                    onTap: () =>
-                                        setD(() => selectedMaxActive = val),
-                                    child: AnimatedContainer(
-                                      duration:
-                                          const Duration(milliseconds: 180),
-                                      height: 44,
-                                      decoration: BoxDecoration(
-                                        color: isSelected
-                                            ? _kGreen
-                                            : Colors.grey.shade100,
-                                        borderRadius:
-                                            BorderRadius.circular(10),
-                                        border: Border.all(
-                                          color: isSelected
-                                              ? _kGreen
-                                              : Colors.grey.shade200,
-                                        ),
-                                      ),
-                                      alignment: Alignment.center,
-                                      child: Text(
-                                        '$val',
-                                        style: TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w700,
-                                          color: isSelected
-                                              ? Colors.white
-                                              : Colors.grey.shade500,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }),
-                          ),
-                          if (selectedMaxActive > 1) ...[
-                            const SizedBox(height: 10),
-                            Container(
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(
-                                color: Colors.orange.shade50,
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(Icons.info_outline_rounded,
-                                      color: Colors.orange.shade600,
-                                      size: 16),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      'Les créneaux d\'un même client ne pourront pas se chevaucher.',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: Colors.orange.shade800,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
                           const SizedBox(height: 24),
                           SizedBox(
                             width: double.infinity,
@@ -837,8 +1220,9 @@ class _SettingsPageState extends State<SettingsPage> {
                             child: ElevatedButton(
                               onPressed: () {
                                 if (nameCtrl.text.trim().isEmpty) {
-                                  setD(() =>
-                                      nameError = 'Veuillez entrer un nom');
+                                  setD(
+                                    () => nameError = 'Veuillez entrer un nom',
+                                  );
                                   return;
                                 }
                                 if (selectedWeekdays.isEmpty) {
@@ -882,7 +1266,10 @@ class _SettingsPageState extends State<SettingsPage> {
         },
       ),
     );
-    if (result != true) return;
+    if (result != true) {
+      if (mounted) setState(() => _isCreatingQueue = false);
+      return;
+    }
     try {
       final docRef = await _firestore
           .collection('companies')
@@ -891,34 +1278,365 @@ class _SettingsPageState extends State<SettingsPage> {
           .add({
             'name': nameCtrl.text.trim(),
             'weekdays': selectedWeekdays,
-            'isActive': true,
-            'maxActivePerUser': selectedMaxActive,
             'createdAt': FieldValue.serverTimestamp(),
           });
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content:
-              Text('File créée ✅ Ajoutez maintenant une plage horaire'),
-        ),
-      );
-      await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => QueueTimeSlotsPage(
-            companyId: _companyId!,
-            queueId: docRef.id,
-            queueName: nameCtrl.text.trim(),
-            autoOpenSlotDialog: true,
+
+      final inOnboarding = OnboardingService().step == 3;
+      if (inOnboarding) {
+        OnboardingService().advance(3); // 3 → 4
+        await showOnboardingCelebration(
+          context,
+          title: 'File d\'attente créée !',
+          body:
+              'Super ! Votre file "${nameCtrl.text.trim()}" est prête.\n\nAppuyez sur la file pour configurer vos plages horaires.',
+        );
+        // Step 4 : l'utilisateur doit taper la carte de file pour continuer.
+        // La navigation vers QueueTimeSlotsPage se fait via le tap de la carte.
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('File créée ✅ Ajoutez maintenant une plage horaire'),
           ),
-        ),
-      );
+        );
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => QueueTimeSlotsPage(
+              companyId: _companyId!,
+              queueId: docRef.id,
+              queueName: nameCtrl.text.trim(),
+            ),
+          ),
+        );
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+    } finally {
+      if (mounted) setState(() => _isCreatingQueue = false);
     }
+  }
+}
+
+// ============================================================
+// CARTE FILE D'ATTENTE — avec animation "push" au press
+// ============================================================
+class _AnimatedQueueCard extends StatefulWidget {
+  final String name;
+  final String weekdays;
+  final bool open; // false = fermée aux nouvelles réservations maintenant
+  final DateTime? closurePlannedFor; // fermeture planifiée, pas encore active
+  final Stream<int> capacityStream;
+  final VoidCallback onTap;
+  final VoidCallback onMoreTap;
+  final DateTime? deleteAfter;
+
+  const _AnimatedQueueCard({
+    required this.name,
+    required this.weekdays,
+    required this.open,
+    this.closurePlannedFor,
+    required this.capacityStream,
+    required this.onTap,
+    required this.onMoreTap,
+    this.deleteAfter,
+  });
+
+  @override
+  State<_AnimatedQueueCard> createState() => _AnimatedQueueCardState();
+}
+
+class _AnimatedQueueCardState extends State<_AnimatedQueueCard> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) {
+        setState(() => _pressed = false);
+        widget.onTap();
+      },
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.96 : 1.0,
+        duration: const Duration(milliseconds: 80),
+        curve: Curves.easeInOut,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 80),
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: _pressed ? 0.03 : 0.08),
+                blurRadius: _pressed ? 3 : 10,
+                offset: Offset(0, _pressed ? 1 : 3),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: ColoredBox(
+              color: _pressed ? const Color(0xFFF4FAF6) : Colors.white,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IntrinsicHeight(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // ── Barre accent gauche ──────────────────
+                        Container(
+                          width: 5,
+                          color: widget.open ? _kGreen : Colors.grey.shade300,
+                        ),
+
+                        // ── Contenu principal ────────────────────
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(14, 16, 12, 16),
+                            child: Row(
+                              children: [
+                                // Icône circulaire
+                                Container(
+                                  width: 46,
+                                  height: 46,
+                                  decoration: BoxDecoration(
+                                    color: widget.open
+                                        ? _kGreen.withValues(alpha: 0.1)
+                                        : Colors.grey.shade100,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                    Icons.people_alt_rounded,
+                                    color: widget.open
+                                        ? _kGreen
+                                        : Colors.grey.shade400,
+                                    size: 22,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+
+                                // Nom + jours
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Flexible(
+                                            child: Text(
+                                              widget.name,
+                                              style: const TextStyle(
+                                                fontSize: 15,
+                                                fontWeight: FontWeight.w700,
+                                                color: Color(0xFF1A1C2E),
+                                              ),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                          if (!widget.open) ...[
+                                            const SizedBox(width: 8),
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 7,
+                                                    vertical: 2,
+                                                  ),
+                                              decoration: BoxDecoration(
+                                                color: Colors.orange.shade50,
+                                                borderRadius:
+                                                    BorderRadius.circular(6),
+                                              ),
+                                              child: Text(
+                                                'Fermée',
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: Colors.orange.shade700,
+                                                  fontWeight: FontWeight.w700,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                      const SizedBox(height: 5),
+                                      Text(
+                                        widget.weekdays,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.grey.shade500,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+
+                                // Capacité totale
+                                StreamBuilder<int>(
+                                  stream: widget.capacityStream,
+                                  builder: (context, snap) {
+                                    if (snap.connectionState ==
+                                        ConnectionState.waiting) {
+                                      return const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      );
+                                    }
+                                    final total = snap.data ?? 0;
+                                    if (total == 0) {
+                                      return const SizedBox.shrink();
+                                    }
+                                    return Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 5,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: _kGreen.withValues(alpha: 0.08),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(
+                                            Icons.groups_rounded,
+                                            size: 14,
+                                            color: _kGreen,
+                                          ),
+                                          const SizedBox(width: 3),
+                                          Text(
+                                            '$total',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w700,
+                                              color: _kGreen,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  },
+                                ),
+                                const SizedBox(width: 6),
+
+                                // Chevron vert — signal de navigation
+                                Icon(
+                                  Icons.chevron_right_rounded,
+                                  color: _kGreen,
+                                  size: 26,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+
+                        // ── Séparateur vertical ──────────────────
+                        Container(width: 1, color: Colors.grey.shade100),
+
+                        // ── Bouton ⋮ isolé ───────────────────────
+                        // Material + InkWell : toute la colonne (largeur × hauteur
+                        // de la carte) est une cible de tap, avec un retour visuel.
+                        // Sans ça, seul le glyphe de l'icône captait le tap et le
+                        // reste ouvrait la page des plages par erreur.
+                        SizedBox(
+                          width: 54,
+                          child: Material(
+                            type: MaterialType.transparency,
+                            child: InkWell(
+                              onTap: widget.onMoreTap,
+                              child: Center(
+                                child: Icon(
+                                  Icons.more_vert_rounded,
+                                  color: Colors.grey.shade400,
+                                  size: 20,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (widget.deleteAfter != null)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 7,
+                      ),
+                      color: Colors.red.shade50,
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.auto_delete_outlined,
+                            size: 13,
+                            color: Colors.red.shade400,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'Suppression de la file programmée le '
+                              '${DateFormat('d MMM', 'fr_FR').format(widget.deleteAfter!)}',
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.red.shade400,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else if (widget.closurePlannedFor != null)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 7,
+                      ),
+                      color: Colors.indigo.shade50,
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.nightlight_round_outlined,
+                            size: 13,
+                            color: Colors.indigo.shade400,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'Fermeture prévue le '
+                              '${DateFormat('d MMM', 'fr_FR').format(widget.closurePlannedFor!)}',
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.indigo.shade400,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -1025,8 +1743,7 @@ class _NumberPickerDialState extends State<_NumberPickerDial> {
                 '$val ${widget.suffix}',
                 style: TextStyle(
                   fontSize: isSelected ? 18 : 13,
-                  fontWeight:
-                      isSelected ? FontWeight.bold : FontWeight.w400,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w400,
                   color: isSelected ? _kGreen : Colors.grey.shade400,
                 ),
               ),

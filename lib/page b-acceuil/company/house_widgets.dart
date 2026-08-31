@@ -110,95 +110,107 @@ class _RetryState extends StatelessWidget {
   }
 }
 
-// ── Empty state (onboarding première file) ────────────────────────────────────
+// ── Empty state (accueil sans files) ─────────────────────────────────────────
 class _EmptyState extends StatelessWidget {
-  final VoidCallback onCreateQueue;
-  const _EmptyState({required this.onCreateQueue});
+  const _EmptyState();
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 32),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(28),
-              decoration: BoxDecoration(
-                color: _lightGreen.withOpacity(0.3),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.queue_outlined, size: 72, color: _green),
-            ),
-            const SizedBox(height: 28),
-            const Text(
-              'Bienvenue sur Baxa ! 🎉',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF1E2D23),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'Créez votre première file d\'attente pour commencer à recevoir des réservations.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey.shade600,
-                height: 1.5,
-              ),
-            ),
-            const SizedBox(height: 36),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: onCreateQueue,
-                icon: const Icon(Icons.add_rounded, color: Colors.white),
-                label: const Text(
-                  'Créer ma première file',
+    return ListenableBuilder(
+      listenable: OnboardingService(),
+      builder: (context, _) {
+        final isOnboarding = OnboardingService().isActive;
+        return Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 32),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(28),
+                  decoration: BoxDecoration(
+                    color: _lightGreen.withValues(alpha: 0.25),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    isOnboarding
+                        ? Icons.waving_hand_rounded
+                        : Icons.queue_outlined,
+                    size: 64,
+                    color: _green,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  isOnboarding ? 'Bienvenue sur Baxa !' : 'Aucune file active',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF1E2D23),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  isOnboarding
+                      ? 'Suivez ces étapes pour recevoir vos premières réservations.'
+                      : 'Créez une file d\'attente dans l\'onglet Réglages pour commencer.',
+                  textAlign: TextAlign.center,
                   style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                    color: Colors.grey.shade500,
+                    height: 1.5,
                   ),
                 ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _green,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: _lightGreen.withOpacity(0.2),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: _lightGreen.withOpacity(0.5)),
-              ),
-              child: Column(
-                children: [
-                  _OnboardingStep(number: '1', text: 'Créez une file d\'attente'),
-                  const SizedBox(height: 8),
-                  _OnboardingStep(number: '2', text: 'Ajoutez une plage horaire'),
-                  const SizedBox(height: 8),
-                  _OnboardingStep(
-                    number: '3',
-                    text: 'Vos clients peuvent réserver !',
+                if (isOnboarding) ...[
+                  const SizedBox(height: 28),
+                  Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: _lightGreen.withValues(alpha: 0.18),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: _lightGreen.withValues(alpha: 0.5),
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        _OnboardingStep(
+                          number: '1',
+                          icon: Icons.settings_rounded,
+                          text: 'Appuyez sur "Réglages" en bas',
+                          done: OnboardingService().step > 1,
+                        ),
+                        const SizedBox(height: 12),
+                        _OnboardingStep(
+                          number: '2',
+                          icon: Icons.people_outline_rounded,
+                          text: 'Ouvrez "Gérer les files d\'attente"',
+                          done: OnboardingService().step > 2,
+                        ),
+                        const SizedBox(height: 12),
+                        _OnboardingStep(
+                          number: '3',
+                          icon: Icons.add_circle_outline_rounded,
+                          text: 'Créez votre première file',
+                          done: OnboardingService().step > 4,
+                        ),
+                        const SizedBox(height: 12),
+                        _OnboardingStep(
+                          number: '4',
+                          icon: Icons.schedule_rounded,
+                          text: 'Ajoutez une plage horaire',
+                          done: false,
+                        ),
+                      ],
+                    ),
                   ),
                 ],
-              ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 }
@@ -206,37 +218,54 @@ class _EmptyState extends StatelessWidget {
 class _OnboardingStep extends StatelessWidget {
   final String number;
   final String text;
-  const _OnboardingStep({required this.number, required this.text});
+  final IconData? icon;
+  final bool done;
+
+  const _OnboardingStep({
+    required this.number,
+    required this.text,
+    this.icon,
+    this.done = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Row(
       children: [
         Container(
-          width: 24,
-          height: 24,
+          width: 26,
+          height: 26,
           decoration: BoxDecoration(
-            color: _green.withOpacity(0.15),
+            color: done ? _green : _green.withValues(alpha: 0.12),
             shape: BoxShape.circle,
           ),
           child: Center(
-            child: Text(
-              number,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                color: _green,
-              ),
-            ),
+            child: done
+                ? const Icon(Icons.check_rounded, size: 14, color: Colors.white)
+                : Text(
+                    number,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: _green,
+                    ),
+                  ),
           ),
         ),
         const SizedBox(width: 12),
-        Text(
-          text,
-          style: TextStyle(
-            fontSize: 13,
-            color: Colors.grey.shade700,
-            fontWeight: FontWeight.w500,
+        if (icon != null) ...[
+          Icon(icon, size: 15, color: _green.withValues(alpha: 0.7)),
+          const SizedBox(width: 6),
+        ],
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: 13,
+              color: done ? Colors.grey.shade400 : Colors.grey.shade700,
+              fontWeight: FontWeight.w500,
+              decoration: done ? TextDecoration.lineThrough : null,
+            ),
           ),
         ),
       ],
@@ -251,93 +280,91 @@ class _StatsRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.grey.shade50,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.grey.shade200),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _StatItem(
-              emoji: '🟢',
-              value: stats.placesRestantes.toString(),
-              label: 'Disponibles',
-              color: stats.placesRestantes == 0
-                  ? Colors.red.shade600
-                  : _green,
-            ),
+    return Row(
+      children: [
+        Expanded(
+          child: _StatChip(
+            value: stats.placesRestantes.toString(),
+            label: 'Disponibles',
+            color: stats.placesRestantes == 0 ? Colors.red.shade600 : _green,
+            bgColor: stats.placesRestantes == 0
+                ? Colors.red.shade50
+                : const Color(0xFFECF7F0),
+            icon: Icons.check_circle_outline_rounded,
           ),
-          Container(width: 1, height: 50, color: Colors.grey.shade200),
-          Expanded(
-            child: _StatItem(
-              emoji: '📌',
-              value: stats.placesReservees.toString(),
-              label: 'Réservées',
-              color: Colors.blue.shade600,
-            ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _StatChip(
+            value: stats.placesReservees.toString(),
+            label: 'Réservées',
+            color: Colors.blue.shade600,
+            bgColor: Colors.blue.shade50,
+            icon: Icons.bookmark_outline_rounded,
           ),
-          Container(width: 1, height: 50, color: Colors.grey.shade200),
-          Expanded(
-            child: _StatItem(
-              emoji: '👥',
-              value: stats.personnesEnAttente.toString(),
-              label: 'En attente',
-              color: stats.personnesEnAttente > 0
-                  ? Colors.orange.shade700
-                  : Colors.grey.shade500,
-            ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _StatChip(
+            value: stats.personnesEnAttente.toString(),
+            label: 'En attente',
+            color: stats.personnesEnAttente > 0
+                ? Colors.orange.shade700
+                : Colors.grey.shade500,
+            bgColor: stats.personnesEnAttente > 0
+                ? Colors.orange.shade50
+                : Colors.grey.shade100,
+            icon: Icons.hourglass_empty_rounded,
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
 
-class _StatItem extends StatelessWidget {
-  final String emoji;
+class _StatChip extends StatelessWidget {
   final String value;
   final String label;
   final Color color;
-  const _StatItem({
-    required this.emoji,
+  final Color bgColor;
+  final IconData icon;
+
+  const _StatChip({
     required this.value,
     required this.label,
     required this.color,
+    required this.bgColor,
+    required this.icon,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 6),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(10),
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(emoji, style: const TextStyle(fontSize: 14)),
-              const SizedBox(width: 4),
-              Text(
-                value,
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: color,
-                ),
-              ),
-            ],
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w800,
+              color: color,
+              height: 1.0,
+            ),
           ),
-          const SizedBox(height: 3),
+          const SizedBox(height: 4),
           Text(
             label,
             textAlign: TextAlign.center,
-            maxLines: 2,
             style: TextStyle(
-              fontSize: 12,
-              color: Colors.grey.shade600,
-              height: 1.3,
+              fontSize: 10,
+              color: Colors.grey.shade500,
+              fontWeight: FontWeight.w500,
             ),
           ),
         ],
@@ -347,14 +374,19 @@ class _StatItem extends StatelessWidget {
 }
 
 // ── Carte en-tête de file ─────────────────────────────────────────────────────
-class _QueueHeaderCard extends StatelessWidget {
+class _QueueHeaderCard extends StatefulWidget {
   final _QueueAgenda queue;
-  final int? currentDuration; // null quand plusieurs plages (valeurs hétérogènes)
+  final int? currentDuration;
   final int? currentCapacity;
-  final void Function(int delta) onDurationChanged; // reçoit +step ou -step
+  final void Function(int delta) onDurationChanged;
   final void Function(int delta) onCapacityChanged;
   final VoidCallback onBlock;
   final VoidCallback onUnblock;
+  final bool isPastDay;
+  final bool isExpanded;
+  final VoidCallback onToggle;
+  final bool readOnly;
+  final VoidCallback? onRevertDuration;
 
   const _QueueHeaderCard({
     required this.queue,
@@ -364,7 +396,51 @@ class _QueueHeaderCard extends StatelessWidget {
     required this.onCapacityChanged,
     required this.onBlock,
     required this.onUnblock,
+    required this.isPastDay,
+    required this.isExpanded,
+    required this.onToggle,
+    this.readOnly = false,
+    this.onRevertDuration,
   });
+
+  @override
+  State<_QueueHeaderCard> createState() => _QueueHeaderCardState();
+}
+
+class _QueueHeaderCardState extends State<_QueueHeaderCard>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _sizeAnim;
+  late Animation<double> _fadeAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 320),
+      value: widget.isExpanded ? 1.0 : 0.0,
+    );
+    _sizeAnim = CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic);
+    _fadeAnim = CurvedAnimation(
+      parent: _ctrl,
+      curve: const Interval(0.2, 1.0, curve: Curves.easeOut),
+    );
+  }
+
+  @override
+  void didUpdateWidget(_QueueHeaderCard old) {
+    super.didUpdateWidget(old);
+    if (widget.isExpanded != old.isExpanded) {
+      widget.isExpanded ? _ctrl.forward() : _ctrl.reverse();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -385,12 +461,12 @@ class _QueueHeaderCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Nom + badge statut
+            // ── Nom + badge statut ──────────────────────────────────
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  queue.name,
+                  widget.queue.name,
                   style: const TextStyle(
                     fontSize: 17,
                     fontWeight: FontWeight.w700,
@@ -403,7 +479,7 @@ class _QueueHeaderCard extends StatelessWidget {
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: queue.isBlocked
+                    color: widget.queue.isBlocked
                         ? Colors.grey.shade100
                         : const Color(0xFFE8F5ED),
                     borderRadius: BorderRadius.circular(20),
@@ -415,7 +491,7 @@ class _QueueHeaderCard extends StatelessWidget {
                         width: 7,
                         height: 7,
                         decoration: BoxDecoration(
-                          color: queue.isBlocked
+                          color: widget.queue.isBlocked
                               ? Colors.grey.shade500
                               : _green,
                           shape: BoxShape.circle,
@@ -423,11 +499,11 @@ class _QueueHeaderCard extends StatelessWidget {
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        queue.isBlocked ? 'Bloquée' : 'Active',
+                        widget.queue.isBlocked ? 'Bloquée' : 'Active',
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
-                          color: queue.isBlocked
+                          color: widget.queue.isBlocked
                               ? Colors.grey.shade600
                               : _green,
                         ),
@@ -438,8 +514,8 @@ class _QueueHeaderCard extends StatelessWidget {
               ],
             ),
 
-            // Raison du blocage
-            if (queue.isBlocked && queue.blockReason != null) ...[
+            // ── Raison du blocage ───────────────────────────────────
+            if (widget.queue.isBlocked && widget.queue.blockReason != null) ...[
               const SizedBox(height: 10),
               Container(
                 width: double.infinity,
@@ -479,7 +555,7 @@ class _QueueHeaderCard extends StatelessWidget {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            queue.blockReason!,
+                            widget.queue.blockReason!,
                             style: TextStyle(
                               fontSize: 13,
                               color: Colors.orange.shade700,
@@ -493,82 +569,133 @@ class _QueueHeaderCard extends StatelessWidget {
               ),
             ],
 
+            // ── Stats ───────────────────────────────────────────────
             const SizedBox(height: 14),
-            _StatsRow(stats: queue.stats),
-            const SizedBox(height: 14),
-            Divider(height: 1, color: Colors.grey.shade100),
-            const SizedBox(height: 14),
+            _StatsRow(stats: widget.queue.stats),
 
-            // Contrôles durée + capacité (cachés si bloquée ou aucun créneau chargé)
-            if (!queue.isBlocked && queue.slots.isNotEmpty) ...[
-              _ControlRow(
-                label: 'Durée',
-                icon: Icons.timer,
-                value: currentDuration,
-                unit: 'min',
-                min: 5,
-                max: 120,
-                step: 5,
-                onChanged: onDurationChanged,
-              ),
-              const SizedBox(height: 12),
-              _ControlRow(
-                label: 'Capacité',
-                icon: Icons.people,
-                value: currentCapacity,
-                unit: 'pers.',
-                min: 1,
-                max: 50,
-                step: 1,
-                onChanged: onCapacityChanged,
-              ),
-              const SizedBox(height: 16),
-            ],
-
-            // Bouton Bloquer / Débloquer
-            SizedBox(
-              width: double.infinity,
-              child: queue.isBlocked
-                  ? ElevatedButton.icon(
-                      onPressed: onUnblock,
-                      icon: const Icon(Icons.lock_open_rounded, size: 18),
-                      label: const Text(
-                        'Débloquer la plage',
-                        style: TextStyle(fontWeight: FontWeight.w600),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _green,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                    )
-                  : OutlinedButton.icon(
-                      onPressed: onBlock,
-                      icon: Icon(
-                        Icons.lock_outline_rounded,
-                        size: 18,
-                        color: Colors.grey.shade600,
-                      ),
-                      label: Text(
-                        'Bloquer la plage',
+            // ── Toggle Modifier / Masquer (jours non passés, admin/staff seulement) ────
+            if (!widget.isPastDay && !widget.readOnly) ...[
+              GestureDetector(
+                onTap: widget.onToggle,
+                behavior: HitTestBehavior.opaque,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        widget.isExpanded ? 'Masquer' : 'Modifier',
                         style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          color: Colors.grey.shade700,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.grey.shade500,
                         ),
                       ),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        side: BorderSide(color: Colors.grey.shade300),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
+                      const SizedBox(width: 3),
+                      AnimatedRotation(
+                        turns: widget.isExpanded ? 0.5 : 0.0,
+                        duration: const Duration(milliseconds: 280),
+                        curve: Curves.easeInOut,
+                        child: Icon(
+                          Icons.keyboard_arrow_down_rounded,
+                          size: 18,
+                          color: Colors.grey.shade400,
                         ),
                       ),
-                    ),
-            ),
+                    ],
+                  ),
+                ),
+              ),
+
+              // ── Contrôles expandables ───────────────────────────
+              SizeTransition(
+                sizeFactor: _sizeAnim,
+                axisAlignment: -1.0,
+                child: FadeTransition(
+                  opacity: _fadeAnim,
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 14),
+                      Divider(height: 1, color: Colors.grey.shade100),
+                      const SizedBox(height: 14),
+
+                      if (!widget.queue.isBlocked &&
+                          widget.queue.slots.isNotEmpty) ...[
+                        _ControlRow(
+                          label: 'Durée',
+                          icon: Icons.timer,
+                          value: widget.currentDuration,
+                          unit: 'min',
+                          min: 5,
+                          max: 120,
+                          step: 5,
+                          onChanged: widget.onDurationChanged,
+                          onRevert: widget.onRevertDuration,
+                        ),
+                        const SizedBox(height: 12),
+                        _ControlRow(
+                          label: 'Capacité',
+                          icon: Icons.people,
+                          value: widget.currentCapacity,
+                          unit: 'pers.',
+                          min: 1,
+                          max: 50,
+                          step: 1,
+                          onChanged: widget.onCapacityChanged,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+
+                      GestureDetector(
+                        onTap: widget.queue.isBlocked
+                            ? widget.onUnblock
+                            : widget.onBlock,
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 11,
+                            horizontal: 14,
+                          ),
+                          decoration: BoxDecoration(
+                            color: widget.queue.isBlocked
+                                ? const Color(0xFFECF7F0)
+                                : Colors.red.shade50,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                widget.queue.isBlocked
+                                    ? Icons.lock_open_rounded
+                                    : Icons.lock_outline_rounded,
+                                size: 16,
+                                color: widget.queue.isBlocked
+                                    ? _green
+                                    : Colors.red.shade400,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                widget.queue.isBlocked
+                                    ? 'Débloquer la plage'
+                                    : 'Bloquer la plage',
+                                style: TextStyle(
+                                  color: widget.queue.isBlocked
+                                      ? _green
+                                      : Colors.red.shade600,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -588,6 +715,7 @@ class _ControlRow extends StatelessWidget {
   final int max;
   final int step;
   final void Function(int delta) onChanged;
+  final VoidCallback? onRevert;
 
   const _ControlRow({
     required this.label,
@@ -598,46 +726,119 @@ class _ControlRow extends StatelessWidget {
     required this.max,
     required this.step,
     required this.onChanged,
+    this.onRevert,
   });
 
   @override
   Widget build(BuildContext context) {
     final canDecrease = value == null || value! > min;
     final canIncrease = value == null || value! < max;
-    return Row(
-      children: [
-        Icon(icon, size: 20, color: _green),
-        const SizedBox(width: 10),
-        Text(
-          label,
-          style: const TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-            color: Colors.black87,
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF6FAF7),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          _buildLeadingIcon(),
+          const SizedBox(width: 8),
+          // Expanded (et non un Text à largeur fixe + Spacer séparé) :
+          // le libellé rétrécit avec "..." si l'écran est trop étroit pour
+          // tout afficher, au lieu de forcer un débordement de la Row.
+          Expanded(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: Colors.black87,
+              ),
+            ),
           ),
-        ),
-        const Spacer(),
-        _PlusMinusBtn(
-          icon: Icons.remove,
-          enabled: canDecrease,
-          onTap: () => onChanged(-step),
-        ),
-        const SizedBox(width: 14),
-        Text(
-          value != null ? '$value $unit' : '—',
-          style: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-            color: Colors.black87,
+          const SizedBox(width: 6),
+          _PlusMinusBtn(
+            icon: Icons.remove,
+            enabled: canDecrease,
+            onTap: () => onChanged(-step),
           ),
+          const SizedBox(width: 8),
+          Text(
+            value != null ? '$value $unit' : '—',
+            overflow: TextOverflow.ellipsis,
+            maxLines: 1,
+            style: const TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.bold,
+              color: Colors.black87,
+            ),
+          ),
+          const SizedBox(width: 8),
+          _PlusMinusBtn(
+            icon: Icons.add,
+            enabled: canIncrease,
+            onTap: () => onChanged(step),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Icône de tête, avec badge ↺ superposé si un retour est disponible ────
+  // Pas de bouton séparé dans la ligne : ça éviterait de désaligner la
+  // grille ⊖/⊕ entre "Durée" et "Capacité" dès que l'un des deux affiche
+  // le badge et pas l'autre. Le badge se pose sur l'icône existante à
+  // gauche, sans consommer d'espace supplémentaire dans la ligne.
+  Widget _buildLeadingIcon() {
+    final plainIcon = Icon(icon, size: 18, color: _green);
+    if (onRevert == null) return plainIcon;
+    return GestureDetector(
+      onTap: onRevert,
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 30,
+        height: 30,
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
+          children: [
+            // Pastille de fond : signale "ceci est un bouton" au premier
+            // coup d'œil, même sans avoir vu le tutoriel de découverte.
+            Container(
+              width: 26,
+              height: 26,
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+              ),
+            ),
+            plainIcon,
+            Positioned(
+              right: 0,
+              top: 2,
+              child: Container(
+                width: 13,
+                height: 13,
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade600,
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: const Color(0xFFF6FAF7),
+                    width: 1.5,
+                  ),
+                ),
+                child: const Icon(
+                  Icons.undo_rounded,
+                  size: 8,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ],
         ),
-        const SizedBox(width: 14),
-        _PlusMinusBtn(
-          icon: Icons.add,
-          enabled: canIncrease,
-          onTap: () => onChanged(step),
-        ),
-      ],
+      ),
     );
   }
 }
@@ -662,9 +863,7 @@ class _PlusMinusBtn extends StatelessWidget {
         decoration: BoxDecoration(
           color: enabled ? _green.withOpacity(0.1) : Colors.grey.shade200,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: enabled ? _green : Colors.grey.shade300,
-          ),
+          border: Border.all(color: enabled ? _green : Colors.grey.shade300),
         ),
         child: Center(
           child: Icon(
@@ -683,20 +882,29 @@ class _SlotCard extends StatelessWidget {
   final AgendaSlot slot;
   final DateFormat timeFormat;
   final VoidCallback onTap;
+  final bool isPast;
 
   const _SlotCard({
     required this.slot,
     required this.timeFormat,
     required this.onTap,
+    this.isPast = false,
   });
 
   String _subtitle() {
+    if (isPast && slot.reserved == 0) return 'Créneau passé';
     if (slot.isBlocked) return 'Bloqué';
     if (slot.reserved == 0) return 'Disponible';
     return '${slot.reserved} personne(s) réservée(s)';
   }
 
   Widget _statusBadge(bool isBlocked, bool isFull) {
+    if (isPast) {
+      return _solidBadge(
+        slot.reserved > 0 ? '${slot.reserved} réservé(s)' : 'Passé',
+        Colors.grey.shade500,
+      );
+    }
     if (isBlocked) {
       return _solidBadge('Bloqué', Colors.red.shade600);
     }
@@ -705,10 +913,7 @@ class _SlotCard extends StatelessWidget {
     }
     final remaining = slot.capacity - slot.reserved;
     if (slot.reserved > 0) {
-      return _solidBadge(
-        '$remaining pl.',
-        Colors.orange.shade500,
-      );
+      return _solidBadge('$remaining pl.', Colors.orange.shade500);
     }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
@@ -753,17 +958,20 @@ class _SlotCard extends StatelessWidget {
     final isLegacy = slot.isLegacy;
 
     Color border, bg;
-    if (isBlocked) {
+    if (isPast) {
+      border = Colors.grey.shade300;
+      bg = Colors.grey.shade50;
+    } else if (isBlocked) {
       border = Colors.red.shade400;
       bg = Colors.red.shade50;
     } else if (isFull) {
       border = _green;
-      bg = _lightGreen.withOpacity(0.25);
+      bg = _lightGreen.withValues(alpha: 0.2);
     } else if (isLegacy) {
       border = Colors.orange.shade400;
       bg = Colors.orange.shade50;
     } else {
-      border = Colors.grey.shade300;
+      border = Colors.grey.shade200;
       bg = Colors.white;
     }
 
@@ -771,7 +979,7 @@ class _SlotCard extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
         color: bg,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: border, width: 1.5),
       ),
       child: ListTile(
@@ -804,7 +1012,7 @@ class _SlotCard extends StatelessWidget {
           children: [
             Text(
               '${timeFormat.format(slot.start)} – ${timeFormat.format(slot.end)}',
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17),
             ),
             _statusBadge(isBlocked, isFull),
           ],
@@ -952,10 +1160,7 @@ class _TimeslotPickerSheet extends StatelessWidget {
   final List<_TimeSlotInfo> timeslots;
   final String title;
 
-  const _TimeslotPickerSheet({
-    required this.timeslots,
-    required this.title,
-  });
+  const _TimeslotPickerSheet({required this.timeslots, required this.title});
 
   @override
   Widget build(BuildContext context) {
@@ -988,8 +1193,11 @@ class _TimeslotPickerSheet extends StatelessWidget {
                   color: const Color(0xFFE8F5ED),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: const Icon(Icons.schedule_rounded,
-                    color: _green, size: 20),
+                child: const Icon(
+                  Icons.schedule_rounded,
+                  color: _green,
+                  size: 20,
+                ),
               ),
               const SizedBox(width: 12),
               Text(
@@ -1003,25 +1211,40 @@ class _TimeslotPickerSheet extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 16),
-          ...timeslots.map(
-            (ts) => Container(
+          ...timeslots.map((ts) {
+            final deferred = ts.deleteAfter != null;
+            return Container(
               margin: const EdgeInsets.only(bottom: 10),
               decoration: BoxDecoration(
-                color: const Color(0xFFE8F5ED),
+                color: deferred
+                    ? Colors.grey.shade100
+                    : const Color(0xFFE8F5ED),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: _green.withValues(alpha: 0.3)),
+                border: Border.all(
+                  color: deferred
+                      ? Colors.grey.shade300
+                      : _green.withValues(alpha: 0.3),
+                ),
               ),
               child: ListTile(
+                enabled: !deferred,
                 leading: Container(
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    color: _green.withValues(alpha: 0.15),
+                    color: deferred
+                        ? Colors.grey.shade300
+                        : _green.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: const Center(
-                    child: Icon(Icons.access_time_rounded,
-                        color: _green, size: 20),
+                  child: Center(
+                    child: Icon(
+                      deferred
+                          ? Icons.auto_delete_outlined
+                          : Icons.access_time_rounded,
+                      color: deferred ? Colors.grey.shade500 : _green,
+                      size: 20,
+                    ),
                   ),
                 ),
                 title: Text(
@@ -1032,16 +1255,19 @@ class _TimeslotPickerSheet extends StatelessWidget {
                   ),
                 ),
                 subtitle: Text(
-                  '${ts.duration} min · ${ts.capacity} pers./créneau',
-                  style: TextStyle(
-                      fontSize: 12, color: Colors.grey.shade600),
+                  deferred
+                      ? 'Suppression programmée le '
+                            '${DateFormat('d MMM', 'fr_FR').format(ts.deleteAfter!)}'
+                      : '${ts.duration} min · ${ts.capacity} pers./créneau',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                 ),
-                trailing: const Icon(Icons.chevron_right_rounded,
-                    color: _green),
-                onTap: () => Navigator.pop(context, ts),
+                trailing: deferred
+                    ? null
+                    : const Icon(Icons.chevron_right_rounded, color: _green),
+                onTap: deferred ? null : () => Navigator.pop(context, ts),
               ),
-            ),
-          ),
+            );
+          }),
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: SizedBox(
@@ -1049,8 +1275,7 @@ class _TimeslotPickerSheet extends StatelessWidget {
               child: Text(
                 'Annuler',
                 textAlign: TextAlign.center,
-                style:
-                    TextStyle(color: Colors.grey.shade600, fontSize: 15),
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 15),
               ),
             ),
           ),
@@ -1063,13 +1288,18 @@ class _TimeslotPickerSheet extends StatelessWidget {
 // ── Bottom sheet de blocage ───────────────────────────────────────────────────
 class _BlockSheet extends StatefulWidget {
   final List<_TimeSlotInfo> timeslots;
+  // Créneaux du jour sélectionné, utilisés pour savoir si la cible du
+  // blocage (une plage précise, ou "Toutes") a des réservations en cours.
+  final List<AgendaSlot> daySlots;
   final Future<String?> Function({
     required String? timeSlotId,
     required String reason,
-  }) onConfirm;
+  })
+  onConfirm;
 
   const _BlockSheet({
     required this.timeslots,
+    required this.daySlots,
     required this.onConfirm,
   });
 
@@ -1082,11 +1312,23 @@ class _BlockSheetState extends State<_BlockSheet> {
   // null = toutes les plages; sinon = id de la plage sélectionnée
   String? _selectedId;
   bool _loading = false;
+  bool _showReasonError = false;
+
+  // La cible sélectionnée a-t-elle des réservations aujourd'hui ?
+  // "Toutes" (_selectedId == null) : dès qu'une seule plage a des
+  // réservations, la raison devient obligatoire (pas de cas mixte).
+  bool get _reasonRequired => _selectedId == null
+      ? widget.daySlots.any((s) => s.reserved > 0)
+      : widget.daySlots.any(
+          (s) => s.timeSlotId == _selectedId && s.reserved > 0,
+        );
 
   @override
   void initState() {
     super.initState();
-    if (widget.timeslots.length == 1) {
+    // Ne pas présélectionner une plage en cours de suppression programmée.
+    if (widget.timeslots.length == 1 &&
+        widget.timeslots.first.deleteAfter == null) {
       _selectedId = widget.timeslots.first.id;
     }
   }
@@ -1097,170 +1339,426 @@ class _BlockSheetState extends State<_BlockSheet> {
     super.dispose();
   }
 
+  // Puce de sélection : contraste net sélectionné / non sélectionné
+  // (rempli rouge + coche vs bordure grise), pour qu'on voie d'un coup
+  // d'œil ce qui est ciblé.
+  Widget _selectChip({
+    required String label,
+    required bool selected,
+    required bool disabled,
+    required VoidCallback onTap,
+  }) {
+    final Color bg;
+    final Color fg;
+    final Color border;
+    if (disabled) {
+      bg = Colors.grey.shade100;
+      fg = Colors.grey.shade400;
+      border = Colors.grey.shade200;
+    } else if (selected) {
+      bg = Colors.red.shade600;
+      fg = Colors.white;
+      border = Colors.red.shade600;
+    } else {
+      bg = Colors.white;
+      fg = Colors.grey.shade800;
+      border = Colors.grey.shade300;
+    }
+    return GestureDetector(
+      onTap: disabled ? null : onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: border, width: 1.5),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (selected) ...[
+              const Icon(Icons.check_rounded, size: 16, color: Colors.white),
+              const SizedBox(width: 6),
+            ],
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                color: fg,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasMultiple = widget.timeslots.length > 1;
-    return Padding(
-      padding:
-          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-      child: Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 20),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(2),
-                ),
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: EdgeInsets.fromLTRB(
+        20,
+        8,
+        20,
+        28 +
+            MediaQuery.of(context).padding.bottom +
+            MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 20),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
               ),
             ),
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.red.shade50,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(Icons.lock_outline_rounded,
-                      color: Colors.red.shade600, size: 20),
+          ),
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                const SizedBox(width: 12),
-                const Text(
-                  'Bloquer les créneaux',
-                  style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.black87,
+                child: Icon(
+                  Icons.lock_outline_rounded,
+                  color: Colors.red.shade600,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Text(
+                'Bloquer les créneaux',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black87,
+                ),
+              ),
+            ],
+          ),
+          if (hasMultiple) ...[
+            const SizedBox(height: 16),
+            Text(
+              'Quelle plage ?',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: Colors.grey.shade700,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ...widget.timeslots.map((ts) {
+                  final deferred = ts.deleteAfter != null;
+                  return _selectChip(
+                    label: deferred
+                        ? '${ts.startTime}–${ts.endTime} · suppr. programmée'
+                        : '${ts.startTime}–${ts.endTime}',
+                    selected: _selectedId == ts.id,
+                    disabled: deferred,
+                    onTap: () => setState(() {
+                      _selectedId = ts.id;
+                      _showReasonError = false;
+                    }),
+                  );
+                }),
+                _selectChip(
+                  label: 'Toutes les plages',
+                  selected: _selectedId == null,
+                  disabled: false,
+                  onTap: () => setState(() {
+                    _selectedId = null;
+                    _showReasonError = false;
+                  }),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 16),
+          TextField(
+            controller: _reasonController,
+            // Autofocus seulement s'il n'y a pas de créneau à choisir
+            // avant : sinon le clavier masquerait les puces de sélection.
+            autofocus: !hasMultiple,
+            onChanged: (_) {
+              if (_showReasonError) {
+                setState(() => _showReasonError = false);
+              }
+            },
+            decoration: InputDecoration(
+              labelText: _reasonRequired
+                  ? 'Raison (visible par les clients)'
+                  : 'Raison (optionnel)',
+              hintText: 'Ex : Panne technique, urgence, personnel absent…',
+              prefixIcon: const Icon(Icons.info_outline_rounded),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              errorBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: Colors.red.shade400),
+              ),
+              focusedErrorBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: Colors.red.shade400, width: 2),
+              ),
+              errorText: _showReasonError
+                  ? 'Raison requise — des réservations sont en cours sur ce créneau'
+                  : null,
+              errorMaxLines: 2,
+              filled: true,
+              fillColor: Colors.grey.shade50,
+            ),
+            maxLines: 2,
+            // La raison part telle quelle dans la notification client.
+            maxLength: 120,
+          ),
+          if (_reasonRequired) ...[
+            const SizedBox(height: 4),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.notifications_active_outlined,
+                  size: 15,
+                  color: Colors.grey.shade500,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Les clients ayant réservé via l\'app seront prévenus que '
+                    'le service est suspendu. Ceux venus réserver sur place ne '
+                    'recevront rien — pensez à les prévenir.',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: Colors.grey.shade500,
+                    ),
                   ),
                 ),
               ],
             ),
-            if (hasMultiple) ...[
-              const SizedBox(height: 16),
-              Text(
-                'Quelle plage ?',
+          ],
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _loading
+                  ? null
+                  : () async {
+                      final reason = _reasonController.text.trim();
+                      if (reason.isEmpty && _reasonRequired) {
+                        setState(() => _showReasonError = true);
+                        return;
+                      }
+                      setState(() => _loading = true);
+                      Navigator.pop(context);
+                      await widget.onConfirm(
+                        timeSlotId: _selectedId,
+                        reason: reason,
+                      );
+                    },
+              icon: _loading
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 2,
+                      ),
+                    )
+                  : const Icon(
+                      Icons.lock_rounded,
+                      color: Colors.white,
+                      size: 18,
+                    ),
+              label: const Text(
+                'Bloquer',
                 style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red.shade600,
+                disabledBackgroundColor: Colors.red.shade200,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Section créneaux dépassés avec animation expand/collapse ─────────────────
+class _PastSlotsSection extends StatefulWidget {
+  final bool isExpanded;
+  final List<Widget> children;
+
+  const _PastSlotsSection({required this.isExpanded, required this.children});
+
+  @override
+  State<_PastSlotsSection> createState() => _PastSlotsSectionState();
+}
+
+class _PastSlotsSectionState extends State<_PastSlotsSection>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+
+  // Chaque carte démarre 35 ms après la précédente (fraction sur 500 ms = 0.07).
+  // Les 6 premières cartes sont staggerées ; les suivantes partagent le même décalage.
+  static const int _maxStagger = 6;
+  static const double _staggerStep = 0.07;
+  static const double _cardSpan = 0.56; // durée d'animation de chaque carte
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+      value: widget.isExpanded ? 1.0 : 0.0,
+    );
+  }
+
+  @override
+  void didUpdateWidget(_PastSlotsSection old) {
+    super.didUpdateWidget(old);
+    if (widget.isExpanded != old.isExpanded) {
+      widget.isExpanded ? _ctrl.forward() : _ctrl.reverse();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Animation<double> _cardAnim(int index) {
+    final i = index.clamp(0, _maxStagger);
+    final start = i * _staggerStep;
+    final end = (start + _cardSpan).clamp(0.0, 1.0);
+    return CurvedAnimation(
+      parent: _ctrl,
+      curve: Interval(start, end, curve: Curves.easeOutCubic),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizeTransition(
+      sizeFactor: CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic),
+      axisAlignment: -1.0,
+      child: Column(
+        children: widget.children.asMap().entries.map((entry) {
+          final anim = _cardAnim(entry.key);
+          return AnimatedBuilder(
+            animation: anim,
+            builder: (_, child) => Opacity(
+              opacity: anim.value,
+              child: Transform.translate(
+                offset: Offset(0, (1.0 - anim.value) * -14),
+                child: child,
+              ),
+            ),
+            child: entry.value,
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+// ── Bouton toggle "N créneaux dépassés / Masquer" ─────────────────────────────
+class _PastSlotsToggle extends StatelessWidget {
+  final int count;
+  final bool isCountApproximate;
+  final bool isExpanded;
+  final VoidCallback onTap;
+
+  const _PastSlotsToggle({
+    required this.count,
+    required this.isCountApproximate,
+    required this.isExpanded,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.grey.shade200),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                isCountApproximate ? '$count+' : '$count',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
                   color: Colors.grey.shade700,
                 ),
               ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  ...widget.timeslots.map(
-                    (ts) => ChoiceChip(
-                      label: Text('${ts.startTime}–${ts.endTime}'),
-                      selected: _selectedId == ts.id,
-                      onSelected: (_) =>
-                          setState(() => _selectedId = ts.id),
-                      selectedColor: _green.withValues(alpha: 0.15),
-                      labelStyle: TextStyle(
-                        fontSize: 13,
-                        color: _selectedId == ts.id
-                            ? _green
-                            : Colors.grey.shade700,
-                        fontWeight: _selectedId == ts.id
-                            ? FontWeight.w600
-                            : FontWeight.normal,
-                      ),
-                    ),
-                  ),
-                  ChoiceChip(
-                    label: const Text('Toutes'),
-                    selected: _selectedId == null,
-                    onSelected: (_) =>
-                        setState(() => _selectedId = null),
-                    selectedColor: Colors.red.shade50,
-                    labelStyle: TextStyle(
-                      fontSize: 13,
-                      color: _selectedId == null
-                          ? Colors.red.shade700
-                          : Colors.grey.shade700,
-                      fontWeight: _selectedId == null
-                          ? FontWeight.w600
-                          : FontWeight.normal,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-            const SizedBox(height: 16),
-            TextField(
-              controller: _reasonController,
-              autofocus: true,
-              decoration: InputDecoration(
-                labelText: 'Raison du blocage',
-                hintText: 'Ex : Pause déjeuner, Réunion...',
-                prefixIcon:
-                    const Icon(Icons.info_outline_rounded),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                filled: true,
-                fillColor: Colors.grey.shade50,
-              ),
-              maxLines: 2,
             ),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _loading
-                    ? null
-                    : () async {
-                        final reason =
-                            _reasonController.text.trim();
-                        if (reason.isEmpty) return;
-                        setState(() => _loading = true);
-                        Navigator.pop(context);
-                        await widget.onConfirm(
-                          timeSlotId: _selectedId,
-                          reason: reason,
-                        );
-                      },
-                icon: _loading
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2,
-                        ),
-                      )
-                    : const Icon(Icons.lock_rounded,
-                        color: Colors.white, size: 18),
-                label: const Text(
-                  'Bloquer',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 15,
-                  ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Text(
+                isExpanded
+                    ? 'Masquer les créneaux dépassés'
+                    : 'créneaux dépassés',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.grey.shade600,
                 ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red.shade600,
-                  disabledBackgroundColor:
-                      Colors.red.shade200,
-                  elevation: 0,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
+              ),
+            ),
+            AnimatedRotation(
+              turns: isExpanded ? 0.5 : 0.0,
+              duration: const Duration(milliseconds: 280),
+              curve: Curves.easeInOut,
+              child: Icon(
+                Icons.keyboard_arrow_down_rounded,
+                size: 22,
+                color: Colors.grey.shade500,
               ),
             ),
           ],

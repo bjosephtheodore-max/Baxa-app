@@ -17,6 +17,6 @@ module.exports = {
     "no-unused-vars": "off",
   },
   parserOptions: {
-    ecmaVersion: 2018,
+    ecmaVersion: 2020,
   },
 };

@@ -5,7 +5,11 @@ import 'package:baxa/page b-acceuil/company/house_page.dart';
 import 'package:baxa/page b-acceuil/company/company_settings_page.dart';
 import 'package:baxa/page%20b-acceuil/company/notifications_page.dart';
 import 'package:baxa/page b-acceuil/company/staff_page.dart';
+import 'package:baxa/page b-acceuil/company/company_deletion_gate_page.dart';
 import 'package:baxa/services/notifications/queue_notification_service.dart';
+import 'package:baxa/services/onboarding_service.dart';
+import 'package:baxa/widgets/notifications_nav_icon.dart';
+import 'package:baxa/widgets/onboarding_widgets.dart';
 
 class CompanyPage extends StatefulWidget {
   const CompanyPage({super.key});
@@ -16,6 +20,22 @@ class CompanyPage extends StatefulWidget {
 class CompanyPageState extends State<CompanyPage> {
   int pageIndex = 0;
   bool _roleChecked = false;
+
+  // Flux stable des notifications récentes de l'entreprise — alimente la
+  // pastille de non-lus (barre de nav + icône de l'app). L'admin a
+  // uid == companyId, donc `notificationsHistory` de sa propre entreprise.
+  late final Query<Map<String, dynamic>> _recentNotifs = FirebaseFirestore
+      .instance
+      .collection('companies')
+      .doc(FirebaseAuth.instance.currentUser?.uid ?? '_')
+      .collection('notificationsHistory')
+      .orderBy('createdAt', descending: true)
+      .limit(50);
+
+  // null = normal · 'scheduled' = départ en cours (délai de grâce) ·
+  // 'gone' = compte déjà supprimé.
+  String? _deletionStatus;
+  Map<String, dynamic>? _deletionData;
 
   static const List<Widget> _adminPages = [
     HousePage(),
@@ -28,6 +48,7 @@ class CompanyPageState extends State<CompanyPage> {
     super.initState();
     _checkRole();
     _initializeNotificationService();
+    OnboardingService().checkAndInit();
   }
 
   Future<void> _checkRole() async {
@@ -61,6 +82,23 @@ class CompanyPageState extends State<CompanyPage> {
         }
       }
 
+      // Admin : départ de Baxa en cours ?
+      try {
+        final dr = await FirebaseFirestore.instance
+            .collection('deletionRequests')
+            .doc(user.uid)
+            .get();
+        if (dr.exists) {
+          final s = dr.data()?['status'];
+          if (s == 'scheduled' || s == 'pending') {
+            _deletionStatus = 'scheduled';
+            _deletionData = dr.data();
+          } else if (s == 'approved' || s == 'completed') {
+            _deletionStatus = 'gone';
+          }
+        }
+      } catch (_) {}
+
       if (mounted) setState(() => _roleChecked = true);
     } catch (e) {
       if (mounted) setState(() => _roleChecked = true);
@@ -93,38 +131,95 @@ class CompanyPageState extends State<CompanyPage> {
   @override
   Widget build(BuildContext context) {
     if (!_roleChecked) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    if (_deletionStatus != null) {
+      return CompanyDeletionGatePage(
+        companyId: FirebaseAuth.instance.currentUser?.uid ?? '',
+        status: _deletionStatus!,
+        data: _deletionData,
+        onRevived: () => setState(() {
+          _deletionStatus = null;
+          _deletionData = null;
+        }),
       );
     }
 
     return MediaQuery(
-      data: MediaQuery.of(context).copyWith(
-        textScaler: TextScaler.linear(_getTextScaleFactor(context)),
-      ),
-      child: Scaffold(
-        body: IndexedStack(index: pageIndex, children: _adminPages),
-        bottomNavigationBar: NavigationBar(
-                backgroundColor: Colors.white,
-                selectedIndex: pageIndex,
-                onDestinationSelected: (int index) {
-                  setState(() => pageIndex = index);
-                },
-                destinations: const [
-                  NavigationDestination(
-                    icon: Icon(Icons.home),
-                    label: 'Accueil',
+      data: MediaQuery.of(
+        context,
+      ).copyWith(textScaler: TextScaler.linear(_getTextScaleFactor(context))),
+      child: Stack(
+        children: [
+          Scaffold(
+            body: IndexedStack(index: pageIndex, children: _adminPages),
+            bottomNavigationBar: NavigationBar(
+              backgroundColor: Colors.white,
+              selectedIndex: pageIndex,
+              onDestinationSelected: (int index) {
+                if (index == 1) OnboardingService().advance(1);
+                // "Lu" à l'entrée comme à la sortie de l'onglet Notifications
+                // (couvre une notif arrivée pendant la consultation).
+                final leavingNotifs = pageIndex == 2 && index != 2;
+                final enteringNotifs = index == 2;
+                if (leavingNotifs || enteringNotifs) {
+                  NotificationsNavIcon.markSeen();
+                }
+                setState(() => pageIndex = index);
+              },
+              destinations: [
+                const NavigationDestination(
+                  icon: Icon(Icons.home),
+                  label: 'Accueil',
+                ),
+                NavigationDestination(
+                  icon: ListenableBuilder(
+                    listenable: OnboardingService(),
+                    builder: (_, __) => Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        const Icon(Icons.settings),
+                        if (OnboardingService().step == 1)
+                          const Positioned(
+                            top: -4,
+                            right: -4,
+                            child: PulsingDot(),
+                          ),
+                      ],
+                    ),
                   ),
-                  NavigationDestination(
-                    icon: Icon(Icons.settings),
-                    label: 'Réglages',
+                  label: 'Réglages',
+                ),
+                NavigationDestination(
+                  icon: NotificationsNavIcon(
+                    recentNotifications: _recentNotifs,
                   ),
-                  NavigationDestination(
-                    icon: Icon(Icons.notifications),
-                    label: 'Notifications',
+                  label: 'Notifications',
+                ),
+              ],
+            ),
+          ),
+          Positioned(
+            bottom: 80 + MediaQuery.of(context).padding.bottom,
+            left: 0,
+            right: 0,
+            child: ListenableBuilder(
+              listenable: OnboardingService(),
+              builder: (_, __) {
+                if (OnboardingService().step != 1) {
+                  return const SizedBox.shrink();
+                }
+                return const Center(
+                  child: PulsingHint(
+                    text: 'Appuyez sur Réglages',
+                    icon: Icons.settings,
                   ),
-                ],
-              ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

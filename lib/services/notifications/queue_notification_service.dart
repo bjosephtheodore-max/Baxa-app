@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'notification_models.dart';
+import 'notification_service.dart' show kNotifAndroidSmallIcon;
 
 class QueueNotificationService {
   static final QueueNotificationService _instance =
@@ -34,9 +35,10 @@ class QueueNotificationService {
 
     _companyId = user.uid;
 
-    // Configuration Android
+    // Configuration Android — même icône monochrome (« B ») que le reste
+    // de l'app, pas le logo en couleur (qu'Android affichait en carré blanc).
     const androidSettings = AndroidInitializationSettings(
-      '@mipmap/ic_launcher',
+      kNotifAndroidSmallIcon,
     );
 
     // Configuration iOS
@@ -265,6 +267,7 @@ class QueueNotificationService {
       priority: Priority.low,
       ongoing: false, // Pas persistante
       autoCancel: false,
+      icon: kNotifAndroidSmallIcon,
     );
 
     const iosDetails = DarwinNotificationDetails(
@@ -322,6 +325,7 @@ class QueueNotificationService {
       channelDescription: 'Notifications de synthèse des files terminées',
       importance: Importance.defaultImportance,
       priority: Priority.defaultPriority,
+      icon: kNotifAndroidSmallIcon,
     );
 
     const iosDetails = DarwinNotificationDetails(

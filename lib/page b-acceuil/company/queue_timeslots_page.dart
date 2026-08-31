@@ -10,6 +10,11 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
   late final Stream<QuerySnapshot> _slotsStream;
   late final Stream<List<_DayCapacity>> _capacityStream;
 
+  bool _guideDismissed = false;
+  bool _hasSlots = false;
+
+  void _dismissGuide() => setState(() => _guideDismissed = true);
+
   @override
   void initState() {
     super.initState();
@@ -103,186 +108,228 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
           ],
         ),
       ),
-      body: Column(
-        children: [
-          // Bannière capacité groupée par jour
-          StreamBuilder<List<_DayCapacity>>(
-            stream: _capacityStream,
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const SizedBox.shrink();
-              }
-              final days = snapshot.data ?? [];
-              final isEmpty =
-                  days.isEmpty || days.every((d) => d.capacity == 0);
-              return Container(
-                margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey.shade200),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.04),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
+      body: ListenableBuilder(
+        listenable: OnboardingService(),
+        builder: (context, child) {
+          // Le Stack existe toujours — seule la présence du voile varie.
+          // Changer la structure elle-même (avec/sans Stack) forcerait Flutter
+          // à détruire et recréer `child` (donc son StreamBuilder Firestore,
+          // qui repartirait de zéro) à chaque changement d'étape d'onboarding.
+          final showOverlay = OnboardingService().step == 5 && _guideDismissed;
+          return Stack(
+            children: [
+              child!,
+              if (showOverlay)
+                Positioned.fill(
+                  child: AbsorbPointer(
+                    child: Container(
+                      color: Colors.black.withValues(alpha: 0.58),
                     ),
-                  ],
-                ),
-                child: IntrinsicHeight(
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Container(
-                        width: 4,
-                        decoration: const BoxDecoration(
-                          color: _kGreen,
-                          borderRadius: BorderRadius.only(
-                            topLeft: Radius.circular(12),
-                            bottomLeft: Radius.circular(12),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        child: Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: _kGreen.withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Icon(
-                            Icons.groups,
-                            color: _kGreen,
-                            size: 20,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(0, 12, 14, 12),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Capacité d\'accueil',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.grey.shade500,
-                                  letterSpacing: 0.4,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              if (isEmpty)
-                                Row(
-                                  children: [
-                                    Icon(
-                                      Icons.warning_amber,
-                                      size: 14,
-                                      color: Colors.orange.shade600,
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Text(
-                                      'Aucune plage configurée',
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        color: Colors.orange.shade700,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ],
-                                )
-                              else
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 6,
-                                  children: days.map((d) {
-                                    final isOpen = d.capacity > 0;
-                                    return Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 10,
-                                        vertical: 4,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: isOpen
-                                            ? _kGreen.withValues(alpha: 0.1)
-                                            : Colors.grey.shade100,
-                                        borderRadius:
-                                            BorderRadius.circular(20),
-                                      ),
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Text(
-                                            isOpen
-                                                ? '${d.label} · ${d.capacity} '
-                                                : '${d.label} · Fermé',
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.w600,
-                                              color: isOpen
-                                                  ? _kGreen
-                                                  : Colors.grey.shade500,
-                                            ),
-                                          ),
-                                          if (isOpen)
-                                            Icon(
-                                              Icons.group,
-                                              size: 13,
-                                              color: _kGreen,
-                                            ),
-                                        ],
-                                      ),
-                                    );
-                                  }).toList(),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
                   ),
                 ),
-              );
-            },
-          ),
-
-          // Liste des plages horaires
-          Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: _slotsStream,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                final timeSlots = snapshot.data?.docs ?? [];
-                if (timeSlots.isEmpty) return _buildEmptyState();
-                return ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: timeSlots.length,
-                  itemBuilder: (context, index) {
-                    final slot = timeSlots[index];
-                    final slotData = slot.data() as Map<String, dynamic>;
-                    return _buildTimeSlotCard(slot.id, slotData);
+            ],
+          );
+        },
+        child: StreamBuilder<QuerySnapshot>(
+          stream: _slotsStream,
+          builder: (context, snapshot) {
+            final slots = snapshot.data?.docs ?? [];
+            final hasSlots = slots.isNotEmpty;
+            if (_hasSlots != hasSlots) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) setState(() => _hasSlots = hasSlots);
+              });
+            }
+            // Guide éducatif avant la première plage (onboarding uniquement)
+            if (!hasSlots && !_guideDismissed && OnboardingService().isActive) return _buildTimeSlotsGuide();
+            // Contenu normal : bannière capacité + liste
+            return Column(
+              children: [
+                StreamBuilder<List<_DayCapacity>>(
+                  stream: _capacityStream,
+                  builder: (context, capSnapshot) {
+                    if (capSnapshot.connectionState == ConnectionState.waiting) {
+                      return const SizedBox.shrink();
+                    }
+                    final days = capSnapshot.data ?? [];
+                    final isEmpty =
+                        days.isEmpty || days.every((d) => d.capacity == 0);
+                    return Container(
+                      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.grey.shade200),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.04),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: IntrinsicHeight(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Container(
+                              width: 4,
+                              decoration: const BoxDecoration(
+                                color: _kGreen,
+                                borderRadius: BorderRadius.only(
+                                  topLeft: Radius.circular(12),
+                                  bottomLeft: Radius.circular(12),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 14),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              child: Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: _kGreen.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Icon(
+                                  Icons.groups,
+                                  color: _kGreen,
+                                  size: 20,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(0, 12, 14, 12),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Capacité d\'accueil',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.grey.shade500,
+                                        letterSpacing: 0.4,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    if (isEmpty)
+                                      Row(
+                                        children: [
+                                          const Icon(
+                                            Icons.touch_app_rounded,
+                                            size: 14,
+                                            color: _kGreen,
+                                          ),
+                                          const SizedBox(width: 6),
+                                          const Flexible(
+                                            child: Text(
+                                              'Appuyez sur « Ajouter une plage » pour configurer vos horaires',
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                color: _kGreen,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      )
+                                    else
+                                      Wrap(
+                                        spacing: 8,
+                                        runSpacing: 6,
+                                        children: days.map((d) {
+                                          final isOpen = d.capacity > 0;
+                                          return Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 10,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: isOpen
+                                                  ? _kGreen.withValues(
+                                                      alpha: 0.1)
+                                                  : Colors.grey.shade100,
+                                              borderRadius:
+                                                  BorderRadius.circular(20),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  isOpen
+                                                      ? '${d.label} · ${d.capacity} '
+                                                      : '${d.label} · Fermé',
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    fontWeight: FontWeight.w600,
+                                                    color: isOpen
+                                                        ? _kGreen
+                                                        : Colors.grey.shade500,
+                                                  ),
+                                                ),
+                                                if (isOpen)
+                                                  Icon(
+                                                    Icons.group,
+                                                    size: 13,
+                                                    color: _kGreen,
+                                                  ),
+                                              ],
+                                            ),
+                                          );
+                                        }).toList(),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
                   },
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showTimeSlotDialog,
-        backgroundColor: _kGreen,
-        icon: const Icon(Icons.add, color: Colors.white),
-        label: const Text(
-          'Ajouter une plage',
-          style: TextStyle(color: Colors.white),
+                ),
+                Expanded(
+                  child: !hasSlots
+                      ? _buildEmptyState()
+                      : ListView.builder(
+                          padding: const EdgeInsets.all(16),
+                          itemCount: slots.length,
+                          itemBuilder: (context, index) {
+                            final slot = slots[index];
+                            return _buildTimeSlotCard(
+                              slot.id,
+                              slot.data() as Map<String, dynamic>,
+                            );
+                          },
+                        ),
+                ),
+              ],
+            );
+          },
         ),
       ),
+      floatingActionButton: (_guideDismissed || _hasSlots || !OnboardingService().isActive)
+          ? ListenableBuilder(
+              listenable: OnboardingService(),
+              builder: (_, child) {
+                final active = OnboardingService().step == 5;
+                return active ? PulsingGlow(child: child!) : child!;
+              },
+              child: FloatingActionButton.extended(
+                onPressed: _showTimeSlotDialog,
+                backgroundColor: _kGreen,
+                icon: const Icon(Icons.add, color: Colors.white),
+                label: const Text(
+                  'Ajouter une plage',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+            )
+          : null,
     );
   }
 }
@@ -341,6 +388,293 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
     }
   }
 
+  Widget _buildTimeSlotsGuide() {
+    return SafeArea(
+      child: Column(
+        children: [
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 28, 20, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Icône
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: _kGreen.withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.tips_and_updates_rounded,
+                        size: 38,
+                        color: _kGreen,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  // Titre
+                  const Center(
+                    child: Text(
+                      'Configurez vos plages\nintelligemment',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF1A1C2E),
+                        height: 1.3,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Center(
+                    child: Text(
+                      'Avant de créer votre première plage,\ncomprenez les 3 clés d\'une bonne configuration.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey.shade600,
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  // Les 3 paramètres
+                  _buildGuideParam(
+                    Icons.schedule_rounded,
+                    'L\'horaire',
+                    'Définit la fenêtre où vous recevez vos clients',
+                    'ex : 8h–12h · 14h–17h',
+                  ),
+                  const SizedBox(height: 12),
+                  _buildGuideParam(
+                    Icons.timer_rounded,
+                    'La durée par client',
+                    'Le temps alloué à chaque service',
+                    'ex : 10 min · 15 min · 30 min',
+                  ),
+                  const SizedBox(height: 12),
+                  _buildGuideParam(
+                    Icons.people_rounded,
+                    'La capacité du créneau',
+                    'Combien de clients vous recevez en simultané',
+                    'ex : 1 · 2 · 5 personnes',
+                  ),
+                  const SizedBox(height: 24),
+                  // Encart clé
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: _kGreen.withValues(alpha: 0.07),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                          color: _kGreen.withValues(alpha: 0.25)),
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.layers_rounded,
+                            color: _kGreen, size: 22),
+                        SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Vous pouvez créer plusieurs plages pour une même file — c\'est là que réside la puissance du système.',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF1A1C2E),
+                              height: 1.4,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  // Exemple comparatif
+                  Text(
+                    'EXEMPLE · Banque avec affluence en fin de journée',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.grey.shade500,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  _buildExampleRow(
+                    isGood: false,
+                    label: '8h–20h · 15 min · 1 pers./créneau',
+                    note: 'File longue toute la journée, attente imprévisible',
+                  ),
+                  const SizedBox(height: 8),
+                  _buildExampleRow(
+                    isGood: true,
+                    label: '8h–12h · 20 min · 1 pers./créneau',
+                    note: 'Matinée calme — service fluide',
+                  ),
+                  const SizedBox(height: 6),
+                  _buildExampleRow(
+                    isGood: true,
+                    label: '17h–20h · 10 min · 2 pers./créneau',
+                    note: 'Heure de pointe : double capacité, créneau court',
+                  ),
+                  const SizedBox(height: 28),
+                  // Phrase de réflexion
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey.shade200),
+                    ),
+                    child: Text(
+                      '💭  Prenez un moment pour réfléchir à vos pics d\'affluence et à vos heures de pause. C\'est cette réflexion qui fera toute la différence pour vos clients.',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey.shade700,
+                        height: 1.55,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                ],
+              ),
+            ),
+          ),
+          // Bouton fixe en bas
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            child: SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: ElevatedButton(
+                onPressed: _dismissGuide,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _kGreen,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'C\'est compris !',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGuideParam(
+      IconData icon, String title, String subtitle, String example) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: _kGreen.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(icon, color: _kGreen, size: 20),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF1A1C2E),
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                example,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: _kGreen,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildExampleRow(
+      {required bool isGood, required String label, required String note}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: isGood
+            ? _kGreen.withValues(alpha: 0.06)
+            : Colors.red.shade50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isGood
+              ? _kGreen.withValues(alpha: 0.2)
+              : Colors.red.shade100,
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(isGood ? '✅' : '❌',
+              style: const TextStyle(fontSize: 15)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: isGood
+                        ? const Color(0xFF1A1C2E)
+                        : Colors.red.shade800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  note,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: isGood
+                        ? Colors.grey.shade600
+                        : Colors.red.shade600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildEmptyState() {
     return Center(
       child: Column(
@@ -379,6 +713,9 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
 
     final slotsCount = _countSlots(startTime, endTime, duration);
     final totalCapacity = slotsCount * capacity;
+    final pendingEffectiveDate =
+        (slotData['pendingEffectiveDate'] as Timestamp?)?.toDate();
+    final deleteAfter = (slotData['deleteAfter'] as Timestamp?)?.toDate();
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -393,7 +730,9 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
           ),
         ],
       ),
-      child: ClipRRect(
+      child: Column(
+        children: [
+          ClipRRect(
         borderRadius: BorderRadius.circular(14),
         child: IntrinsicHeight(
           child: Row(
@@ -502,6 +841,65 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
           ),
         ),
       ),
+          if (pendingEffectiveDate != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: _kGreen.withValues(alpha: 0.08),
+                borderRadius: const BorderRadius.vertical(
+                  bottom: Radius.circular(14),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.schedule_rounded, size: 14, color: _kGreen),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Modification programmée pour le '
+                      '${DateFormat('EEE d MMM', 'fr_FR').format(pendingEffectiveDate)}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: _kGreen,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (deleteAfter != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.red.shade50,
+                borderRadius: const BorderRadius.vertical(
+                  bottom: Radius.circular(14),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.auto_delete_outlined,
+                      size: 14, color: Colors.red.shade400),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Suppression programmée le '
+                      '${DateFormat('EEE d MMM', 'fr_FR').format(deleteAfter)}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.red.shade400,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 
@@ -537,27 +935,39 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
                 ),
               ),
               const SizedBox(height: 16),
-              _slotActionTile(
-                icon: Icons.edit_outlined,
-                label: 'Modifier',
-                bgColor: Colors.grey.shade50,
-                fgColor: Colors.black87,
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _showTimeSlotDialog(slotId: slotId, slotData: slotData);
-                },
-              ),
-              const SizedBox(height: 8),
-              _slotActionTile(
-                icon: Icons.delete_outline,
-                label: 'Supprimer',
-                bgColor: Colors.red.shade50,
-                fgColor: Colors.red.shade700,
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _deleteSlot(slotId);
-                },
-              ),
+              if (slotData['deleteAfter'] == null) ...[
+                _slotActionTile(
+                  icon: Icons.edit_outlined,
+                  label: 'Modifier',
+                  bgColor: Colors.grey.shade50,
+                  fgColor: Colors.black87,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showTimeSlotDialog(slotId: slotId, slotData: slotData);
+                  },
+                ),
+                const SizedBox(height: 8),
+                _slotActionTile(
+                  icon: Icons.delete_outline,
+                  label: 'Supprimer',
+                  bgColor: Colors.red.shade50,
+                  fgColor: Colors.red.shade700,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _deleteSlot(slotId, slotData);
+                  },
+                ),
+              ] else
+                _slotActionTile(
+                  icon: Icons.restore_from_trash_outlined,
+                  label: 'Restituer la suppression',
+                  bgColor: _kGreen.withValues(alpha: 0.08),
+                  fgColor: _kGreen,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _restorePendingDeletion(slotId, slotData);
+                  },
+                ),
             ],
           ),
         ),
@@ -645,23 +1055,6 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
     );
   }
 
-  Widget _buildSectionLabel(String title, {required IconData icon}) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: _kGreen),
-        const SizedBox(width: 6),
-        Text(
-          title,
-          style: const TextStyle(
-            fontWeight: FontWeight.w700,
-            fontSize: 13,
-            color: Colors.black87,
-          ),
-        ),
-      ],
-    );
-  }
-
   Widget _buildPickerCard({
     required String title,
     required String subtitle,
@@ -689,6 +1082,64 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
             style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
           ),
           const SizedBox(height: 4),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSheetCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Widget child,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 15, color: _kGreen),
+              const SizedBox(width: 7),
+              // Expanded absorbe tout l'espace libre : le titre reste collé
+              // à gauche et le sous-titre reste collé à droite, exactement
+              // comme avec Spacer() — mais le titre s'ellipse au lieu de
+              // déborder si l'espace vient à manquer (grande police système).
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    color: Color(0xFF1A1C2E),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
           child,
         ],
       ),

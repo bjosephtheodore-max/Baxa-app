@@ -217,7 +217,7 @@ class _TeamPageState extends State<TeamPage> {
         ),
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: _green))
+          ? _buildSkeleton()
           : SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(
@@ -229,6 +229,90 @@ class _TeamPageState extends State<TeamPage> {
                 ],
               ),
             ),
+    );
+  }
+
+  // ── Skeleton ──────────────────────────────────────────────
+  Widget _skBox({double height = 16, double? width, double radius = 8}) =>
+      Container(
+        height: height,
+        width: width ?? double.infinity,
+        decoration: BoxDecoration(
+          color: Colors.grey.shade200,
+          borderRadius: BorderRadius.circular(radius),
+        ),
+      );
+
+  Widget _buildSkeleton() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Carte invitation skeleton
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.06),
+                  blurRadius: 12,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  _skBox(height: 42, width: 42, radius: 10),
+                  const SizedBox(width: 12),
+                  _skBox(height: 18, width: 140),
+                ]),
+                const SizedBox(height: 16),
+                _skBox(height: 13),
+                const SizedBox(height: 6),
+                _skBox(height: 13, width: 220),
+                const SizedBox(height: 20),
+                _skBox(height: 52, radius: 12),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          // Titre membres skeleton
+          _skBox(height: 16, width: 120),
+          const SizedBox(height: 12),
+          // Lignes membres skeleton
+          for (int i = 0; i < 2; i++) ...[
+            Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                children: [
+                  _skBox(height: 42, width: 42, radius: 21),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _skBox(height: 15),
+                        const SizedBox(height: 6),
+                        _skBox(height: 12, width: 140),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -416,11 +500,35 @@ class _TeamPageState extends State<TeamPage> {
               .snapshots(),
           builder: (context, snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: CircularProgressIndicator(color: _green),
-                ),
+              return Column(
+                children: [
+                  for (int i = 0; i < 2; i++)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 14),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Row(
+                        children: [
+                          _skBox(height: 42, width: 42, radius: 21),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _skBox(height: 15),
+                                const SizedBox(height: 6),
+                                _skBox(height: 12, width: 140),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
               );
             }
 

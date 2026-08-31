@@ -1,5 +1,35 @@
 part of 'house_page.dart';
 
+// ── Trace de révocation (undo 5 min, scoping par timeSlot) ─────────────────
+// Utilisé uniquement pour les modifications de durée en direct depuis la
+// page d'accueil (applyDurationChange). Stockage en mémoire uniquement —
+// pas de persistance Firestore, cette trace est un filet de sécurité léger,
+// pas un historique durable.
+class _PendingRevert {
+  final String queueId;
+  final _TimeSlotInfo tsInfo;
+  final DateTime plageStart;
+  final DateTime plageEnd;
+  final int previousDuration;
+  final ModificationType type;
+  final DateTime originalSelectedDate;
+  final DateTime anchorNow;
+  final DateTime expiresAt;
+  Timer? expiryTimer;
+
+  _PendingRevert({
+    required this.queueId,
+    required this.tsInfo,
+    required this.plageStart,
+    required this.plageEnd,
+    required this.previousDuration,
+    required this.type,
+    required this.originalSelectedDate,
+    required this.anchorNow,
+    required this.expiresAt,
+  });
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // HOUSE NOTIFIER — État + opérations Firestore, sans BuildContext
 // Séparation nette : données ici, UI dans house_page.dart
@@ -21,8 +51,22 @@ class _HouseNotifier extends ChangeNotifier {
   bool _isRefreshing = false;
   bool _isStaff = false;
   bool _disposed = false;
+  bool _initialized = false;
+  bool _revoked = false;
 
-  // ── Pagination ────────────────────────────────────────────────────────────
+  // ── Cache local (session) ─────────────────────────────────────────────────
+  static const _kCompanyId = 'hn_company_id';
+  static const _kIsStaff = 'hn_is_staff';
+
+  // ── Undo "durée" (live-edit page d'accueil uniquement) ────────────────────
+  final Map<String, _PendingRevert> _pendingReverts = {}; // clé = timeSlotId
+
+  // ── Verrou anti-chevauchement : un seul applyDurationChange à la fois par
+  // plage (empêche des taps rapprochés — stepper ou bouton retour — de
+  // lancer des régénérations concurrentes qui se marchent dessus).
+  final Set<String> _busyTimeSlotIds = {}; // clé = timeSlotId
+
+  // ── Pagination (dates déjà passées uniquement) ─────────────────────────────
   static const int _pageSize = 15;
   final Map<String, DocumentSnapshot?> _lastSlotDoc = {};
   final Map<String, bool> _hasMoreSlots = {};
@@ -31,6 +75,17 @@ class _HouseNotifier extends ChangeNotifier {
   // ── Flux temps réel ───────────────────────────────────────────────────────
   StreamSubscription<QuerySnapshot>? _sub;
   bool _initialLoadDone = false;
+
+  // Suivi en direct du statut staff (isActive) : détecte un retrait de
+  // l'équipe pendant que l'app est ouverte, et dès l'ouverture.
+  StreamSubscription<DocumentSnapshot>? _staffStatusSub;
+
+  // Créneaux à venir (aujourd'hui dès "maintenant", ou jour futur en entier) :
+  // tenus à jour en direct via Firestore, un flux par file affichée.
+  static const int _liveSlotsCap = 300;
+  final Map<String, StreamSubscription<QuerySnapshot>> _liveSlotSubs = {};
+  final Map<String, List<AgendaSlot>> _pastSlotsCache = {};
+  final Map<String, List<AgendaSlot>> _liveSlotsCache = {};
 
   // ── Getters (lecture publique) ────────────────────────────────────────────
   String? get companyId => _companyId;
@@ -41,12 +96,15 @@ class _HouseNotifier extends ChangeNotifier {
   bool get hasQueues => _hasQueues;
   bool get loadFailed => _loadFailed;
   bool get isStaff => _isStaff;
+  bool get revoked => _revoked;
   bool isLoadingMore(String qid) => _isLoadingMore[qid] == true;
   bool hasMore(String qid) => _hasMoreSlots[qid] == true;
   AgendaService get agenda => _agenda;
 
   // ── Initialisation ────────────────────────────────────────────────────────
   void initialize() {
+    if (_initialized) return;
+    _initialized = true;
     _agenda.initialize();
     _loadCompanyData();
   }
@@ -56,14 +114,16 @@ class _HouseNotifier extends ChangeNotifier {
   // ── Navigation de date ────────────────────────────────────────────────────
   void changeDate(int days) {
     _selectedDate = _selectedDate.add(Duration(days: days));
+    if (_queues.isNotEmpty) _queues = List.filled(_queues.length, null);
     _notify();
-    _refreshAgenda();
+    _refreshAgenda(skipInitialSpinner: true);
   }
 
   void setDate(DateTime date) {
     _selectedDate = date;
+    if (_queues.isNotEmpty) _queues = List.filled(_queues.length, null);
     _notify();
-    _refreshAgenda();
+    _refreshAgenda(skipInitialSpinner: true);
   }
 
   // ── Marquage skeleton pendant une opération ───────────────────────────────
@@ -84,7 +144,10 @@ class _HouseNotifier extends ChangeNotifier {
     _notify();
 
     try {
-      final page = await _loadSlotPage(queueId, startAfter: _lastSlotDoc[queueId]);
+      final page = await _loadSlotPage(
+        queueId,
+        startAfter: _lastSlotDoc[queueId],
+      );
       _lastSlotDoc[queueId] = page.lastDoc;
       _hasMoreSlots[queueId] = page.hasMore;
 
@@ -112,8 +175,11 @@ class _HouseNotifier extends ChangeNotifier {
   // ── Trouver la prochaine date avec créneaux ───────────────────────────────
   Future<DateTime?> findNextSlotDate(String queueId) async {
     if (_companyId == null) return null;
-    final dayStart = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day)
-        .add(const Duration(days: 1));
+    final dayStart = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+    ).add(const Duration(days: 1));
 
     final snap = await _db
         .collection('companies')
@@ -132,7 +198,13 @@ class _HouseNotifier extends ChangeNotifier {
     return DateTime(d.year, d.month, d.day);
   }
 
-  // ── Blocage de créneaux ───────────────────────────────────────────────────
+  // ── Blocage d'un jour (incident) ─────────────────────────────────────────
+  // Marque les créneaux du jour `blocked` (plage précise ou toutes) SANS
+  // annuler les réservations : celles-ci passent en `suspended: true`. Le
+  // client est prévenu par la Cloud Function `onReservationBlockChange`.
+  // Au déblocage (unblockPlage) : créneau encore à venir → réservation
+  // rétablie ; créneau déjà passé → réservation annulée
+  // (`company_block_unresolved`) et client invité à re-réserver.
   Future<String?> blockTimeSlot({
     required String queueId,
     String? timeSlotId, // null = bloquer toutes les plages du jour
@@ -141,15 +213,19 @@ class _HouseNotifier extends ChangeNotifier {
     if (_companyId == null) return 'Aucune entreprise trouvée';
     try {
       final dayStart = DateTime(
-          _selectedDate.year, _selectedDate.month, _selectedDate.day);
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day,
+      );
       final dayEnd = dayStart.add(const Duration(days: 1));
-
-      final snap = await _db
+      final slotsRef = _db
           .collection('companies')
           .doc(_companyId)
           .collection('queues')
           .doc(queueId)
-          .collection('slots')
+          .collection('slots');
+
+      final snap = await slotsRef
           .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(dayStart))
           .where('start', isLessThan: Timestamp.fromDate(dayEnd))
           .orderBy('start')
@@ -157,25 +233,57 @@ class _HouseNotifier extends ChangeNotifier {
 
       final docs = timeSlotId != null
           ? snap.docs
-              .where((d) => d.data()['timeSlotId'] == timeSlotId)
-              .toList()
+                .where((d) => d.data()['timeSlotId'] == timeSlotId)
+                .toList()
           : snap.docs;
+
+      // La raison part telle quelle dans une notification client.
+      final trimmed = reason.trim();
+      final safeReason = trimmed.length > 120
+          ? '${trimmed.substring(0, 117)}…'
+          : trimmed;
+      final reasonValue = safeReason.isEmpty ? null : safeReason;
 
       WriteBatch batch = _db.batch();
       int count = 0;
+      Future<void> flush() async {
+        if (count >= 380) {
+          await batch.commit();
+          batch = _db.batch();
+          count = 0;
+        }
+      }
+
       for (final doc in docs) {
         batch.update(doc.reference, {
           'status': 'blocked',
-          'blockReason': reason,
+          'blockReason': reasonValue,
           'blockedAt': FieldValue.serverTimestamp(),
         });
         count++;
-        if (count % 400 == 0) {
-          await batch.commit();
-          batch = _db.batch();
+        await flush();
+
+        final reserved = (doc.data()['reserved'] as num?)?.toInt() ?? 0;
+        if (reserved > 0) {
+          final resSnap = await _db
+              .collection('companies')
+              .doc(_companyId)
+              .collection('reservations')
+              .where('slotId', isEqualTo: doc.id)
+              .where('status', isEqualTo: 'confirmed')
+              .get();
+          for (final resDoc in resSnap.docs) {
+            batch.update(resDoc.reference, {
+              'suspended': true,
+              'suspendedReason': reasonValue,
+              'suspendedAt': FieldValue.serverTimestamp(),
+            });
+            count++;
+            await flush();
+          }
         }
       }
-      if (count % 400 != 0) await batch.commit();
+      if (count > 0) await batch.commit();
 
       await _refreshAgenda(silent: true);
       return null;
@@ -187,9 +295,81 @@ class _HouseNotifier extends ChangeNotifier {
   // ── Déblocage ─────────────────────────────────────────────────────────────
   Future<ModificationResult> unblockPlage(String queueId) async {
     setQueueLoading(queueId);
-    final result = await _agenda.unblockPlage(queueId: queueId, date: _selectedDate);
+    final result = await _agenda.unblockPlage(
+      queueId: queueId,
+      date: _selectedDate,
+    );
+    if (result.success) {
+      await _reactivateSuspendedReservations(queueId);
+    }
     await _refreshAgenda(silent: true);
     return result;
+  }
+
+  // Après déblocage : rétablit les réservations suspendues du jour dont le
+  // créneau est encore à venir ; annule celles dont le créneau est déjà
+  // passé (`company_block_unresolved`). Les notifications sont envoyées par
+  // les Cloud Functions (onReservationBlockChange / onReservationCancelledByCompany).
+  Future<void> _reactivateSuspendedReservations(String queueId) async {
+    if (_companyId == null) return;
+    try {
+      final dayStart = DateTime(
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day,
+      );
+      final dayEnd = dayStart.add(const Duration(days: 1));
+      final now = DateTime.now();
+
+      final resSnap = await _db
+          .collection('companies')
+          .doc(_companyId)
+          .collection('reservations')
+          .where('queueId', isEqualTo: queueId)
+          .where('status', isEqualTo: 'confirmed')
+          .get();
+
+      final suspended = resSnap.docs.where((d) {
+        final data = d.data();
+        if (data['suspended'] != true) return false;
+        final ss = (data['slotStart'] as Timestamp?)?.toDate();
+        return ss != null && !ss.isBefore(dayStart) && ss.isBefore(dayEnd);
+      }).toList();
+      if (suspended.isEmpty) return;
+
+      WriteBatch batch = _db.batch();
+      int count = 0;
+      for (final d in suspended) {
+        final se = (d.data()['slotEnd'] as Timestamp?)?.toDate();
+        final passed = se != null && se.isBefore(now);
+        batch.update(
+          d.reference,
+          passed
+              ? {
+                  'status': 'cancelled',
+                  'cancelledAt': FieldValue.serverTimestamp(),
+                  'cancellationSource': 'company_block_unresolved',
+                  'suspended': FieldValue.delete(),
+                  'suspendedReason': FieldValue.delete(),
+                  'suspendedAt': FieldValue.delete(),
+                }
+              : {
+                  'suspended': FieldValue.delete(),
+                  'suspendedReason': FieldValue.delete(),
+                  'suspendedAt': FieldValue.delete(),
+                },
+        );
+        count++;
+        if (count >= 380) {
+          await batch.commit();
+          batch = _db.batch();
+          count = 0;
+        }
+      }
+      if (count > 0) await batch.commit();
+    } catch (_) {
+      // non bloquant : les créneaux sont débloqués, c'est l'essentiel
+    }
   }
 
   // ── RDV manuel ────────────────────────────────────────────────────────────
@@ -200,35 +380,92 @@ class _HouseNotifier extends ChangeNotifier {
   ) async {
     if (_companyId == null) return 'Aucune entreprise trouvée';
     try {
-      await _db.collection('reservations').add({
-        'customerId': 'manual_booking',
-        'customerName': clientName,
-        'companyId': _companyId,
-        'queueId': queue.id,
-        'queueName': queue.name,
-        'slotStart': slot.start,
-        'slotEnd': slot.end,
-        'status': 'confirmed',
-        'createdAt': FieldValue.serverTimestamp(),
-        'source': 'company_manual',
-      });
-      final slotsRef = _db
+      final slotRef = _db
           .collection('companies')
           .doc(_companyId)
           .collection('queues')
           .doc(queue.id)
-          .collection('slots');
-      final matching = await slotsRef
-          .where('start', isEqualTo: slot.start)
-          .where('end', isEqualTo: slot.end)
-          .limit(1)
-          .get();
-      if (matching.docs.isNotEmpty) {
-        await matching.docs.first.reference.update({
-          'reserved': FieldValue.increment(1),
-        });
-      }
-      await _refreshAgenda(silent: true);
+          .collection('slots')
+          .doc(slot.id);
+
+      final d = slot.start.toLocal();
+      final dateKey =
+          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+      final dailyRef = _db
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .doc(queue.id)
+          .collection('dailyStats')
+          .doc(dateKey);
+
+      await Future.wait([
+        _db
+            .collection('companies')
+            .doc(_companyId)
+            .collection('reservations')
+            .add({
+              'customerId': 'manual_booking',
+              'customerName': clientName,
+              'companyId': _companyId,
+              'queueId': queue.id,
+              'queueName': queue.name,
+              'slotId': slot.id,
+              'slotStart': slot.start,
+              'slotEnd': slot.end,
+              'status': 'confirmed',
+              'createdAt': FieldValue.serverTimestamp(),
+              'source': 'company_manual',
+            }),
+        slotRef.update({'reserved': FieldValue.increment(1)}),
+        dailyRef.update({'reserved': FieldValue.increment(1)}),
+      ]);
+      return null;
+    } catch (e) {
+      return 'Erreur: $e';
+    }
+  }
+
+  // ── Suppression d'un client ajouté manuellement ───────────────────────────
+  Future<String?> deleteManualReservation({
+    required String reservationId,
+    required _QueueAgenda queue,
+    required AgendaSlot slot,
+  }) async {
+    if (_companyId == null) return 'Aucune entreprise trouvée';
+    try {
+      final slotRef = _db
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .doc(queue.id)
+          .collection('slots')
+          .doc(slot.id);
+
+      final d = slot.start.toLocal();
+      final dateKey =
+          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+      final dailyRef = _db
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .doc(queue.id)
+          .collection('dailyStats')
+          .doc(dateKey);
+
+      await Future.wait([
+        _db
+            .collection('companies')
+            .doc(_companyId)
+            .collection('reservations')
+            .doc(reservationId)
+            .delete(),
+        slotRef.update({'reserved': FieldValue.increment(-1)}),
+        dailyRef.update({
+          'reserved': FieldValue.increment(-1),
+          'available': FieldValue.increment(1),
+        }),
+      ]);
       return null;
     } catch (e) {
       return 'Erreur: $e';
@@ -236,15 +473,26 @@ class _HouseNotifier extends ChangeNotifier {
   }
 
   // ── Vérification réservations existantes ──────────────────────────────────
-  bool hasReservationsInSlots(List<AgendaSlot> slots) => slots.any((s) => s.reserved > 0);
+  bool hasReservationsInSlots(List<AgendaSlot> slots) =>
+      slots.any((s) => s.reserved > 0);
 
   // ── Créneaux disponibles du jour (pour le carousel du FAB) ────────────────
   Future<List<AgendaSlot>> fetchAvailableSlots(String queueId) async {
     if (_companyId == null) return [];
     final now = DateTime.now();
-    final dayEnd = DateTime(
-            _selectedDate.year, _selectedDate.month, _selectedDate.day)
-        .add(const Duration(days: 1));
+    final dayStart = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+    );
+    final dayEnd = dayStart.add(const Duration(days: 1));
+    // Borne basse : "maintenant" seulement si le jour sélectionné est
+    // aujourd'hui (exclut les créneaux déjà passés) — sinon le début du
+    // jour sélectionné, pour ne jamais faire déborder la recherche sur
+    // les créneaux d'un autre jour (ex : aujourd'hui) que celui affiché.
+    final lowerBound = dayStart.isAfter(DateTime(now.year, now.month, now.day))
+        ? dayStart
+        : now;
 
     QuerySnapshot snap;
     final query = _db
@@ -253,7 +501,7 @@ class _HouseNotifier extends ChangeNotifier {
         .collection('queues')
         .doc(queueId)
         .collection('slots')
-        .where('start', isGreaterThan: Timestamp.fromDate(now))
+        .where('start', isGreaterThan: Timestamp.fromDate(lowerBound))
         .where('start', isLessThan: Timestamp.fromDate(dayEnd))
         .orderBy('start');
     try {
@@ -293,11 +541,10 @@ class _HouseNotifier extends ChangeNotifier {
         workingDays: d['workingDays'] != null
             ? List<int>.from(d['workingDays'] as List)
             : <int>[],
-        maxAdvanceDays: (d['maxAdvanceDays'] as num?)?.toInt() ?? 5,
-        maxReservationsPerPerson:
-            (d['maxReservationsPerPerson'] as num?)?.toInt() ?? 1,
+        maxAdvanceDays: (d['maxAdvanceDays'] as num?)?.toInt() ?? 2,
         reservationDeadlineMinutes:
-            (d['reservationDeadlineMinutes'] as num?)?.toInt() ?? 10,
+            (d['reservationDeadlineMinutes'] as num?)?.toInt() ?? 5,
+        deleteAfter: (d['deleteAfter'] as Timestamp?)?.toDate(),
       );
     }).toList();
   }
@@ -310,7 +557,31 @@ class _HouseNotifier extends ChangeNotifier {
     required DateTime plageEnd,
     required int newDuration,
     required ModificationType type,
+    bool isRevertAction = false,
+    DateTime? anchorNow,
   }) async {
+    if (_busyTimeSlotIds.contains(tsInfo.id)) {
+      return const ModificationResult(
+        success: false,
+        message:
+            'Une modification est déjà en cours sur cette plage — patiente qu\'elle se termine.',
+      );
+    }
+    // Plage en cours de suppression programmée : verrouillée. (Le revert
+    // d'une modif faite AVANT la programmation passe par revertDurationChange,
+    // qui refait sa propre vérification sur une donnée fraîche.)
+    if (!isRevertAction && tsInfo.deleteAfter != null) {
+      return const ModificationResult(
+        success: false,
+        message:
+            'Cette plage est en cours de suppression — restituez-la d\'abord pour la modifier.',
+      );
+    }
+    _busyTimeSlotIds.add(tsInfo.id);
+    // Ancre horaire : figée à l'édition d'origine pour un revert (résultat
+    // stable peu importe quand dans les 5 min le bouton est pressé), sinon
+    // l'instant présent pour une édition normale.
+    final effectiveNow = anchorNow ?? DateTime.now();
     try {
       // ── Mode PERMANENTE : delete-empty + regenerate + update-params ──────
       if (type == ModificationType.permanente) {
@@ -322,12 +593,13 @@ class _HouseNotifier extends ChangeNotifier {
             .collection('timeSlots')
             .doc(tsInfo.id)
             .update({
-          'serviceDurationMinutes': newDuration,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+              'serviceDurationMinutes': newDuration,
+              'updatedAt': FieldValue.serverTimestamp(),
+            });
 
         await _agenda.deleteEmptyFutureSlotsForTimeSlot(
-          tsInfo.id, queue.id,
+          tsInfo.id,
+          queue.id,
           companyId: _companyId,
         );
         final effectiveWorkingDays = tsInfo.workingDays.isNotEmpty
@@ -341,23 +613,38 @@ class _HouseNotifier extends ChangeNotifier {
           startTimeStr: tsInfo.startTime,
           endTimeStr: tsInfo.endTime,
           duration: newDuration,
-          capacity: tsInfo.capacity > 0 ? tsInfo.capacity : currentCapacity(queue),
+          capacity: tsInfo.capacity > 0
+              ? tsInfo.capacity
+              : currentCapacity(queue),
           workingDays: effectiveWorkingDays,
           maxAdvanceDays: tsInfo.maxAdvanceDays,
-          maxReservationsPerPerson: tsInfo.maxReservationsPerPerson,
           reservationDeadlineMinutes: tsInfo.reservationDeadlineMinutes,
           companyId: _companyId,
+          anchorNow: effectiveNow,
         );
         await _agenda.updateSlotParameters(
           timeSlotId: tsInfo.id,
           queueId: queue.id,
-          capacity: tsInfo.capacity > 0 ? tsInfo.capacity : currentCapacity(queue),
+          capacity: tsInfo.capacity > 0
+              ? tsInfo.capacity
+              : currentCapacity(queue),
           duration: newDuration,
-          maxReservationsPerPerson: tsInfo.maxReservationsPerPerson,
           reservationDeadlineMinutes: tsInfo.reservationDeadlineMinutes,
           maxAdvanceDays: tsInfo.maxAdvanceDays,
           companyId: _companyId,
         );
+        if (!isRevertAction) {
+          _registerPendingRevert(
+            timeSlotId: tsInfo.id,
+            queueId: queue.id,
+            tsInfo: tsInfo,
+            plageStart: plageStart,
+            plageEnd: plageEnd,
+            previousDuration: tsInfo.duration,
+            type: type,
+            anchorNow: effectiveNow,
+          );
+        }
         return ModificationResult(
           success: true,
           message:
@@ -368,7 +655,10 @@ class _HouseNotifier extends ChangeNotifier {
 
       // ── Mode PONCTUEL : free-spans approach ─────────────────────────────
       final dayStart = DateTime(
-          _selectedDate.year, _selectedDate.month, _selectedDate.day);
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day,
+      );
       final dayEnd = dayStart.add(const Duration(days: 1));
 
       final slotsQuery = _db
@@ -386,45 +676,42 @@ class _HouseNotifier extends ChangeNotifier {
         slotsSnap = await slotsQuery.get();
       } on FirebaseException catch (e) {
         if (e.code == 'unavailable') {
-          slotsSnap =
-              await slotsQuery.get(const GetOptions(source: Source.cache));
+          slotsSnap = await slotsQuery.get(
+            const GetOptions(source: Source.cache),
+          );
         } else {
           rethrow;
         }
       }
 
       final allDocs = slotsSnap.docs
-          .where((doc) =>
-              (doc.data() as Map<String, dynamic>)['timeSlotId'] == tsInfo.id)
+          .where(
+            (doc) =>
+                (doc.data() as Map<String, dynamic>)['timeSlotId'] == tsInfo.id,
+          )
           .toList();
 
       if (allDocs.isEmpty) {
         return ModificationResult(
-            success: false, message: 'Aucun créneau trouvé pour cette plage');
+          success: false,
+          message: 'Aucun créneau trouvé pour cette plage',
+        );
       }
 
-      final allSlots = allDocs
-          .map((doc) => _agenda.slotFromDoc(doc, queueId: queue.id))
-          .toList()
-        ..sort((a, b) => a.start.compareTo(b.start));
+      final allSlots =
+          allDocs
+              .map((doc) => _agenda.slotFromDoc(doc, queueId: queue.id))
+              .toList()
+            ..sort((a, b) => a.start.compareTo(b.start));
 
-      final reservedSlots =
-          allSlots.where((s) => s.reserved > 0).toList();
-      final emptySlotIds =
-          allSlots.where((s) => s.reserved == 0).map((s) => s.id).toList();
+      final emptySlotIds = allSlots
+          .where((s) => s.reserved == 0)
+          .map((s) => s.id)
+          .toList();
 
-      // Espaces libres = [plageStart, plageEnd] minus reserved intervals
-      final List<({DateTime start, DateTime end})> freeSpans = [];
-      DateTime cursor = plageStart;
-      for (final rs in reservedSlots) {
-        if (cursor.isBefore(rs.start)) {
-          freeSpans.add((start: cursor, end: rs.start));
-        }
-        if (rs.end.isAfter(cursor)) cursor = rs.end;
-      }
-      if (cursor.isBefore(plageEnd)) {
-        freeSpans.add((start: cursor, end: plageEnd));
-      }
+      // Espaces libres = [plageStart, plageEnd] minus les créneaux réservés
+      // (même calcul que le mode permanent — une seule logique partagée).
+      final freeSpans = _agenda.freeSpans(allSlots, plageStart, plageEnd);
 
       final batch = _db.batch();
       final slotsRef = _db
@@ -442,11 +729,12 @@ class _HouseNotifier extends ChangeNotifier {
       // Remplir chaque espace libre avec la nouvelle durée
       // On ne crée jamais de créneaux dans le passé (cas création de plage le jour J)
       int createdCount = 0;
-      final now = DateTime.now();
-      final slotCapacity =
-          tsInfo.capacity > 0 ? tsInfo.capacity : currentCapacity(queue);
+      final roundedNow = _agenda.roundUpToNext5Minutes(effectiveNow);
+      final slotCapacity = tsInfo.capacity > 0
+          ? tsInfo.capacity
+          : currentCapacity(queue);
       for (final span in freeSpans) {
-        var t = span.start.isBefore(now) ? now : span.start;
+        var t = span.start.isBefore(effectiveNow) ? roundedNow : span.start;
         while (true) {
           final newEnd = t.add(Duration(minutes: newDuration));
           if (!newEnd.isAfter(span.end) &&
@@ -473,10 +761,15 @@ class _HouseNotifier extends ChangeNotifier {
       }
 
       // Recalculer dailyStats pour que "disponible" soit correct après refresh
-      final int totalReservedPeople =
-          reservedSlots.fold(0, (acc, s) => acc + s.reserved);
-      final int reservedCapacityRemaining =
-          reservedSlots.fold(0, (acc, s) => acc + (s.capacity - s.reserved));
+      final reservedSlots = allSlots.where((s) => s.reserved > 0).toList();
+      final int totalReservedPeople = reservedSlots.fold(
+        0,
+        (acc, s) => acc + s.reserved,
+      );
+      final int reservedCapacityRemaining = reservedSlots.fold(
+        0,
+        (acc, s) => acc + (s.capacity - s.reserved),
+      );
       final dateStr =
           '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
       batch.set(
@@ -497,6 +790,18 @@ class _HouseNotifier extends ChangeNotifier {
       );
 
       await batch.commit();
+      if (!isRevertAction) {
+        _registerPendingRevert(
+          timeSlotId: tsInfo.id,
+          queueId: queue.id,
+          tsInfo: tsInfo,
+          plageStart: plageStart,
+          plageEnd: plageEnd,
+          previousDuration: tsInfo.duration,
+          type: type,
+          anchorNow: effectiveNow,
+        );
+      }
       return ModificationResult(
         success: true,
         message: '$createdCount créneau(x) créés ✅',
@@ -504,18 +809,238 @@ class _HouseNotifier extends ChangeNotifier {
       );
     } catch (e) {
       return ModificationResult(success: false, message: 'Erreur : $e');
+    } finally {
+      _busyTimeSlotIds.remove(tsInfo.id);
     }
+  }
+
+  // ── Enregistre/écrase la trace de révocation pour un timeSlot ────────────
+  void _registerPendingRevert({
+    required String timeSlotId,
+    required String queueId,
+    required _TimeSlotInfo tsInfo,
+    required DateTime plageStart,
+    required DateTime plageEnd,
+    required int previousDuration,
+    required ModificationType type,
+    required DateTime anchorNow,
+  }) {
+    _pendingReverts.remove(timeSlotId)?.expiryTimer?.cancel();
+    final entry = _PendingRevert(
+      queueId: queueId,
+      tsInfo: tsInfo,
+      plageStart: plageStart,
+      plageEnd: plageEnd,
+      previousDuration: previousDuration,
+      type: type,
+      originalSelectedDate: DateTime(
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day,
+      ),
+      anchorNow: anchorNow,
+      expiresAt: DateTime.now().add(const Duration(minutes: 5)),
+    );
+    entry.expiryTimer = Timer(const Duration(minutes: 5), () {
+      _pendingReverts.remove(timeSlotId);
+      _notify();
+    });
+    _pendingReverts[timeSlotId] = entry;
+  }
+
+  // ── Révocation (undo) d'une modification de durée en direct ──────────────
+  Future<ModificationResult> revertDurationChange(String timeSlotId) async {
+    final entry = _pendingReverts[timeSlotId];
+    if (entry == null) {
+      return const ModificationResult(
+        success: false,
+        message: 'Rien à annuler : le délai de 5 minutes est dépassé.',
+      );
+    }
+
+    // La modif a pu être suivie d'une suppression programmée de la plage :
+    // dans ce cas le revert (qui régénère des créneaux) est refusé. On lit
+    // la donnée fraîche car `entry.tsInfo` date de la modif d'origine.
+    if (_companyId != null) {
+      try {
+        final tsDoc = await _db
+            .collection('companies')
+            .doc(_companyId)
+            .collection('queues')
+            .doc(entry.queueId)
+            .collection('timeSlots')
+            .doc(timeSlotId)
+            .get();
+        if (tsDoc.exists && tsDoc.data()?['deleteAfter'] != null) {
+          _pendingReverts.remove(timeSlotId)?.expiryTimer?.cancel();
+          _notify();
+          return const ModificationResult(
+            success: false,
+            message:
+                'Cette plage est en cours de suppression — restituez-la d\'abord pour la modifier.',
+          );
+        }
+      } catch (_) {
+        // Lecture best-effort : en cas d'échec réseau on laisse le revert
+        // suivre son cours (comportement d'avant).
+      }
+    }
+
+    // Une révocation "ponctuelle" dépend du jour actuellement affiché (la
+    // branche ponctuelle de applyDurationChange lit _selectedDate en
+    // interne, pas un paramètre) — refuser si le jour affiché a changé
+    // depuis la modification d'origine, pour éviter un décalage entre la
+    // plage stockée et le jour réellement interrogé.
+    if (entry.type == ModificationType.ponctuelle) {
+      final today = DateTime(
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day,
+      );
+      if (today != entry.originalSelectedDate) {
+        final label = DateFormat(
+          'dd/MM/yyyy',
+          'fr_FR',
+        ).format(entry.originalSelectedDate);
+        return ModificationResult(
+          success: false,
+          message:
+              'Retournez au $label pour annuler cette modification ponctuelle.',
+        );
+      }
+    }
+
+    final queue = _queues.firstWhere(
+      (q) => q?.id == entry.queueId,
+      orElse: () => null,
+    );
+    if (queue == null) {
+      return const ModificationResult(
+        success: false,
+        message: 'File introuvable.',
+      );
+    }
+
+    final result = await applyDurationChange(
+      queue: queue,
+      tsInfo: entry.tsInfo,
+      plageStart: entry.plageStart,
+      plageEnd: entry.plageEnd,
+      newDuration: entry.previousDuration,
+      type: entry.type,
+      isRevertAction: true,
+      anchorNow: entry.anchorNow,
+    );
+
+    // Trace consommée seulement en cas de succès — usage unique, pas de
+    // redo, mais réessayable tant que l'opération elle-même n'a pas abouti
+    // (ex: coupure réseau pendant l'écriture Firestore).
+    if (result.success) {
+      _pendingReverts.remove(timeSlotId);
+      entry.expiryTimer?.cancel();
+      _notify();
+    }
+
+    return result;
+  }
+
+  // ── Indice ponctuel "découverte du bouton retour" ─────────────────────────
+  // Indépendant de OnboardingService (séquence numérotée de 1ère config) :
+  // cet indice peut se déclencher bien plus tard, à la 1ère modification de
+  // durée en direct réussie. Persisté sur le doc de l'entreprise, comme
+  // firstSetupDone.
+  Future<bool> hasSeenRevertHint() async {
+    if (_companyId == null) return true;
+    try {
+      final doc = await _db.collection('companies').doc(_companyId).get();
+      return doc.data()?['revertHintSeen'] as bool? ?? false;
+    } catch (_) {
+      return true; // en cas d'erreur, ne pas importuner l'utilisateur
+    }
+  }
+
+  Future<void> markRevertHintSeen() async {
+    if (_companyId == null) return;
+    try {
+      await _db.collection('companies').doc(_companyId).update({
+        'revertHintSeen': true,
+      });
+    } catch (_) {}
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   int currentDuration(_QueueAgenda q) {
     final nl = q.slots.where((s) => !s.isLegacy).toList();
-    return nl.isNotEmpty ? nl.first.duration : (q.slots.isNotEmpty ? q.slots.first.duration : 15);
+    return nl.isNotEmpty
+        ? nl.first.duration
+        : (q.slots.isNotEmpty ? q.slots.first.duration : 15);
   }
 
   int currentCapacity(_QueueAgenda q) {
     final nl = q.slots.where((s) => !s.isLegacy).toList();
-    return nl.isNotEmpty ? nl.first.capacity : (q.slots.isNotEmpty ? q.slots.first.capacity : 1);
+    return nl.isNotEmpty
+        ? nl.first.capacity
+        : (q.slots.isNotEmpty ? q.slots.first.capacity : 1);
+  }
+
+  /// Trace de révocation active pour ce timeSlot (null si aucune ou expirée).
+  _PendingRevert? pendingRevert(String timeSlotId) =>
+      _pendingReverts[timeSlotId];
+
+  /// Trace de révocation la plus récente parmi toutes les plages de cette
+  /// file — peu importe laquelle a été modifiée (1ère, 2ème, 3ème...), un
+  /// seul chip est affiché par file, toujours celui de la dernière action.
+  /// Les traces des autres plages restent valides en mémoire et expirent
+  /// normalement, simplement non affichées tant qu'une plus récente existe.
+  _PendingRevert? mostRecentPendingRevert(_QueueAgenda q) {
+    final timeSlotIds = q.slots.map((s) => s.timeSlotId).toSet();
+    _PendingRevert? latest;
+    for (final id in timeSlotIds) {
+      final entry = _pendingReverts[id];
+      if (entry == null) continue;
+      if (latest == null || entry.expiresAt.isAfter(latest.expiresAt)) {
+        latest = entry;
+      }
+    }
+    return latest;
+  }
+
+  // ── Suivi du statut staff (retrait d'équipe) ──────────────────────────────
+  Future<void> _checkStaffStatus(String uid) async {
+    _staffStatusSub?.cancel();
+    final completer = Completer<void>();
+
+    _staffStatusSub = _db
+        .collection('companies')
+        .doc(_companyId)
+        .collection('staff')
+        .doc(uid)
+        .snapshots()
+        .listen(
+          (doc) {
+            final isActive = doc.data()?['isActive'] as bool? ?? false;
+            if (!isActive) {
+              _handleRevocation();
+            }
+            if (!completer.isCompleted) completer.complete();
+          },
+          onError: (Object e) {
+            debugPrint('🔴 HouseNotifier: erreur suivi statut staff: $e');
+            if (!completer.isCompleted) completer.complete();
+          },
+        );
+
+    await completer.future;
+  }
+
+  Future<void> _handleRevocation() async {
+    if (_revoked) return;
+    _revoked = true;
+    _staffStatusSub?.cancel();
+    _sub?.cancel();
+    _cancelLiveSlotSubs();
+    await FirebaseAuth.instance.signOut();
+    _notify();
   }
 
   // ── Chargement initial ────────────────────────────────────────────────────
@@ -530,55 +1055,83 @@ class _HouseNotifier extends ChangeNotifier {
     final uid = user.uid;
     debugPrint('🟢 HouseNotifier: init pour uid=$uid');
 
-    try {
-      final userDoc = await _db.collection('users').doc(uid).get();
-      if (userDoc.exists) {
-        final data = userDoc.data()!;
-        if (data['role'] == 'staff' && data['companyId'] != null) {
-          _companyId = data['companyId'] as String;
-          _isStaff = true;
+    // ── Gain 2 : companyId depuis le cache local (évite 1 round-trip) ────────
+    final prefs = await SharedPreferences.getInstance();
+    final cachedId = prefs.getString(_kCompanyId);
+    final cachedStaff = prefs.getBool(_kIsStaff) ?? false;
+
+    if (cachedId != null && !cachedStaff && cachedId == uid) {
+      // Cache valide uniquement si l'UID correspond à l'utilisateur courant
+      _companyId = cachedId;
+      _isStaff = false;
+    } else {
+      // Staff ou première ouverture : vérification Firestore obligatoire
+      try {
+        final userDoc = await _db.collection('users').doc(uid).get();
+        if (userDoc.exists) {
+          final data = userDoc.data()!;
+          if (data['role'] == 'staff' && data['companyId'] != null) {
+            _companyId = data['companyId'] as String;
+            _isStaff = true;
+          } else {
+            _companyId = uid;
+            _isStaff = false;
+          }
         } else {
           _companyId = uid;
           _isStaff = false;
         }
-      } else {
+      } catch (_) {
         _companyId = uid;
         _isStaff = false;
       }
-    } catch (_) {
-      _companyId = uid;
-      _isStaff = false;
+      // Persister uniquement pour les admins (staff change d'entreprise possible)
+      if (!_isStaff) {
+        prefs.setString(_kCompanyId, _companyId!).ignore();
+        prefs.setBool(_kIsStaff, false).ignore();
+      }
     }
+
+    // ── Staff : vérifier tout de suite (et en continu) qu'il n'a pas été
+    //    retiré de l'équipe. Le premier événement du flux couvre le cas
+    //    "déjà retiré avant l'ouverture de l'app", les suivants couvrent
+    //    le cas "retiré pendant que l'app est ouverte".
+    if (_isStaff) {
+      await _checkStaffStatus(uid);
+      if (_revoked) return;
+    }
+
     _isLoading = true;
     _notify();
 
     try {
-      final results = await Future.wait([
-        _db.collection('companies').doc(_companyId).get(),
-        _db
-            .collection('companies')
-            .doc(_companyId)
-            .collection('queues')
-            .limit(1)
-            .get(),
-      ]);
+      // ── Nom entreprise en arrière-plan (ne bloque pas le chargement) ─────────
+      _db.collection('companies').doc(_companyId).get().then((doc) {
+        if (doc.exists) {
+          _companyName = doc.data()?['nom'] as String? ?? 'Baxa';
+          _notify();
+        }
+      }).ignore();
 
-      final companyDoc = results[0] as DocumentSnapshot;
-      final queuesCheck = results[1] as QuerySnapshot;
+      // ── Files : seule requête sur le chemin critique ──────────────────────────
+      final queuesSnap = await _db
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .limit(5)
+          .get();
 
-      if (companyDoc.exists) {
-        _companyName = (companyDoc.data() as Map<String, dynamic>?)?['nom'] ?? 'Baxa';
-      }
-
-      if (queuesCheck.docs.isEmpty) {
+      if (queuesSnap.docs.isEmpty) {
         debugPrint('🟡 HouseNotifier: aucune file → état vide');
         _hasQueues = false;
         _isLoading = false;
         _notify();
       } else {
-        debugPrint('🟢 HouseNotifier: ${queuesCheck.docs.length} file(s) trouvée(s)');
+        debugPrint(
+          '🟢 HouseNotifier: ${queuesSnap.docs.length} file(s) trouvée(s)',
+        );
         _hasQueues = true;
-        await _refreshAgenda();
+        await _refreshAgenda(preloadedQueues: queuesSnap); // ← plus de re-fetch
       }
 
       _sub?.cancel();
@@ -609,12 +1162,14 @@ class _HouseNotifier extends ChangeNotifier {
   }
 
   // ── Rafraîchissement agenda ───────────────────────────────────────────────
-  Future<void> _refreshAgenda({bool silent = false}) async {
+  Future<void> _refreshAgenda({
+    bool silent = false,
+    bool skipInitialSpinner = false,
+    QuerySnapshot<Map<String, dynamic>>? preloadedQueues,
+  }) async {
     if (_companyId == null) return;
     if (_isRefreshing) {
-      // Un refresh concurrent tourne déjà. En mode non-silencieux,
-      // s'assurer que _isLoading ne reste pas bloqué à true.
-      if (!silent) {
+      if (!silent && !skipInitialSpinner) {
         _isLoading = false;
         _notify();
       }
@@ -625,19 +1180,23 @@ class _HouseNotifier extends ChangeNotifier {
     _lastSlotDoc.clear();
     _hasMoreSlots.clear();
     _isLoadingMore.clear();
+    _cancelLiveSlotSubs();
 
-    if (!silent) {
+    if (!silent && !skipInitialSpinner) {
       _isLoading = true;
       _notify();
     }
 
     try {
-      final queuesSnap = await _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .limit(10)
-          .get();
+      // Gain 1 : réutiliser le snapshot déjà chargé dans _loadCompanyData
+      final queuesSnap =
+          preloadedQueues ??
+          await _db
+              .collection('companies')
+              .doc(_companyId)
+              .collection('queues')
+              .limit(5)
+              .get();
 
       if (queuesSnap.docs.isEmpty) {
         debugPrint('🟡 HouseNotifier: _refreshAgenda — queues vides');
@@ -647,7 +1206,9 @@ class _HouseNotifier extends ChangeNotifier {
         return;
       }
 
-      debugPrint('🟢 HouseNotifier: _refreshAgenda — ${queuesSnap.docs.length} file(s), silent=$silent');
+      debugPrint(
+        '🟢 HouseNotifier: _refreshAgenda — ${queuesSnap.docs.length} file(s), silent=$silent',
+      );
       if (!silent) {
         _totalQueues = queuesSnap.docs.length;
         _queues = List.filled(_totalQueues, null);
@@ -655,113 +1216,187 @@ class _HouseNotifier extends ChangeNotifier {
         _notify();
       }
 
-      final newQueues = List<_QueueAgenda?>.filled(queuesSnap.docs.length, null);
+      final newQueues = List<_QueueAgenda?>.filled(
+        queuesSnap.docs.length,
+        null,
+      );
 
-      await Future.wait(queuesSnap.docs.asMap().entries.map((entry) async {
-        final index = entry.key;
-        final qDoc = entry.value;
-        final qData = qDoc.data();
+      await Future.wait(
+        queuesSnap.docs.asMap().entries.map((entry) async {
+          final index = entry.key;
+          final qDoc = entry.value;
+          final qData = qDoc.data();
 
-        try {
-          final firstPage = await _loadSlotPage(qDoc.id, startAfter: null);
-          _lastSlotDoc[qDoc.id] = firstPage.lastDoc;
-          _hasMoreSlots[qDoc.id] = firstPage.hasMore;
-          _isLoadingMore[qDoc.id] = false;
-
-          final isBlocked = firstPage.slots.isNotEmpty &&
-              firstPage.slots.every((s) => s.isBlocked);
-          final blockReason = isBlocked
-              ? firstPage.slots.first.blockReason
-              : null;
-
-          final rawWeekdays = qData['weekdays'];
-          final weekdays = rawWeekdays is List
-              ? rawWeekdays.map((e) => (e as num).toInt()).toList()
-              : <int>[];
-
-          final tsQuery = _db
-              .collection('companies')
-              .doc(_companyId)
-              .collection('queues')
-              .doc(qDoc.id)
-              .collection('timeSlots')
-              .limit(2);
-          QuerySnapshot tsSnap;
           try {
-            tsSnap = await tsQuery.get();
-          } on FirebaseException catch (e) {
-            if (e.code == 'unavailable') {
-              tsSnap = await tsQuery.get(const GetOptions(source: Source.cache));
+            final now = DateTime.now();
+            final today = DateTime(now.year, now.month, now.day);
+            final selectedDay = DateTime(
+              _selectedDate.year,
+              _selectedDate.month,
+              _selectedDate.day,
+            );
+            final isToday = selectedDay == today;
+            final isPastDate = selectedDay.isBefore(today);
+
+            final dateStr =
+                '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
+
+            final rawWeekdays = qData['weekdays'];
+            final weekdays = rawWeekdays is List
+                ? rawWeekdays.map((e) => (e as num).toInt()).toList()
+                : <int>[];
+            final queueName = qData['name'] ?? 'File sans nom';
+
+            // TimeSlot count — requête bornée à 2 docs (peu coûteuse), refaite
+            // à chaque rafraîchissement. Un cache mémoire ici serait faux dès
+            // qu'une plage est créée/supprimée depuis l'onglet Settings, gardé
+            // vivant en parallèle via l'IndexedStack de company_page.dart.
+            final tsQuery = _db
+                .collection('companies')
+                .doc(_companyId)
+                .collection('queues')
+                .doc(qDoc.id)
+                .collection('timeSlots')
+                .limit(2);
+            final Future<int> tsCountFuture = () async {
+              try {
+                final snap = await tsQuery.get();
+                return snap.docs.length;
+              } on FirebaseException catch (e) {
+                if (e.code == 'unavailable') {
+                  final snap = await tsQuery.get(
+                    const GetOptions(source: Source.cache),
+                  );
+                  return snap.docs.length;
+                }
+                rethrow;
+              }
+            }();
+
+            final List<AgendaSlot> allSlots;
+            final QueueStats stats;
+            final bool isBlocked;
+            final String? blockReason;
+
+            if (isPastDate) {
+              // ── Date déjà passée : ne change plus → pagination + dailyStats,
+              //    comportement inchangé (pas besoin de flux temps réel ici) ──
+              final pageFuture = _loadSlotPage(qDoc.id, startAfter: null);
+
+              final statsRef = _db
+                  .collection('companies')
+                  .doc(_companyId)
+                  .collection('queues')
+                  .doc(qDoc.id)
+                  .collection('dailyStats')
+                  .doc(dateStr);
+              final statsFuture = () async {
+                try {
+                  return await statsRef.get();
+                } on FirebaseException catch (e) {
+                  if (e.code == 'unavailable') {
+                    return statsRef.get(const GetOptions(source: Source.cache));
+                  }
+                  rethrow;
+                }
+              }();
+
+              final page = await pageFuture;
+              final statsDoc = await statsFuture;
+
+              _lastSlotDoc[qDoc.id] = page.lastDoc;
+              _hasMoreSlots[qDoc.id] = page.hasMore;
+              _isLoadingMore[qDoc.id] = false;
+              allSlots = page.slots;
+
+              isBlocked =
+                  allSlots.isNotEmpty && allSlots.every((s) => s.isBlocked);
+              blockReason = isBlocked ? allSlots.first.blockReason : null;
+
+              if (statsDoc.exists) {
+                final sd = statsDoc.data() as Map<String, dynamic>;
+                stats = QueueStats(
+                  placesRestantes: (sd['available'] as int? ?? 0).clamp(
+                    0,
+                    99999,
+                  ),
+                  placesReservees: sd['reserved'] as int? ?? 0,
+                  // Jour déjà passé : tous les créneaux sont derrière nous,
+                  // plus personne n'est "en attente" de son passage.
+                  personnesEnAttente: 0,
+                  totalCreneaux: sd['totalSlots'] as int? ?? 0,
+                  estBloquee: isBlocked,
+                );
+              } else {
+                stats = _agenda.computeStats(allSlots, now: now);
+              }
             } else {
-              rethrow;
+              // ── Aujourd'hui ou date future : portion à venir tenue à jour
+              //    en direct par un flux Firestore (plus de pagination ici,
+              //    donc plus de reset de scroll possible) ──────────────────
+              final pastFuture = isToday
+                  ? _loadSlotPage(
+                      qDoc.id,
+                      startAfter: null,
+                      endBefore: now,
+                      limit: 200,
+                    )
+                  : null;
+              final liveFuture = _subscribeLiveSlots(
+                qDoc.id,
+                selectedDay: selectedDay,
+                startFrom: isToday ? now : selectedDay,
+              );
+
+              _pastSlotsCache[qDoc.id] = pastFuture != null
+                  ? (await pastFuture).slots
+                  : const [];
+              await liveFuture;
+              _isLoadingMore[qDoc.id] = false;
+
+              allSlots = [
+                ...?_pastSlotsCache[qDoc.id],
+                ...?_liveSlotsCache[qDoc.id],
+              ];
+              isBlocked =
+                  allSlots.isNotEmpty && allSlots.every((s) => s.isBlocked);
+              blockReason = isBlocked ? allSlots.first.blockReason : null;
+              stats = _agenda.computeStats(allSlots, now: now);
+            }
+
+            final timeSlotCount = await tsCountFuture;
+
+            final queueData = _QueueAgenda(
+              id: qDoc.id,
+              name: queueName,
+              slots: allSlots,
+              isBlocked: isBlocked,
+              blockReason: blockReason,
+              stats: stats,
+              weekdays: weekdays,
+              timeSlotCount: timeSlotCount,
+            );
+
+            if (silent) {
+              newQueues[index] = queueData;
+            } else {
+              _queues[index] = queueData;
+              _notify();
+            }
+          } catch (e) {
+            debugPrint('🔴 HouseNotifier: erreur file ${qDoc.id}: $e');
+            // En refresh silencieux : conserver les données existantes si la
+            // requête serveur échoue (cache local valide, index manquant, etc.)
+            if (silent) {
+              final existing = _queues.firstWhere(
+                (q) => q?.id == qDoc.id,
+                orElse: () => null,
+              );
+              if (existing != null) newQueues[index] = existing;
             }
           }
-          final timeSlotCount = tsSnap.docs.length;
-
-          final dateStr =
-              '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
-          final statsRef = _db
-              .collection('companies')
-              .doc(_companyId)
-              .collection('queues')
-              .doc(qDoc.id)
-              .collection('dailyStats')
-              .doc(dateStr);
-          DocumentSnapshot<Map<String, dynamic>> statsDoc;
-          try {
-            statsDoc = await statsRef.get();
-          } on FirebaseException catch (e) {
-            if (e.code == 'unavailable') {
-              statsDoc = await statsRef.get(const GetOptions(source: Source.cache));
-            } else {
-              rethrow;
-            }
-          }
-
-          final QueueStats stats;
-          if (statsDoc.exists) {
-            final sd = statsDoc.data()!;
-            stats = QueueStats(
-              placesRestantes: (sd['available'] as int? ?? 0).clamp(0, 99999),
-              placesReservees: sd['reserved'] as int? ?? 0,
-              personnesEnAttente: sd['cancelled'] as int? ?? 0,
-              totalCreneaux: sd['totalSlots'] as int? ?? 0,
-              estBloquee: isBlocked,
-            );
-          } else {
-            stats = _agenda.computeStats(firstPage.slots);
-          }
-
-          final queueData = _QueueAgenda(
-            id: qDoc.id,
-            name: qData['name'] ?? 'File sans nom',
-            slots: firstPage.slots,
-            isBlocked: isBlocked,
-            blockReason: blockReason,
-            stats: stats,
-            weekdays: weekdays,
-            timeSlotCount: timeSlotCount,
-          );
-
-          if (silent) {
-            newQueues[index] = queueData;
-          } else {
-            _queues[index] = queueData;
-            _notify();
-          }
-        } catch (e) {
-          debugPrint('🔴 HouseNotifier: erreur file ${qDoc.id}: $e');
-          // En refresh silencieux : conserver les données existantes si la
-          // requête serveur échoue (cache local valide, index manquant, etc.)
-          if (silent) {
-            final existing = _queues.firstWhere(
-              (q) => q?.id == qDoc.id,
-              orElse: () => null,
-            );
-            if (existing != null) newQueues[index] = existing;
-          }
-        }
-      }));
+        }),
+      );
 
       if (silent) {
         _totalQueues = newQueues.length;
@@ -786,9 +1421,17 @@ class _HouseNotifier extends ChangeNotifier {
   Future<_SlotPage> _loadSlotPage(
     String queueId, {
     required DocumentSnapshot? startAfter,
+    DateTime? startFrom,
+    DateTime? endBefore,
+    int? limit,
   }) async {
-    final dayStart = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
+    final dayStart = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+    );
     final dayEnd = dayStart.add(const Duration(days: 1));
+    final effectiveLimit = limit ?? _pageSize;
 
     Query query = _db
         .collection('companies')
@@ -796,10 +1439,13 @@ class _HouseNotifier extends ChangeNotifier {
         .collection('queues')
         .doc(queueId)
         .collection('slots')
-        .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(dayStart))
-        .where('start', isLessThan: Timestamp.fromDate(dayEnd))
+        .where(
+          'start',
+          isGreaterThanOrEqualTo: Timestamp.fromDate(startFrom ?? dayStart),
+        )
+        .where('start', isLessThan: Timestamp.fromDate(endBefore ?? dayEnd))
         .orderBy('start')
-        .limit(_pageSize);
+        .limit(effectiveLimit);
 
     if (startAfter != null) query = query.startAfterDocument(startAfter);
 
@@ -815,12 +1461,101 @@ class _HouseNotifier extends ChangeNotifier {
       }
     }
 
-    final slots = snap.docs.map((doc) => _agenda.slotFromDoc(doc, queueId: queueId)).toList();
+    final slots = snap.docs
+        .map((doc) => _agenda.slotFromDoc(doc, queueId: queueId))
+        .toList();
     return _SlotPage(
       slots: slots,
       lastDoc: snap.docs.isNotEmpty ? snap.docs.last : null,
-      hasMore: snap.docs.length >= _pageSize,
+      hasMore: snap.docs.length >= effectiveLimit,
     );
+  }
+
+  // ── Flux temps réel sur les créneaux à venir ──────────────────────────────
+  // S'abonne aux créneaux d'une file à partir de [startFrom] jusqu'à la fin
+  // de [selectedDay]. Résout dès le premier instantané (chargement initial),
+  // puis continue d'écouter en arrière-plan : chaque changement ultérieur
+  // (réservation, annulation, blocage, régénération de créneaux...) met à
+  // jour uniquement la file concernée, sans toucher à la pagination.
+  Future<void> _subscribeLiveSlots(
+    String queueId, {
+    required DateTime selectedDay,
+    required DateTime startFrom,
+  }) async {
+    _liveSlotSubs.remove(queueId)?.cancel();
+
+    final dayEnd = selectedDay.add(const Duration(days: 1));
+    final query = _db
+        .collection('companies')
+        .doc(_companyId)
+        .collection('queues')
+        .doc(queueId)
+        .collection('slots')
+        .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(startFrom))
+        .where('start', isLessThan: Timestamp.fromDate(dayEnd))
+        .orderBy('start')
+        .limit(_liveSlotsCap);
+
+    final completer = Completer<void>();
+    _liveSlotSubs[queueId] = query.snapshots().listen(
+      (snap) {
+        _liveSlotsCache[queueId] = snap.docs
+            .map((d) => _agenda.slotFromDoc(d, queueId: queueId))
+            .toList();
+        if (!completer.isCompleted) {
+          completer.complete();
+        } else {
+          _rebuildQueueFromCache(queueId);
+        }
+      },
+      onError: (Object e) {
+        debugPrint('🔴 HouseNotifier: erreur flux créneaux $queueId: $e');
+        if (!completer.isCompleted) completer.completeError(e);
+      },
+    );
+
+    await completer.future;
+  }
+
+  // Reconstruit une seule file à partir des caches (passé + direct) et
+  // notifie l'UI. Utilisé uniquement pour les mises à jour reçues *après*
+  // le chargement initial d'une file (déjà présente dans _queues).
+  void _rebuildQueueFromCache(String queueId) {
+    // Un rechargement complet est en cours : il repartira lui-même des
+    // caches à jour en fin de course, inutile (et risqué) de patcher ici.
+    if (_isRefreshing) return;
+
+    final idx = _queues.indexWhere((q) => q?.id == queueId);
+    if (idx == -1) return;
+    final old = _queues[idx]!;
+
+    final allSlots = [
+      ...?_pastSlotsCache[queueId],
+      ...?_liveSlotsCache[queueId],
+    ];
+    final isBlocked = allSlots.isNotEmpty && allSlots.every((s) => s.isBlocked);
+    final blockReason = isBlocked ? allSlots.first.blockReason : null;
+
+    _queues[idx] = _QueueAgenda(
+      id: old.id,
+      name: old.name,
+      slots: allSlots,
+      isBlocked: isBlocked,
+      blockReason: blockReason,
+      stats: _agenda.computeStats(allSlots, now: DateTime.now()),
+      weekdays: old.weekdays,
+      timeSlotCount: old.timeSlotCount,
+    );
+    _notify();
+  }
+
+  void _cancelLiveSlotSubs() {
+    for (final sub in _liveSlotSubs.values) {
+      sub.cancel();
+    }
+    _liveSlotSubs.clear();
+    _pastSlotsCache.clear();
+    _liveSlotsCache.clear();
   }
 
   // ── Utilitaire interne ────────────────────────────────────────────────────
@@ -832,6 +1567,14 @@ class _HouseNotifier extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _sub?.cancel();
+    _staffStatusSub?.cancel();
+    for (final sub in _liveSlotSubs.values) {
+      sub.cancel();
+    }
+    for (final r in _pendingReverts.values) {
+      r.expiryTimer?.cancel();
+    }
+    _pendingReverts.clear();
     super.dispose();
   }
 }

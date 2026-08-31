@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Icône de notification (barre de statut) — pas le logo de l'app.
+  Android force cette icône en silhouette blanche monochrome dès Android 5,
+  quelle que soit la couleur fournie ici : la forme doit donc rester lisible
+  réduite à un simple aplat, sans détail fin (même logique que le "M" de
+  Gmail). D'où un "B" géométrique épais plutôt qu'une police fine.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="
+            M5,2 L9.5,2 A9.5,5 0 0,1 9.5,12 A9.5,5 0 0,1 9.5,22 L5,22 Z
+            M8.5,3.5 A6.5,3.5 0 0,1 8.5,10.5 Z
+            M8.5,13.5 A6.5,3.5 0 0,1 8.5,20.5 Z
+        " />
+</vector>

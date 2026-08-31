@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:baxa/page b-acceuil/company/staff_home_page.dart';
+import 'package:baxa/page b-acceuil/company/house_page.dart';
+import 'package:baxa/page b-acceuil/company/staff_settings_page.dart';
+import 'package:baxa/widgets/notifications_nav_icon.dart';
 
 // ============================================================
 // STAFF PAGE — Wrapper avec bottom nav pour le staff
-// Accueil | Notifications
+// Accueil | Notifications | Paramètres
 // ============================================================
 class StaffPage extends StatefulWidget {
   final String companyId;
@@ -24,14 +26,26 @@ class StaffPage extends StatefulWidget {
 class _StaffPageState extends State<StaffPage> {
   int _pageIndex = 0;
 
+  // Flux stable des notifications récentes destinées à ce membre du staff —
+  // alimente la pastille de non-lus (barre de nav + icône de l'app).
+  late final Query<Map<String, dynamic>> _recentNotifs = FirebaseFirestore
+      .instance
+      .collection('companies')
+      .doc(widget.companyId)
+      .collection('notificationsAdmin')
+      .where('staffId', isEqualTo: FirebaseAuth.instance.currentUser?.uid ?? '_')
+      .orderBy('createdAt', descending: true)
+      .limit(50);
+
   @override
   Widget build(BuildContext context) {
     final pages = [
-      StaffHomePage(
+      const HousePage(),
+      _StaffNotificationsPage(companyId: widget.companyId),
+      StaffSettingsPage(
         companyId: widget.companyId,
         companyName: widget.companyName,
       ),
-      _StaffNotificationsPage(companyId: widget.companyId),
     ];
 
     return Scaffold(
@@ -40,17 +54,29 @@ class _StaffPageState extends State<StaffPage> {
         height: 60,
         backgroundColor: Colors.white,
         selectedIndex: _pageIndex,
-        onDestinationSelected: (i) => setState(() => _pageIndex = i),
-        destinations: const [
-          NavigationDestination(
+        onDestinationSelected: (i) {
+          // "Lu" à l'entrée comme à la sortie de l'onglet Notifications.
+          final leavingNotifs = _pageIndex == 1 && i != 1;
+          final enteringNotifs = i == 1;
+          if (leavingNotifs || enteringNotifs) {
+            NotificationsNavIcon.markSeen();
+          }
+          setState(() => _pageIndex = i);
+        },
+        destinations: [
+          const NavigationDestination(
             icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(Icons.home),
             label: 'Accueil',
           ),
           NavigationDestination(
-            icon: Icon(Icons.notifications_outlined),
-            selectedIcon: Icon(Icons.notifications),
+            icon: NotificationsNavIcon(recentNotifications: _recentNotifs),
             label: 'Notifications',
+          ),
+          const NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: 'Paramètres',
           ),
         ],
       ),

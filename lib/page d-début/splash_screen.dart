@@ -1,8 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
+import 'package:baxa/services/notifications/notification_service.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:timezone/data/latest_all.dart' as tzdata;
+import 'package:timezone/timezone.dart' as tz;
 
-/// Splash screen Flutter — net, animé, transition fade vers ChoosePage
-/// Remplace le splash Android natif qui pixellise
+/// Écran de chargement Flutter affiché juste après le splash natif.
+/// Logo animé + "Chargement..." (points qui s'enchaînent) tant que
+/// l'initialisation (dates, notifications, timezone) n'est pas terminée,
+/// puis transition fade vers ChoosePage.
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -12,50 +20,62 @@ class SplashScreen extends StatefulWidget {
 
 class _SplashScreenState extends State<SplashScreen>
     with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
+  late final AnimationController _logoCtrl;
+  late final Animation<double> _logoOpacity;
+  late final Animation<Offset> _logoSlide;
 
-  // Animation logo : fade in + légère montée
-  late Animation<double> _logoOpacity;
-  late Animation<Offset> _logoSlide;
-
-  // Animation de sortie : fade out vers ChoosePage
-  late Animation<double> _exitOpacity;
+  Timer? _dotsTimer;
+  int _dotsCount = 0;
+  bool _exiting = false;
 
   @override
   void initState() {
     super.initState();
 
-    _ctrl = AnimationController(
+    _logoCtrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 2200),
+      duration: const Duration(milliseconds: 700),
     );
-
-    // ── Logo entre en scène (0% → 45% de la durée) ──────────────────────
-    _logoOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _ctrl,
-        curve: const Interval(0.0, 0.45, curve: Curves.easeOut),
-      ),
-    );
-
+    _logoOpacity = CurvedAnimation(parent: _logoCtrl, curve: Curves.easeOut);
     _logoSlide = Tween<Offset>(begin: const Offset(0, 0.08), end: Offset.zero)
-        .animate(
-          CurvedAnimation(
-            parent: _ctrl,
-            curve: const Interval(0.0, 0.45, curve: Curves.easeOut),
-          ),
-        );
+        .animate(CurvedAnimation(parent: _logoCtrl, curve: Curves.easeOut));
+    _logoCtrl.forward();
 
-    // ── Fade out de tout le splash (75% → 100%) ──────────────────────────
-    _exitOpacity = Tween<double>(begin: 1.0, end: 0.0).animate(
-      CurvedAnimation(
-        parent: _ctrl,
-        curve: const Interval(0.75, 1.0, curve: Curves.easeIn),
-      ),
-    );
+    // ── Points qui s'enchaînent : "Chargement" → "." → ".." → "..." ────────
+    _dotsTimer = Timer.periodic(const Duration(milliseconds: 450), (_) {
+      if (!mounted) return;
+      setState(() => _dotsCount = (_dotsCount + 1) % 4);
+    });
 
-    // Lancer l'animation puis naviguer
-    _ctrl.forward().then((_) => _navigateToApp());
+    _loadApp();
+  }
+
+  Future<void> _loadApp() async {
+    // ── Chaque tâche est isolée : un échec (ex. notifications) ne doit
+    //    jamais bloquer indéfiniment l'écran de chargement ────────────────
+    await Future.wait([
+      _safe(() => initializeDateFormatting('fr_FR', null)),
+      _safe(() => NotificationService().init()),
+      _safe(_initTimezone),
+    ]);
+
+    if (!mounted) return;
+    setState(() => _exiting = true);
+    await Future.delayed(const Duration(milliseconds: 350));
+    _navigateToApp();
+  }
+
+  Future<void> _safe(Future<void> Function() task) async {
+    try {
+      await task();
+    } catch (e, st) {
+      debugPrint('Erreur init splash: $e\n$st');
+    }
+  }
+
+  Future<void> _initTimezone() async {
+    tzdata.initializeTimeZones();
+    tz.setLocalLocation(tz.local);
   }
 
   void _navigateToApp() {
@@ -71,7 +91,8 @@ class _SplashScreenState extends State<SplashScreen>
 
   @override
   void dispose() {
-    _ctrl.dispose();
+    _logoCtrl.dispose();
+    _dotsTimer?.cancel();
     super.dispose();
   }
 
@@ -81,35 +102,38 @@ class _SplashScreenState extends State<SplashScreen>
 
     // Taille du texte adaptée à la largeur de l'écran
     final fontSize = (size.width * 0.22).clamp(60.0, 110.0);
+    final dots = '.' * _dotsCount;
 
     return Scaffold(
-      body: AnimatedBuilder(
-        animation: _ctrl,
-        builder: (context, _) {
-          return FadeTransition(
-            opacity: _exitOpacity,
-            child: Container(
-              width: double.infinity,
-              height: double.infinity,
-              // ── Fond blanc avec dégradé doux ───────────────────────────
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    Color(0xFFFFFFFF), // blanc pur
-                    Color(0xFFF2FAF5), // blanc légèrement teinté vert
-                    Color(0xFFE6F4EC), // vert très très doux
-                  ],
-                  stops: [0.0, 0.55, 1.0],
-                ),
-              ),
-              child: Center(
-                child: FadeTransition(
-                  opacity: _logoOpacity,
-                  child: SlideTransition(
-                    position: _logoSlide,
-                    child: ShaderMask(
+      body: AnimatedOpacity(
+        opacity: _exiting ? 0.0 : 1.0,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeIn,
+        child: Container(
+          width: double.infinity,
+          height: double.infinity,
+          // ── Fond blanc avec dégradé doux ───────────────────────────
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color(0xFFFFFFFF), // blanc pur
+                Color(0xFFF2FAF5), // blanc légèrement teinté vert
+                Color(0xFFE6F4EC), // vert très très doux
+              ],
+              stops: [0.0, 0.55, 1.0],
+            ),
+          ),
+          child: Center(
+            child: FadeTransition(
+              opacity: _logoOpacity,
+              child: SlideTransition(
+                position: _logoSlide,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ShaderMask(
                       // ── Dégradé vert sur le texte Baxa ─────────────────
                       shaderCallback: (bounds) => const LinearGradient(
                         begin: Alignment.topLeft,
@@ -134,12 +158,26 @@ class _SplashScreenState extends State<SplashScreen>
                         ),
                       ),
                     ),
-                  ),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: 130,
+                      child: Text(
+                        'Chargement$dots',
+                        textAlign: TextAlign.left,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.black54,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
-          );
-        },
+          ),
+        ),
       ),
     );
   }

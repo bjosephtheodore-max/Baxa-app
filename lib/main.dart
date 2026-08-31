@@ -1,20 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
 
-import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
-import 'package:baxa/services/notifications/notification_service.dart';
-
+import 'package:baxa/page%20d-d%C3%A9but/splash_screen.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'firebase_options.dart';
 
-import 'package:intl/date_symbol_data_local.dart';
-import 'package:timezone/data/latest_all.dart' as tzdata;
-import 'package:timezone/timezone.dart' as tz;
-
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  final widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
+
+  // ── Garde la main sur le splash natif au lieu de le laisser disparaître
+  //    dès la 1ère frame (durée sinon imprévisible sur cold start) ─────────
+  FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
 
   // ── 1. Firebase démarre en arrière-plan — ne bloque PAS runApp ──────────
   Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
@@ -33,26 +32,20 @@ Future<void> main() async {
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   SystemChrome.setSystemUIOverlayStyle(style);
 
-  // ── 4. L'app s'affiche immédiatement ────────────────────────────────────
+  // ── 4. L'app s'affiche immédiatement, sur l'écran "Chargement..." ───────
   runApp(
     AnnotatedRegion<SystemUiOverlayStyle>(value: style, child: const MyApp()),
   );
 
-  // ── 5. Services non critiques — après le premier frame ──────────────────
-  // L'utilisateur voit déjà l'UI pendant que cela charge en arrière-plan
-  WidgetsBinding.instance.addPostFrameCallback((_) async {
-    await Future.wait([
-      initializeDateFormatting('fr_FR', null),
-      NotificationService().init(),
-      _initTimezone(),
-    ]);
-    _requestExactAlarmPermission(); // fire and forget
+  // ── 5. Splash natif affiché 0,6s max, puis place à l'écran Flutter ──────
+  Future.delayed(const Duration(milliseconds: 600), () {
+    FlutterNativeSplash.remove();
   });
-}
 
-Future<void> _initTimezone() async {
-  tzdata.initializeTimeZones();
-  tz.setLocalLocation(tz.local);
+  // ── 6. Permission alarme exacte — fire and forget, non bloquant ─────────
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    _requestExactAlarmPermission();
+  });
 }
 
 Future<void> _requestExactAlarmPermission() async {
@@ -96,8 +89,8 @@ class MyApp extends StatelessWidget {
         scaffoldBackgroundColor: Colors.white,
       ),
       navigatorObservers: [routeObserver],
-      // Direct vers ChoosePage — plus de InitPage qui bloque l'affichage
-      home: const ChoosePage(),
+      // SplashScreen affiche "Chargement..." puis navigue vers ChoosePage
+      home: const SplashScreen(),
     );
   }
 }

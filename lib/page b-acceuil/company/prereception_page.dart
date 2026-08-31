@@ -1,6 +1,7 @@
 import 'package:baxa/page%20b-acceuil/company/signin_page.dart';
 import 'package:baxa/services/locale_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 class PrereceptionPage extends StatefulWidget {
   const PrereceptionPage({super.key});
@@ -9,7 +10,9 @@ class PrereceptionPage extends StatefulWidget {
   State<PrereceptionPage> createState() => _PrereceptionPageState();
 }
 
-class _PrereceptionPageState extends State<PrereceptionPage> {
+class _PrereceptionPageState extends State<PrereceptionPage>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _bubblesController;
   static const Color _green = Color(0xFF4B8B5E);
   static const Color _greenLight = Color(0xFFE8F5ED);
   static const Color _greenMid = Color(0xFFB2D3C2);
@@ -23,6 +26,8 @@ class _PrereceptionPageState extends State<PrereceptionPage> {
   String? _typeSelectionne;
   bool _afficherChampAutre = false;
   String? _villeSelectionnee;
+  bool _typeError = false;
+  bool _villeError = false;
 
   final List<String> _villesList = LocaleService.villes;
   final bool _paysSupporte = LocaleService.isPaysSupporte;
@@ -37,7 +42,17 @@ class _PrereceptionPageState extends State<PrereceptionPage> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    _bubblesController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 6),
+    )..repeat();
+  }
+
+  @override
   void dispose() {
+    _bubblesController.dispose();
     _nomEntrepriseController.dispose();
     _autreTypeController.dispose();
     _villeLibreController.dispose();
@@ -50,6 +65,7 @@ class _PrereceptionPageState extends State<PrereceptionPage> {
     required String? selected,
     required void Function(String) onSelected,
   }) async {
+    FocusScope.of(context).unfocus();
     await showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -93,7 +109,10 @@ class _PrereceptionPageState extends State<PrereceptionPage> {
             Divider(color: Colors.grey.shade100, height: 1),
             Flexible(
               child: ListView.builder(
-                padding: const EdgeInsets.symmetric(vertical: 6),
+                padding: EdgeInsets.only(
+                  top: 6,
+                  bottom: 6 + MediaQuery.of(ctx).padding.bottom,
+                ),
                 itemCount: items.length,
                 itemBuilder: (_, i) {
                   final item = items[i];
@@ -131,11 +150,8 @@ class _PrereceptionPageState extends State<PrereceptionPage> {
                             ),
                           ),
                           if (isSelected)
-                            const Icon(
-                              Icons.check_rounded,
-                              color: _green,
-                              size: 18,
-                            ),
+                            const Icon(Icons.check_rounded,
+                                color: _green, size: 18),
                         ],
                       ),
                     ),
@@ -148,6 +164,7 @@ class _PrereceptionPageState extends State<PrereceptionPage> {
         ),
       ),
     );
+    if (mounted) FocusScope.of(context).requestFocus(FocusNode());
   }
 
   Widget _buildPickerField({
@@ -156,17 +173,25 @@ class _PrereceptionPageState extends State<PrereceptionPage> {
     required IconData icon,
     required VoidCallback onTap,
     String? helper,
+    bool error = false,
   }) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+        Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
         decoration: BoxDecoration(
           color: Colors.grey.shade50,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: value != null ? _greenMid : Colors.grey.shade300,
-            width: value != null ? 1.5 : 1,
+            color: error
+                ? Colors.red.shade300
+                : value != null
+                    ? _greenMid
+                    : Colors.grey.shade300,
+            width: error || value != null ? 1.5 : 1,
           ),
         ),
         child: Column(
@@ -174,69 +199,72 @@ class _PrereceptionPageState extends State<PrereceptionPage> {
           children: [
             Row(
               children: [
-                Icon(
-                  icon,
-                  size: 20,
-                  color: value != null ? _green : Colors.grey.shade500,
-                ),
+                Icon(icon,
+                    size: 20,
+                    color: value != null ? _green : Colors.grey.shade500),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
                     value ?? hint,
                     style: TextStyle(
                       fontSize: 14,
-                      fontWeight: value != null
-                          ? FontWeight.w600
-                          : FontWeight.w400,
+                      fontWeight:
+                          value != null ? FontWeight.w600 : FontWeight.w400,
                       color: value != null
                           ? Colors.black87
                           : Colors.grey.shade500,
                     ),
                   ),
                 ),
-                Icon(
-                  Icons.keyboard_arrow_down_rounded,
-                  color: value != null ? _green : Colors.grey.shade400,
-                  size: 22,
-                ),
+                Icon(Icons.keyboard_arrow_down_rounded,
+                    color: value != null ? _green : Colors.grey.shade400,
+                    size: 22),
               ],
             ),
             if (helper != null) ...[
               const SizedBox(height: 4),
-              Text(helper, style: const TextStyle(fontSize: 11, color: _green)),
+              Text(helper,
+                  style: const TextStyle(fontSize: 11, color: _green)),
             ],
           ],
         ),
+      ),
+      if (error) ...[
+        const SizedBox(height: 6),
+        Padding(
+          padding: const EdgeInsets.only(left: 12),
+          child: Text(
+            'Obligatoire',
+            style: TextStyle(fontSize: 12, color: Colors.red.shade600),
+          ),
+        ),
+      ],
+        ],
       ),
     );
   }
 
   void _continuer() {
-    if (_typeSelectionne == null ||
-        (_paysSupporte && _villeSelectionnee == null) ||
-        (!_paysSupporte && _villeLibreController.text.trim().isEmpty)) {
-      setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Veuillez remplir tous les champs')),
-      );
-      return;
-    }
-
-    if (_formKey.currentState!.validate()) {
+    setState(() {
+      _typeError = _typeSelectionne == null;
+      _villeError = _paysSupporte && _villeSelectionnee == null;
+    });
+    final formValid = _formKey.currentState!.validate();
+    if (_typeError || _villeError || !formValid) return;
+    if (formValid) {
       final typeFinal = _afficherChampAutre
           ? _autreTypeController.text.trim()
           : _typeSelectionne!;
-
       final villeFinale = _paysSupporte
           ? _villeSelectionnee!
           : _villeLibreController.text.trim();
-
       Navigator.push(
         context,
         MaterialPageRoute(
           builder: (_) => SigninPage(
             nomEntreprise: _nomEntrepriseController.text.trim(),
             typeEntreprise: typeFinal,
+            typeCategorie: _afficherChampAutre ? 'Autre' : typeFinal,
             ville: villeFinale,
             country: _countryCode,
             language: LocaleService.languageCode,
@@ -250,258 +278,305 @@ class _PrereceptionPageState extends State<PrereceptionPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey.shade50,
+      backgroundColor: Colors.white,
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
+        backgroundColor: Colors.white,
         elevation: 0,
         iconTheme: const IconThemeData(color: Colors.black87),
+        systemOverlayStyle: const SystemUiOverlayStyle(
+          statusBarColor: Colors.white,
+          statusBarIconBrightness: Brightness.dark,
+        ),
       ),
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 480),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: const BoxDecoration(
-                      color: _greenLight,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.business_outlined,
-                      size: 60,
-                      color: _green,
-                    ),
+      body: Container(
+        color: Colors.white,
+        child: SafeArea(
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: AnimatedBuilder(
+                animation: _bubblesController,
+                builder: (_, __) => CustomPaint(
+                  painter: _BubblesPainter(_bubblesController.value),
+                ),
+              ),
+            ),
+            SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480),
+            child: Column(
+              children: [
+                const SizedBox(height: 0),
+
+                // Icône structure
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: const BoxDecoration(
+                    color: _greenLight,
+                    shape: BoxShape.circle,
                   ),
-                  const SizedBox(height: 24),
-                  const Text(
-                    'Bienvenue sur Baxa',
-                    style: TextStyle(
-                      fontSize: 26,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black87,
-                    ),
+                  child: const Icon(
+                    Icons.account_balance_outlined,
+                    size: 52,
+                    color: _green,
                   ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Parlez-nous de votre entreprise',
-                    style: TextStyle(fontSize: 15, color: Colors.grey.shade600),
+                ),
+
+                const SizedBox(height: 20),
+
+                // Titre
+                const Text(
+                  'Parlez-nous de votre Structure',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    color: _dark,
+                    height: 1.3,
                   ),
-                  const SizedBox(height: 36),
-                  Container(
-                    padding: const EdgeInsets.all(28),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.07),
-                          blurRadius: 20,
-                          offset: const Offset(0, 4),
+                ),
+
+                const SizedBox(height: 28),
+
+                // Formulaire
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.07),
+                        blurRadius: 20,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: Form(
+                    key: _formKey,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        TextFormField(
+                          controller: _nomEntrepriseController,
+                          textCapitalization: TextCapitalization.words,
+                          decoration: InputDecoration(
+                            labelText: 'Nom de la structure',
+                            hintText: 'Ex: Banque Populaire, Mairie...',
+                            prefixIcon: const Icon(Icons.store_outlined),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide:
+                                  BorderSide(color: Colors.grey.shade300),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide:
+                                  const BorderSide(color: _green, width: 1.5),
+                            ),
+                            filled: true,
+                            fillColor: Colors.grey.shade50,
+                          ),
+                          validator: (v) => (v == null || v.trim().isEmpty)
+                              ? 'Le nom est obligatoire'
+                              : null,
                         ),
-                      ],
-                    ),
-                    child: Form(
-                      key: _formKey,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
+                        const SizedBox(height: 16),
+                        _buildPickerField(
+                          value: _typeSelectionne,
+                          hint: 'Sélectionnez le type',
+                          icon: Icons.category_outlined,
+                          error: _typeError,
+                          onTap: () => _showPicker(
+                            title: 'Type de structure',
+                            items: _typescompanies,
+                            selected: _typeSelectionne,
+                            onSelected: (val) => setState(() {
+                              _typeSelectionne = val;
+                              _typeError = false;
+                              _afficherChampAutre = val == 'Autre';
+                              if (!_afficherChampAutre) {
+                                _autreTypeController.clear();
+                              }
+                            }),
+                          ),
+                        ),
+                        if (_afficherChampAutre) ...[
+                          const SizedBox(height: 12),
                           TextFormField(
-                            controller: _nomEntrepriseController,
+                            controller: _autreTypeController,
                             textCapitalization: TextCapitalization.words,
                             decoration: InputDecoration(
-                              labelText: 'Nom de l\'entreprise',
-                              hintText: 'Ex: Restaurant Chez Marie',
-                              prefixIcon: const Icon(Icons.store_outlined),
+                              labelText: 'Précisez le type',
+                              hintText: 'Ex: Hôtel, École, Salon...',
+                              prefixIcon: const Icon(Icons.edit_outlined),
                               border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
+                                  borderRadius: BorderRadius.circular(12)),
                               enabledBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(
-                                  color: Colors.grey.shade300,
-                                ),
+                                borderSide:
+                                    BorderSide(color: Colors.grey.shade300),
                               ),
                               focusedBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: const BorderSide(
-                                  color: _green,
-                                  width: 1.5,
-                                ),
+                                borderSide:
+                                    const BorderSide(color: _green, width: 1.5),
+                              ),
+                              filled: true,
+                              fillColor: Colors.grey.shade50,
+                            ),
+                            validator: (v) =>
+                                (_afficherChampAutre &&
+                                        (v == null || v.trim().isEmpty))
+                                    ? 'Veuillez préciser le type'
+                                    : null,
+                          ),
+                        ],
+                        const SizedBox(height: 16),
+                        if (_paysSupporte)
+                          _buildPickerField(
+                            value: _villeSelectionnee,
+                            hint: 'Sélectionnez votre ville',
+                            icon: Icons.location_city_outlined,
+                            helper: '📍 ${LocaleService.countryName} détecté',
+                            error: _villeError,
+                            onTap: () => _showPicker(
+                              title: 'Ville',
+                              items: _villesList,
+                              selected: _villeSelectionnee,
+                              onSelected: (val) => setState(() {
+                                _villeSelectionnee = val;
+                                _villeError = false;
+                              }),
+                            ),
+                          )
+                        else
+                          TextFormField(
+                            controller: _villeLibreController,
+                            textCapitalization: TextCapitalization.words,
+                            decoration: InputDecoration(
+                              labelText: 'Ville',
+                              hintText: 'Entrez votre ville',
+                              prefixIcon:
+                                  const Icon(Icons.location_city_outlined),
+                              border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide:
+                                    BorderSide(color: Colors.grey.shade300),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide:
+                                    const BorderSide(color: _green, width: 1.5),
                               ),
                               filled: true,
                               fillColor: Colors.grey.shade50,
                             ),
                             validator: (v) => (v == null || v.trim().isEmpty)
-                                ? 'Le nom est obligatoire'
+                                ? 'Veuillez entrer votre ville'
                                 : null,
                           ),
-                          const SizedBox(height: 16),
-                          _buildPickerField(
-                            value: _typeSelectionne,
-                            hint: 'Sélectionnez le type',
-                            icon: Icons.category_outlined,
-                            onTap: () => _showPicker(
-                              title: 'Type d\'entreprise',
-                              items: _typescompanies,
-                              selected: _typeSelectionne,
-                              onSelected: (val) => setState(() {
-                                _typeSelectionne = val;
-                                _afficherChampAutre = val == 'Autre';
-                                if (!_afficherChampAutre) {
-                                  _autreTypeController.clear();
-                                }
-                              }),
-                            ),
-                          ),
-                          if (_afficherChampAutre) ...[
-                            const SizedBox(height: 12),
-                            TextFormField(
-                              controller: _autreTypeController,
-                              textCapitalization: TextCapitalization.words,
-                              decoration: InputDecoration(
-                                labelText: 'Précisez le type',
-                                hintText: 'Ex: Hôtel, École, Salon...',
-                                prefixIcon: const Icon(Icons.edit_outlined),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide(
-                                    color: Colors.grey.shade300,
-                                  ),
-                                ),
-                                focusedBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: const BorderSide(
-                                    color: _green,
-                                    width: 1.5,
-                                  ),
-                                ),
-                                filled: true,
-                                fillColor: Colors.grey.shade50,
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Icon(Icons.info_outline,
+                                size: 14, color: Colors.grey.shade400),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                'Ces informations nous aident à adapter Baxa à vos besoins',
+                                style: TextStyle(
+                                    fontSize: 11, color: Colors.grey.shade500),
                               ),
-                              validator: (v) =>
-                                  (_afficherChampAutre &&
-                                      (v == null || v.trim().isEmpty))
-                                  ? 'Veuillez préciser le type'
-                                  : null,
                             ),
                           ],
-                          const SizedBox(height: 16),
-                          if (_paysSupporte)
-                            _buildPickerField(
-                              value: _villeSelectionnee,
-                              hint: 'Sélectionnez votre ville',
-                              icon: Icons.location_city_outlined,
-                              helper: '📍 ${LocaleService.countryName} détecté',
-                              onTap: () => _showPicker(
-                                title: 'Ville',
-                                items: _villesList,
-                                selected: _villeSelectionnee,
-                                onSelected: (val) =>
-                                    setState(() => _villeSelectionnee = val),
-                              ),
-                            )
-                          else
-                            TextFormField(
-                              controller: _villeLibreController,
-                              textCapitalization: TextCapitalization.words,
-                              decoration: InputDecoration(
-                                labelText: 'Ville',
-                                hintText: 'Entrez votre ville',
-                                prefixIcon: const Icon(
-                                  Icons.location_city_outlined,
-                                ),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide(
-                                    color: Colors.grey.shade300,
-                                  ),
-                                ),
-                                focusedBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: const BorderSide(
-                                    color: _green,
-                                    width: 1.5,
-                                  ),
-                                ),
-                                filled: true,
-                                fillColor: Colors.grey.shade50,
-                              ),
-                              validator: (v) => (v == null || v.trim().isEmpty)
-                                  ? 'Veuillez entrer votre ville'
-                                  : null,
-                            ),
-                          const SizedBox(height: 16),
-                          Row(
-                            children: [
-                              Icon(
-                                Icons.info_outline,
-                                size: 14,
-                                color: Colors.grey.shade400,
-                              ),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  'Ces informations nous aident à adapter Baxa à vos besoins',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.grey.shade500,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 28),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 54,
-                    child: ElevatedButton(
-                      onPressed: _continuer,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _green,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
                         ),
-                        elevation: 0,
-                      ),
-                      child: const Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            'Suivant',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          SizedBox(width: 8),
-                          Icon(Icons.arrow_forward, size: 18),
-                        ],
-                      ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 24),
-                ],
-              ),
+                ),
+
+                const SizedBox(height: 28),
+
+                // Bouton
+                SizedBox(
+                  width: double.infinity,
+                  height: 54,
+                  child: ElevatedButton(
+                    onPressed: _continuer,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _green,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 0,
+                    ),
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text('Suivant',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w600)),
+                        SizedBox(width: 8),
+                        Icon(Icons.arrow_forward, size: 18),
+                      ],
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 24),
+              ],
             ),
           ),
-        ),
+        ),  // SingleChildScrollView
+          ],  // Stack children
+        ),  // Stack
       ),
+    ),
     );
   }
+}
+
+class _BubblesPainter extends CustomPainter {
+  final double t;
+  _BubblesPainter(this.t);
+
+  static const _color = Color(0xFF4B8B5E);
+
+  static const _bubbles = [
+    (0.10, 0.85, 22.0, 0.06, 1.0),
+    (0.25, 0.55, 12.0, 0.05, 0.65),
+    (0.42, 0.70, 30.0, 0.04, 0.80),
+    (0.60, 0.40, 16.0, 0.06, 1.15),
+    (0.75, 0.80, 10.0, 0.07, 0.50),
+    (0.88, 0.60, 24.0, 0.05, 0.90),
+    (0.33, 0.20, 14.0, 0.05, 0.70),
+    (0.55, 0.90, 8.0,  0.07, 1.10),
+    (0.70, 0.30, 18.0, 0.04, 0.60),
+    (0.90, 0.15, 10.0, 0.06, 1.00),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..style = PaintingStyle.fill;
+    for (final b in _bubbles) {
+      final yNorm = ((b.$2 - t * b.$5 * 0.30) % 1.0 + 1.0) % 1.0;
+      paint.color = _color.withValues(alpha: b.$4);
+      canvas.drawCircle(
+        Offset(b.$1 * size.width, yNorm * size.height),
+        b.$3,
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_BubblesPainter old) => old.t != t;
 }

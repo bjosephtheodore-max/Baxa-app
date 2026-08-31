@@ -66,5 +66,7 @@
 		<true/>
 		<key>UIStatusBarHidden</key>
 		<false/>
+		<key>NSLocationWhenInUseUsageDescription</key>
+		<string>Baxa utilise votre position pour vous montrer les structures les plus proches de vous.</string>
 	</dict>
 </plist>

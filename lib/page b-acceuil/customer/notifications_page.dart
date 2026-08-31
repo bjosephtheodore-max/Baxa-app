@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/notifications/notification_service.dart';
+import 'package:baxa/page%20b-acceuil/customer/slots_page.dart';
 
 class NotificationsPage extends StatefulWidget {
   const NotificationsPage({super.key});
@@ -18,86 +20,45 @@ class _NotificationsPageState extends State<NotificationsPage>
 
   static const Color _green = Color(0xFF4B8B5E);
   static const Color _greenLight = Color(0xFFE8F5ED);
+  // Même teinte que celle utilisée par les autres pages qui ouvrent
+  // SlotsPage (companyqueue_page.dart, search_page.dart) — _greenLight
+  // ci-dessus est trop pâle, elle sert uniquement aux badges de cette page.
+  static const Color _slotsPageLightGreen = Color(0xFFB2D3C2);
   static const Color _dark = Color(0xFF1A1C2E);
 
   final NotificationService _notifSvc = NotificationService();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final DateFormat _df = DateFormat('dd/MM/yyyy HH:mm');
-  List<Map<String, dynamic>> _items = [];
-  bool _loading = true;
+  final DateFormat _dateFmt = DateFormat('EEE d MMM', 'fr_FR');
+  final DateFormat _timeFmt = DateFormat('HH:mm');
 
   @override
   void initState() {
     super.initState();
-    _init();
+    _notifSvc.init();
   }
 
-  Future<void> _init() async {
-    await _notifSvc.init();
-    await _loadNotifications();
+  String _relativeTime(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 1) return 'À l\'instant';
+    if (diff.inMinutes < 60) return 'Il y a ${diff.inMinutes} min';
+    if (diff.inHours < 24) return 'Il y a ${diff.inHours}h';
+    if (diff.inDays == 1) return 'Hier · ${_timeFmt.format(dt)}';
+    return '${_dateFmt.format(dt)} · ${_timeFmt.format(dt)}';
   }
 
-  Future<void> _loadNotifications() async {
-    setState(() => _loading = true);
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      setState(() {
-        _items = [];
-        _loading = false;
-      });
-      return;
+  _NotifType _parseType(String title) {
+    final t = title.toLowerCase();
+    if (t.contains('validation') || t.contains('🟢') || t.contains('tour')) {
+      return _NotifType.validation;
     }
-
-    try {
-      final snap = await _firestore
-          .collection('customers')
-          .doc(user.uid)
-          .collection('notifications')
-          .orderBy('createdAt', descending: true)
-          .limit(100)
-          .get();
-
-      _items = snap.docs.map((d) {
-        final data = d.data();
-        return {
-          'id': d.id,
-          'title': data['title'] ?? 'Notification',
-          'body': data['body'] ?? '',
-          'createdAt': data['createdAt'] is Timestamp
-              ? (data['createdAt'] as Timestamp).toDate()
-              : null,
-          'payload': data['payload'],
-        };
-      }).toList();
-    } catch (e) {
-      debugPrint('Load notifications failed: $e');
-      _items = [];
-    } finally {
-      if (mounted) setState(() => _loading = false);
+    if (t.contains('passé') || t.contains('terminé') || t.contains('🟠')) {
+      return _NotifType.passed;
     }
-  }
-
-  Future<void> _deleteNotification(String id) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    await _firestore
-        .collection('customers')
-        .doc(user.uid)
-        .collection('notifications')
-        .doc(id)
-        .delete();
-    await _loadNotifications();
-  }
-
-  Future<void> _clearLocalScheduledForAll() async {
-    await _notifSvc.cancelAll();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Toutes les notifications locales ont ete annulees.'),
-        ),
-      );
+    if (t.contains('annul')) return _NotifType.cancelled;
+    if (t.contains('confirmée') || t.contains('🎉')) {
+      return _NotifType.confirmed;
     }
+    return _NotifType.reminder;
   }
 
   @override
@@ -109,27 +70,22 @@ class _NotificationsPageState extends State<NotificationsPage>
         backgroundColor: Colors.white,
         elevation: 0,
         automaticallyImplyLeading: false,
-        title: const Text(
+        title: Text(
           'Notifications',
-          style: TextStyle(
+          style: GoogleFonts.poppins(
             color: _dark,
             fontWeight: FontWeight.w700,
-            fontSize: 23,
+            fontSize: 20,
           ),
         ),
         actions: [
           IconButton(
-            tooltip: 'Tout effacer',
+            tooltip: 'Tout supprimer',
             icon: Icon(
               Icons.delete_sweep_outlined,
-              color: Colors.grey.shade600,
+              color: Colors.grey.shade500,
             ),
-            onPressed: _clearLocalScheduledForAll,
-          ),
-          IconButton(
-            tooltip: 'Rafraichir',
-            icon: Icon(Icons.refresh_rounded, color: Colors.grey.shade600),
-            onPressed: _loadNotifications,
+            onPressed: _showDeleteAllConfirmation,
           ),
           const SizedBox(width: 4),
         ],
@@ -138,131 +94,545 @@ class _NotificationsPageState extends State<NotificationsPage>
           child: Container(color: Colors.grey.shade100, height: 1),
         ),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator(color: _green))
-          : _items.isEmpty
-          ? _buildEmptyState()
-          : ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-              itemCount: _items.length,
-              itemBuilder: (ctx, i) => _buildNotifCard(_items[i]),
-            ),
+      body: StreamBuilder<User?>(
+        stream: FirebaseAuth.instance.authStateChanges(),
+        builder: (context, authSnapshot) {
+          final userId = authSnapshot.data?.uid;
+          if (userId == null) {
+            return const Center(
+              child: CircularProgressIndicator(color: _green, strokeWidth: 2),
+            );
+          }
+          return StreamBuilder<QuerySnapshot>(
+            stream: _firestore
+                .collection('customers')
+                .doc(userId)
+                .collection('notifications')
+                .orderBy('createdAt', descending: true)
+                .limit(100)
+                .snapshots(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(
+                  child: CircularProgressIndicator(
+                    color: _green,
+                    strokeWidth: 2,
+                  ),
+                );
+              }
+              if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                return _buildEmptyState();
+              }
+              final docs = snapshot.data!.docs;
+              return ListView.builder(
+                padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
+                itemCount: docs.length,
+                itemBuilder: (ctx, i) {
+                  final doc = docs[i];
+                  return _buildNotifCard(
+                    doc.id,
+                    doc.data() as Map<String, dynamic>,
+                  );
+                },
+              );
+            },
+          );
+        },
+      ),
     );
+  }
+
+  Widget _buildNotifCard(String id, Map<String, dynamic> data) {
+    final title = data['title'] as String? ?? 'Notification';
+    final body = data['body'] as String? ?? '';
+    final createdAt = data['createdAt'] is Timestamp
+        ? (data['createdAt'] as Timestamp).toDate()
+        : null;
+    final cfg = _configFor(_parseType(title));
+
+    // Bouton "Trouver un créneau" : uniquement pour une annulation par
+    // l'entreprise, et seulement si la Cloud Function a bien fourni de quoi
+    // rediriger (payload absent = notification plus ancienne, sans ce champ).
+    final payload = data['payload'] as Map<String, dynamic>?;
+    final canFindNewSlot =
+        data['type'] == 'cancellation_by_company' &&
+        payload != null &&
+        (payload['queueId'] as String?)?.isNotEmpty == true &&
+        (payload['companyId'] as String?)?.isNotEmpty == true;
+
+    return Dismissible(
+      key: Key(id),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: Colors.red.shade400,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.delete_rounded, color: Colors.white, size: 26),
+            SizedBox(height: 4),
+            Text(
+              'Supprimer',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+      onDismissed: (_) => _deleteNotification(id),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: cfg.borderColor, width: 1),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 10,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(15),
+          child: IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(width: 3, color: cfg.accent),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: cfg.iconBg,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(cfg.icon, color: cfg.iconColor, size: 20),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      title,
+                                      style: GoogleFonts.poppins(
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 14,
+                                        color: _dark,
+                                      ),
+                                    ),
+                                  ),
+                                  if (createdAt != null) ...[
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      _relativeTime(createdAt),
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.grey.shade400,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              if (body.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  body,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.grey.shade600,
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ],
+                              const SizedBox(height: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 3,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: cfg.badgeBg,
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Text(
+                                  cfg.label,
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    color: cfg.accent,
+                                  ),
+                                ),
+                              ),
+                              if (canFindNewSlot) ...[
+                                const SizedBox(height: 10),
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: OutlinedButton.icon(
+                                    onPressed: () => _goToSlots(payload),
+                                    icon: const Icon(
+                                      Icons.search_rounded,
+                                      size: 16,
+                                    ),
+                                    label: const Text('Trouver un créneau'),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: _green,
+                                      side: const BorderSide(color: _green),
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 10,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      textStyle: const TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _goToSlots(Map<String, dynamic>? payload) {
+    if (payload == null) return;
+    final companyId = payload['companyId'] as String? ?? '';
+    final queueId = payload['queueId'] as String? ?? '';
+    if (companyId.isEmpty || queueId.isEmpty) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SlotsPage(
+          entrepriseId: companyId,
+          entrepriseNom: payload['companyName'] as String? ?? '',
+          queueId: queueId,
+          queueName: payload['queueName'] as String? ?? 'File',
+          primaryGreen: _green,
+          lightGreen: _slotsPageLightGreen,
+          onReservationSuccess: () {},
+        ),
+      ),
+    );
+  }
+
+  _NotifCfg _configFor(_NotifType type) {
+    switch (type) {
+      case _NotifType.validation:
+        return _NotifCfg(
+          icon: Icons.check_circle_rounded,
+          iconColor: _green,
+          iconBg: _greenLight,
+          accent: _green,
+          borderColor: _green.withValues(alpha: 0.2),
+          badgeBg: _greenLight,
+          label: 'C\'est ton tour',
+        );
+      case _NotifType.passed:
+        return _NotifCfg(
+          icon: Icons.timelapse_rounded,
+          iconColor: Colors.orange.shade600,
+          iconBg: Colors.orange.shade50,
+          accent: Colors.orange.shade500,
+          borderColor: Colors.orange.shade100,
+          badgeBg: Colors.orange.shade50,
+          label: 'Créneau passé',
+        );
+      case _NotifType.cancelled:
+        return _NotifCfg(
+          icon: Icons.event_busy_rounded,
+          iconColor: Colors.red.shade400,
+          iconBg: Colors.red.shade50,
+          accent: Colors.red.shade400,
+          borderColor: Colors.red.shade100,
+          badgeBg: Colors.red.shade50,
+          label: 'Annulation',
+        );
+      case _NotifType.reminder:
+        return _NotifCfg(
+          icon: Icons.access_alarm_rounded,
+          iconColor: Colors.blue.shade500,
+          iconBg: Colors.blue.shade50,
+          accent: Colors.blue.shade400,
+          borderColor: Colors.blue.shade100,
+          badgeBg: Colors.blue.shade50,
+          label: 'Rappel',
+        );
+      case _NotifType.confirmed:
+        return _NotifCfg(
+          icon: Icons.celebration_rounded,
+          iconColor: _green,
+          iconBg: _greenLight,
+          accent: _green,
+          borderColor: _green.withValues(alpha: 0.2),
+          badgeBg: _greenLight,
+          label: 'Confirmée',
+        );
+    }
+  }
+
+  Future<void> _deleteNotification(String id) async {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+    try {
+      await _firestore
+          .collection('customers')
+          .doc(userId)
+          .collection('notifications')
+          .doc(id)
+          .delete();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur : $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _showDeleteAllConfirmation() async {
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        padding: EdgeInsets.fromLTRB(
+          24,
+          16,
+          24,
+          32 + MediaQuery.of(ctx).padding.bottom,
+        ),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.red.shade50,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.delete_forever_rounded,
+                color: Colors.red.shade400,
+                size: 30,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'Tout supprimer ?',
+              style: GoogleFonts.poppins(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: _dark,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Toutes vos notifications seront supprimées définitivement.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      side: BorderSide(color: Colors.grey.shade300),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: Text(
+                      'Annuler',
+                      style: TextStyle(
+                        color: Colors.grey.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red.shade400,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      'Supprimer tout',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (confirmed == true) await _deleteAllNotifications();
+  }
+
+  Future<void> _deleteAllNotifications() async {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+    try {
+      await _notifSvc.cancelAll();
+      final snap = await _firestore
+          .collection('customers')
+          .doc(userId)
+          .collection('notifications')
+          .get();
+      final batch = _firestore.batch();
+      for (final doc in snap.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${snap.docs.length} notification${snap.docs.length > 1 ? 's' : ''} supprimée${snap.docs.length > 1 ? 's' : ''}',
+            ),
+            backgroundColor: _green,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur : $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
   }
 
   Widget _buildEmptyState() {
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              shape: BoxShape.circle,
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: const BoxDecoration(
+                color: _greenLight,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.notifications_none_rounded,
+                size: 48,
+                color: _green.withValues(alpha: 0.6),
+              ),
             ),
-            child: Icon(
-              Icons.notifications_none_rounded,
-              size: 48,
-              color: Colors.grey.shade400,
+            const SizedBox(height: 24),
+            Text(
+              'Aucune notification',
+              style: GoogleFonts.poppins(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: _dark,
+              ),
             ),
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            'Aucune notification',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-              color: _dark,
+            const SizedBox(height: 8),
+            Text(
+              'Vos rappels et alertes de réservation apparaîtront ici',
+              style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+              textAlign: TextAlign.center,
             ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Vos alertes de reservation apparaitront ici',
-            style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
+}
 
-  Widget _buildNotifCard(Map<String, dynamic> it) {
-    final createdAt = it['createdAt'] as DateTime?;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: _greenLight,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Icon(
-              Icons.notifications_rounded,
-              color: _green,
-              size: 20,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  it['title'] ?? '',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 14,
-                    color: _dark,
-                  ),
-                ),
-                if ((it['body'] as String? ?? '').isNotEmpty) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    it['body'] as String,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: Colors.grey.shade600,
-                      height: 1.4,
-                    ),
-                  ),
-                ],
-                if (createdAt != null) ...[
-                  const SizedBox(height: 5),
-                  Text(
-                    _df.format(createdAt),
-                    style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          IconButton(
-            icon: Icon(
-              Icons.close_rounded,
-              size: 18,
-              color: Colors.grey.shade400,
-            ),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-            onPressed: () => _deleteNotification(it['id'] as String),
-          ),
-        ],
-      ),
-    );
-  }
+enum _NotifType { reminder, validation, passed, cancelled, confirmed }
+
+class _NotifCfg {
+  final IconData icon;
+  final Color iconColor;
+  final Color iconBg;
+  final Color accent;
+  final Color borderColor;
+  final Color badgeBg;
+  final String label;
+
+  const _NotifCfg({
+    required this.icon,
+    required this.iconColor,
+    required this.iconBg,
+    required this.accent,
+    required this.borderColor,
+    required this.badgeBg,
+    required this.label,
+  });
 }

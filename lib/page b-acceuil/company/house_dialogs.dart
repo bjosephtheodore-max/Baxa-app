@@ -11,8 +11,10 @@ Future<_ModifResult?> _showModifDialog(
   required String preview,
   bool hasReservations = false,
   bool isCapacity = false,
+  bool todayDone = false,
 }) async {
-  ModificationType type = ModificationType.ponctuelle;
+  ModificationType type =
+      todayDone ? ModificationType.permanente : ModificationType.ponctuelle;
   bool applyToFuture = false;
   return showDialog<_ModifResult>(
     context: context,
@@ -78,21 +80,34 @@ Future<_ModifResult?> _showModifDialog(
             ],
 
             const SizedBox(height: 16),
-            RadioListTile<ModificationType>(
-              title: const Text("Juste pour aujourd'hui"),
-              subtitle: const Text(
-                'Les paramètres reviendront à la normale demain',
-                style: TextStyle(fontSize: 12),
+            Opacity(
+              opacity: todayDone ? 0.4 : 1.0,
+              child: RadioListTile<ModificationType>(
+                title: const Text("Juste pour aujourd'hui"),
+                subtitle: const Text(
+                  'Les paramètres reviendront à la normale demain',
+                  style: TextStyle(fontSize: 12),
+                ),
+                value: ModificationType.ponctuelle,
+                groupValue: type,
+                activeColor: _green,
+                contentPadding: EdgeInsets.zero,
+                onChanged: todayDone
+                    ? null
+                    : (v) => setD(() {
+                          type = v!;
+                          applyToFuture = false;
+                        }),
               ),
-              value: ModificationType.ponctuelle,
-              groupValue: type,
-              activeColor: _green,
-              contentPadding: EdgeInsets.zero,
-              onChanged: (v) => setD(() {
-                type = v!;
-                applyToFuture = false;
-              }),
             ),
+            if (todayDone)
+              Padding(
+                padding: const EdgeInsets.only(left: 12, bottom: 4),
+                child: Text(
+                  'Tous les créneaux d\'aujourd\'hui sont terminés',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                ),
+              ),
             RadioListTile<ModificationType>(
               title: const Text('Permanente'),
               subtitle: const Text(
@@ -180,6 +195,7 @@ class _QuickAddSheetState extends State<_QuickAddSheet> {
   final _nameController = TextEditingController();
   late final PageController _pageController;
   int _currentIndex = 0;
+  String? _nameError;
 
   @override
   void initState() {
@@ -356,10 +372,14 @@ class _QuickAddSheetState extends State<_QuickAddSheet> {
               controller: _nameController,
               textCapitalization: TextCapitalization.words,
               autofocus: true,
+              onChanged: (_) {
+                if (_nameError != null) setState(() => _nameError = null);
+              },
               decoration: InputDecoration(
                 labelText: 'Nom du client',
                 hintText: 'Ex : Jean Dupont',
                 prefixIcon: const Icon(Icons.person_outline_rounded),
+                errorText: _nameError,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
@@ -372,9 +392,11 @@ class _QuickAddSheetState extends State<_QuickAddSheet> {
               width: double.infinity,
               child: ElevatedButton.icon(
                 onPressed: () async {
-                  final name = _nameController.text.trim().isEmpty
-                      ? 'Client'
-                      : _nameController.text.trim();
+                  final name = _nameController.text.trim();
+                  if (name.isEmpty) {
+                    setState(() => _nameError = 'Veuillez entrer un nom');
+                    return;
+                  }
                   final slot = _currentSlot;
                   Navigator.pop(context);
                   await widget.onConfirm(name, slot);
