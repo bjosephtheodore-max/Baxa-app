@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/notifications/notification_service.dart';
 import 'package:baxa/page%20b-acceuil/customer/slots_page.dart';
+import 'package:baxa/page%20b-acceuil/customer/reservation_ticket_page.dart';
 
 class NotificationsPage extends StatefulWidget {
   const NotificationsPage({super.key});
@@ -125,7 +126,9 @@ class _NotificationsPageState extends State<NotificationsPage>
               }
               final docs = snapshot.data!.docs;
               return ListView.builder(
-                padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
+                // Marge basse élargie : la barre de navigation flotte au-dessus
+                // du contenu (extendBody), la dernière carte doit rester lisible.
+                padding: const EdgeInsets.fromLTRB(16, 20, 16, 104),
                 itemCount: docs.length,
                 itemBuilder: (ctx, i) {
                   final doc = docs[i];
@@ -148,7 +151,8 @@ class _NotificationsPageState extends State<NotificationsPage>
     final createdAt = data['createdAt'] is Timestamp
         ? (data['createdAt'] as Timestamp).toDate()
         : null;
-    final cfg = _configFor(_parseType(title));
+    final notifType = _parseType(title);
+    final cfg = _configFor(notifType);
 
     // Bouton "Trouver un créneau" : uniquement pour une annulation par
     // l'entreprise, et seulement si la Cloud Function a bien fourni de quoi
@@ -159,6 +163,20 @@ class _NotificationsPageState extends State<NotificationsPage>
         payload != null &&
         (payload['queueId'] as String?)?.isNotEmpty == true &&
         (payload['companyId'] as String?)?.isNotEmpty == true;
+
+    // Ticket vivant à présenter au personnel : uniquement pour "c'est ton
+    // tour" (le seul moment où une preuve non capturable a une utilité —
+    // un créneau déjà passé ne débloque plus rien, inutile de le protéger),
+    // et seulement si les horaires du créneau ont bien été fournis
+    // (notifications plus anciennes = absent).
+    final slotStart = DateTime.tryParse(
+      payload?['slotStart'] as String? ?? '',
+    );
+    final slotEnd = DateTime.tryParse(payload?['slotEnd'] as String? ?? '');
+    final canOpenTicket =
+        notifType == _NotifType.validation &&
+        slotStart != null &&
+        slotEnd != null;
 
     return Dismissible(
       key: Key(id),
@@ -204,7 +222,11 @@ class _NotificationsPageState extends State<NotificationsPage>
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(15),
-          child: IntrinsicHeight(
+          child: InkWell(
+            onTap: canOpenTicket
+                ? () => _openTicket(payload!, slotStart, slotEnd)
+                : null,
+            child: IntrinsicHeight(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -321,6 +343,7 @@ class _NotificationsPageState extends State<NotificationsPage>
               ],
             ),
           ),
+          ),
         ),
       ),
     );
@@ -331,6 +354,7 @@ class _NotificationsPageState extends State<NotificationsPage>
     final companyId = payload['companyId'] as String? ?? '';
     final queueId = payload['queueId'] as String? ?? '';
     if (companyId.isEmpty || queueId.isEmpty) return;
+    SlotsPage.prefetch(companyId, queueId);
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -342,6 +366,24 @@ class _NotificationsPageState extends State<NotificationsPage>
           primaryGreen: _green,
           lightGreen: _slotsPageLightGreen,
           onReservationSuccess: () {},
+        ),
+      ),
+    );
+  }
+
+  void _openTicket(
+    Map<String, dynamic> payload,
+    DateTime slotStart,
+    DateTime slotEnd,
+  ) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ReservationTicketPage(
+          companyName: payload['companyName'] as String? ?? '',
+          queueName: payload['queueName'] as String? ?? '',
+          slotStart: slotStart,
+          slotEnd: slotEnd,
         ),
       ),
     );

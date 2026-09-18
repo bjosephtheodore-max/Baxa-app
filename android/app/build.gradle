@@ -14,13 +14,16 @@ android {
     ndkVersion = "27.0.12077973" 
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        // 17 : version désormais attendue par plusieurs plugins (dont
+        // screen_protector) — rester en 11 provoquait un conflit Java/Kotlin
+        // dans leur propre module de compilation.
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
         coreLibraryDesugaringEnabled true
     }
 
     kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_11.toString()
+        jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
     defaultConfig {

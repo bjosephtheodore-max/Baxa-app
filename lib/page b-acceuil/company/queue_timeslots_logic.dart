@@ -161,6 +161,7 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
     required int maxAdvanceDays,
     required int reservationDeadlineMinutes,
     DateTime? startFrom,
+    SlotGenMode mode = SlotGenMode.refresh,
   }) {
     return generateSlotsImmediately(
       firestore: _firestore,
@@ -174,6 +175,7 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
       workingDays: workingDays,
       reservationDeadlineMinutes: reservationDeadlineMinutes,
       startFrom: startFrom,
+      mode: mode,
     );
   }
 
@@ -412,7 +414,7 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
           : List<int>.from(_queueWeekdays),
       maxAdvanceDays: (slotData['maxAdvanceDays'] as num?)?.toInt() ?? 2,
       reservationDeadlineMinutes:
-          (slotData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 5,
+          (slotData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0,
       startFrom: pendingEffectiveDate,
     );
 
@@ -841,7 +843,7 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
             : List<int>.from(_queueWeekdays),
         maxAdvanceDays: (slotData['maxAdvanceDays'] as num?)?.toInt() ?? 2,
         reservationDeadlineMinutes:
-            (slotData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 5,
+            (slotData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0,
       );
 
       if (!mounted) return;

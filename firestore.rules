@@ -105,8 +105,18 @@ service cloud.firestore {
       }
 
       // Historique de notifications : usage interne entreprise, jamais public
+      // (ancienne collection — remplacée par companyNotifications ci-dessous,
+      // conservée le temps que le nettoyage serveur purge les vieux docs).
       match /notificationsHistory/{notifId} {
         allow read, write: if hasAccess(companyId);
+      }
+
+      // Journal unifié des notifications entreprise (admin + staff). Écrit
+      // UNIQUEMENT côté serveur (Cloud Functions, Admin SDK). L'app peut lire
+      // et supprimer (glisser pour effacer / tout supprimer), jamais créer.
+      match /companyNotifications/{notifId} {
+        allow read, delete: if hasAccess(companyId);
+        allow create, update: if false;
       }
 
       // Tout le reste du sous-arbre (prereception, notificationsAdmin,

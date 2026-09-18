@@ -87,7 +87,8 @@ class _SettingsPageState extends State<SettingsPage> {
       );
     }
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F8FA),
+      // Blanc uni (comme l'accueil company) — plus de fond teinté.
+      backgroundColor: Colors.white,
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.white,
@@ -112,7 +113,10 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
-          child: Container(color: Colors.grey.shade100, height: 1),
+          child: Container(
+            color: Colors.black.withValues(alpha: 0.06),
+            height: 1,
+          ),
         ),
       ),
       body: ListenableBuilder(
@@ -229,11 +233,11 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _buildQueueCard(String queueId, Map<String, dynamic> queueData) {
     final name = queueData['name'] as String? ?? 'File sans nom';
-    final weekdays =
-        (queueData['weekdays'] as List<dynamic>?)
-            ?.map((e) => e as int)
-            .toList() ??
-        [1, 2, 3, 4, 5, 6, 7];
+    final advance = (queueData['maxAdvanceDays'] as num?)?.toInt() ?? 2;
+    final delay = (queueData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
+    final subtitle = delay == 0
+        ? 'Réservable $advance j à l\'avance'
+        : 'Réservable $advance j à l\'avance · préavis $delay min';
     final closureStart = (queueData['closureStart'] as Timestamp?)?.toDate();
     final closureEnd = (queueData['closureEnd'] as Timestamp?)?.toDate();
     final closedNow = isQueueClosedNow(closureStart, closureEnd);
@@ -245,7 +249,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
     final card = _AnimatedQueueCard(
       name: name,
-      weekdays: _formatWeekdays(weekdays),
+      subtitle: subtitle,
       open: !closedNow,
       closurePlannedFor: closurePlannedFor,
       deleteAfter: deleteAfter,
@@ -336,7 +340,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 GestureDetector(
                   onTap: () {
                     Navigator.pop(context);
-                    _renameQueue(queueId, name);
+                    _editQueueSettings(queueId, queueData);
                   },
                   child: Container(
                     padding: const EdgeInsets.all(8),
@@ -401,131 +405,464 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Future<void> _renameQueue(String queueId, String currentName) async {
-    final controller = TextEditingController(text: currentName);
-    String? errorText;
+  // Valeurs proposées pour les deux réglages de la file.
+  static const List<int> _kAdvanceDaysValues = [1, 2, 3, 4, 5, 6, 7];
+  static const List<int> _kDeadlineValues = [0, 5, 10, 15, 20, 25, 30, 40, 50, 60];
 
-    final newName = await showModalBottomSheet<String>(
+  // Bouton trigger de la carte file : ouvre le formulaire de la file en
+  // édition (nom + anticipation + délai min), pré-rempli.
+  Future<void> _editQueueSettings(
+    String queueId,
+    Map<String, dynamic> queueData,
+  ) async {
+    var advance = (queueData['maxAdvanceDays'] as num?)?.toInt() ?? 2;
+    var delay = (queueData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
+    if (!_kAdvanceDaysValues.contains(advance)) advance = 2;
+    if (!_kDeadlineValues.contains(delay)) delay = 0;
+    final allowMultiplePerPlage =
+        (queueData['allowMultiplePerPlage'] as bool?) ?? false;
+
+    final result = await _showQueueSettingsSheet(
+      isEdit: true,
+      initialName: queueData['name'] as String? ?? '',
+      initialAdvance: advance,
+      initialDelay: delay,
+      initialAllowMultiplePerPlage: allowMultiplePerPlage,
+    );
+    if (result == null) return;
+
+    try {
+      await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues')
+          .doc(queueId)
+          .update({
+            'name': result.name,
+            'maxAdvanceDays': result.advance,
+            'reservationDeadlineMinutes': result.delay,
+            'allowMultiplePerPlage': result.allowMultiplePerPlage,
+          });
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('File mise à jour')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+    }
+  }
+
+  // Formulaire partagé création / édition d'une file. Ne touche PAS à la base :
+  // renvoie les valeurs saisies (ou null si annulé), l'appelant fait l'écriture.
+  Future<
+    ({String name, int advance, int delay, bool allowMultiplePerPlage})?
+  >
+  _showQueueSettingsSheet({
+    required bool isEdit,
+    String? initialName,
+    int initialAdvance = 2,
+    int initialDelay = 0,
+    bool initialAllowMultiplePerPlage = false,
+  }) async {
+    final nameCtrl = TextEditingController(text: initialName ?? '');
+    int advance = initialAdvance;
+    int delay = initialDelay;
+    bool allowMultiplePerPlage = initialAllowMultiplePerPlage;
+    String? nameError;
+    bool paramsExpanded = isEdit;
+
+    // Résumé court et de largeur stable — sous le titre de la carte, replié
+    // comme déplié. Toujours « $advance j » : aucun saut de hauteur.
+    String windowSentence() {
+      final d = delay == 0 ? 'sans délai' : '$delay min avant le créneau';
+      return 'Jusqu\'à $advance j à l\'avance · $d';
+    }
+
+    final ok = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (sheetCtx) => StatefulBuilder(
-        builder: (ctx, setSheet) => Padding(
-          padding: EdgeInsets.only(
-            bottom:
-                MediaQuery.of(ctx).viewInsets.bottom +
-                MediaQuery.of(ctx).padding.bottom,
-          ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => Padding(
+          // Le clavier pousse toute la feuille vers le haut ; l'inset de la
+          // barre système est géré par le SafeArea du bouton épinglé.
+          padding:
+              EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
           child: Container(
             decoration: const BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
             ),
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Center(
-                  child: Container(
-                    width: 36,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
+                const SizedBox(height: 10),
+                Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-                const SizedBox(height: 20),
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: _kGreen.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(
-                        Icons.edit_rounded,
-                        color: _kGreen,
-                        size: 20,
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    const Expanded(
-                      child: Text(
-                        'Renommer la file',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w700,
-                          color: Color(0xFF1A1C2E),
+                // ── En-tête ────────────────────────────────────────
+                Container(
+                  margin: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: _kGreen,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(7),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(9),
+                        ),
+                        child: const Icon(
+                          Icons.people_alt_rounded,
+                          color: Colors.white,
+                          size: 18,
                         ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          isEdit
+                              ? 'Modifier la file'
+                              : 'Nouvelle file d\'attente',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 15,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: controller,
-                  textCapitalization: TextCapitalization.sentences,
-                  autofocus: true,
-                  onChanged: (_) {
-                    if (errorText != null) {
-                      setSheet(() => errorText = null);
-                    }
-                  },
-                  decoration: InputDecoration(
-                    hintText: 'Nom de la file',
-                    errorText: errorText,
-                    hintStyle: TextStyle(color: Colors.grey.shade400),
-                    prefixIcon: const Icon(
-                      Icons.label_outline_rounded,
-                      color: _kGreen,
-                    ),
-                    filled: true,
-                    fillColor: Colors.grey.shade50,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.grey.shade200),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.grey.shade200),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: _kGreen, width: 1.5),
+                // ── Corps défilable ────────────────────────────────
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Nom
+                        Text(
+                          'NOM DE LA FILE',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.8,
+                            color: Colors.grey.shade500,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: nameCtrl,
+                          textCapitalization: TextCapitalization.sentences,
+                          autofocus: !isEdit,
+                          onChanged: (_) {
+                            if (nameError != null) {
+                              setD(() => nameError = null);
+                            }
+                          },
+                          decoration: InputDecoration(
+                            hintText: 'Ex : Consultation, Caisse principale…',
+                            errorText: nameError,
+                            hintStyle:
+                                TextStyle(color: Colors.grey.shade400),
+                            prefixIcon: const Icon(
+                              Icons.label_outline_rounded,
+                              color: _kGreen,
+                            ),
+                            filled: true,
+                            fillColor: Colors.grey.shade50,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide:
+                                  BorderSide(color: Colors.grey.shade200),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide:
+                                  BorderSide(color: Colors.grey.shade200),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: const BorderSide(
+                                color: _kGreen,
+                                width: 1.5,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+
+                        // Chip d'aide — juste au-dessus de la carte qu'il
+                        // explique.
+                        GestureDetector(
+                          onTap: () {
+                            FocusScope.of(ctx).unfocus();
+                            _showQueueParamsHelp();
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(20),
+                              border:
+                                  Border.all(color: Colors.grey.shade300),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.info_outline,
+                                    size: 15, color: _kGreen),
+                                const SizedBox(width: 6),
+                                Text(
+                                  'Comment ça marche ?',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.grey.shade700,
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                Icon(Icons.arrow_forward_ios_rounded,
+                                    size: 10, color: Colors.grey.shade500),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+
+                        // ── Fenêtre de réservation (repliable) ───────
+                        Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border:
+                                Border.all(color: Colors.grey.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              InkWell(
+                                borderRadius: BorderRadius.circular(16),
+                                onTap: () {
+                                  FocusScope.of(ctx).unfocus();
+                                  setD(() =>
+                                      paramsExpanded = !paramsExpanded);
+                                },
+                                child: Padding(
+                                  padding: const EdgeInsets.all(14),
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      const Icon(
+                                          Icons.event_available_rounded,
+                                          size: 16,
+                                          color: _kGreen),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            const Text(
+                                              'Fenêtre de réservation',
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 13,
+                                                color: Color(0xFF1A1C2E),
+                                              ),
+                                            ),
+                                            const SizedBox(height: 3),
+                                            Text(
+                                              windowSentence(),
+                                              style: TextStyle(
+                                                fontSize: 11.5,
+                                                height: 1.35,
+                                                color: Colors.grey.shade600,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            paramsExpanded
+                                                ? 'Réduire'
+                                                : 'Modifier',
+                                            style: const TextStyle(
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w600,
+                                              color: _kGreen,
+                                            ),
+                                          ),
+                                          Icon(
+                                            paramsExpanded
+                                                ? Icons.expand_less_rounded
+                                                : Icons.expand_more_rounded,
+                                            size: 18,
+                                            color: _kGreen,
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              if (paramsExpanded) ...[
+                                Divider(
+                                    height: 1,
+                                    color: Colors.grey.shade200),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                      14, 6, 14, 12),
+                                  child: Column(
+                                    children: [
+                                      _windowStepperRow(
+                                        label: 'Réservation à l\'avance',
+                                        values: _kAdvanceDaysValues,
+                                        value: advance,
+                                        recommended: 2,
+                                        format: (v) =>
+                                            v == 1 ? '1 jour' : '$v jours',
+                                        onChanged: (v) =>
+                                            setD(() => advance = v),
+                                      ),
+                                      Divider(
+                                          height: 1,
+                                          color: Colors.grey.shade200),
+                                      _windowStepperRow(
+                                        label: 'Délai avant le créneau',
+                                        values: _kDeadlineValues,
+                                        value: delay,
+                                        recommended: 0,
+                                        format: (v) =>
+                                            v == 0 ? 'Aucun' : '$v min',
+                                        onChanged: (v) =>
+                                            setD(() => delay = v),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+
+                        // ── Plusieurs réservations par jour ──────────
+                        Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border:
+                                Border.all(color: Colors.grey.shade200),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.event_repeat_rounded,
+                                  size: 16, color: _kGreen),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    const Text(
+                                      'Plusieurs réservations par jour',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 13,
+                                        color: Color(0xFF1A1C2E),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      'Un client peut réserver une fois '
+                                      'par plage (ex. déjeuner + dîner) au '
+                                      'lieu d\'une seule fois pour toute '
+                                      'la file.',
+                                      style: TextStyle(
+                                        fontSize: 11.5,
+                                        height: 1.35,
+                                        color: Colors.grey.shade600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Switch(
+                                value: allowMultiplePerPlage,
+                                activeThumbColor: _kGreen,
+                                onChanged: (v) =>
+                                    setD(() => allowMultiplePerPlage = v),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: ElevatedButton(
-                    onPressed: () {
-                      final value = controller.text.trim();
-                      if (value.isEmpty) {
-                        setSheet(() => errorText = 'Veuillez entrer un nom');
-                        return;
-                      }
-                      Navigator.pop(ctx, value);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _kGreen,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                    ),
-                    child: const Text(
-                      'Enregistrer',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 15,
+                // ── Bouton épinglé ────────────────────────────────
+                Container(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    border: Border(
+                        top: BorderSide(color: Colors.grey.shade200)),
+                  ),
+                  child: SafeArea(
+                    top: false,
+                    child: SizedBox(
+                      width: double.infinity,
+                      height: 52,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          if (nameCtrl.text.trim().isEmpty) {
+                            setD(() =>
+                                nameError = 'Veuillez entrer un nom');
+                            return;
+                          }
+                          Navigator.pop(ctx, true);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _kGreen,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        child: Text(
+                          isEdit ? 'Modifier la file' : 'Créer la file',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 15,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -537,27 +874,282 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
 
-    if (newName == null || newName.isEmpty || newName == currentName) {
-      return;
+    if (ok != true) return null;
+    final name = nameCtrl.text.trim();
+    if (name.isEmpty) return null;
+    return (
+      name: name,
+      advance: advance,
+      delay: delay,
+      allowMultiplePerPlage: allowMultiplePerPlage,
+    );
+  }
+
+  // Une ligne « libellé + stepper [− valeur +] » de la fenêtre de réservation,
+  // avec un rappel de la valeur conseillée (tap = y revenir). Le stepper
+  // avance dans [values] par index, donc les paliers non linéaires du délai
+  // (…30, 40, 50, 60) sont gérés.
+  Widget _windowStepperRow({
+    required String label,
+    required List<int> values,
+    required int value,
+    required int recommended,
+    required String Function(int) format,
+    required ValueChanged<int> onChanged,
+  }) {
+    final i = values.indexOf(value);
+    final canDown = i > 0;
+    final canUp = i >= 0 && i < values.length - 1;
+    final atRecommended = value == recommended;
+
+    Widget stepBtn(IconData icon, bool enabled, VoidCallback onTap) {
+      return GestureDetector(
+        onTap: enabled ? onTap : null,
+        child: Container(
+          width: 34,
+          height: 34,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: enabled ? _kGreen.withValues(alpha: 0.10) : Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Icon(
+            icon,
+            size: 18,
+            color: enabled ? _kGreen : Colors.grey.shade300,
+          ),
+        ),
+      );
     }
 
-    try {
-      await _firestore
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queueId)
-          .update({'name': newName});
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('File renommée')));
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
-    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1A1C2E),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                GestureDetector(
+                  onTap: atRecommended ? null : () => onChanged(recommended),
+                  child: Text(
+                    atRecommended
+                        ? '★ conseillé'
+                        : 'conseillé : ${format(recommended)}',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w600,
+                      color: atRecommended ? _kGreen : Colors.grey.shade500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          stepBtn(Icons.remove_rounded, canDown,
+              () => onChanged(values[i - 1])),
+          Container(
+            width: 74,
+            alignment: Alignment.center,
+            child: Text(
+              format(value),
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+                color: _kGreen,
+              ),
+            ),
+          ),
+          stepBtn(Icons.add_rounded, canUp, () => onChanged(values[i + 1])),
+        ],
+      ),
+    );
+  }
+
+  // Dialogue d'aide pour la fenêtre de réservation (Anticipation + Délai).
+  void _showQueueParamsHelp() {
+    Widget card(IconData icon, String title, String desc, String example) =>
+        Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.grey.shade100),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(9),
+                decoration: BoxDecoration(
+                  color: _kGreen.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, size: 18, color: _kGreen),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                        color: Color(0xFF1A1C2E),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      desc,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey.shade600,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: _kGreen.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        example,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: _kGreen,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
+        clipBehavior: Clip.hardEdge,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.fromLTRB(20, 20, 16, 20),
+              color: _kGreen,
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.lightbulb_rounded,
+                        color: Colors.white, size: 20),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      'Fenêtre de réservation',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: () => Navigator.pop(ctx),
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.2),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.close,
+                          size: 16, color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
+                child: Column(
+                  children: [
+                    card(
+                      Icons.event_available_rounded,
+                      'Anticipation maximale',
+                      'Jusqu\'à combien de jours à l\'avance un client peut '
+                          'réserver. Au-delà, les créneaux ne sont pas '
+                          'encore ouverts.',
+                      '2 j → on réserve aujourd\'hui pour après-demain au plus loin',
+                    ),
+                    card(
+                      Icons.timelapse_rounded,
+                      'Délai avant le créneau',
+                      'Le temps minimum entre la réservation et le début du '
+                          'créneau. Laissez « Aucun » si vous prenez les '
+                          'clients de dernière minute ; augmentez-le s\'il '
+                          'vous faut un temps de préparation.',
+                      'Aucun → un client peut réserver jusqu\'au début du créneau',
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 16),
+              child: SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _kGreen,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Text(
+                    'Compris !',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _actionTile({
@@ -1008,12 +1600,6 @@ class _SettingsPageState extends State<SettingsPage> {
         });
   }
 
-  String _formatWeekdays(List<int> weekdays) {
-    final labels = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'];
-    if (weekdays.length == 7) return 'Tous les jours';
-    return weekdays.map((i) => labels[i - 1]).join(', ');
-  }
-
   int _countSlots(String start, String end, int duration) {
     try {
       final sp = start.split(':');
@@ -1042,242 +1628,23 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
 
-    final nameCtrl = TextEditingController();
-    List<int> selectedWeekdays = [1, 2, 3, 4, 5];
-    String? nameError;
-
-    final result = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setD) {
-          const dayLabels = ['L', 'M', 'M', 'J', 'V', 'S', 'D'];
-          return Padding(
-            padding: EdgeInsets.only(
-              bottom:
-                  MediaQuery.of(ctx).viewInsets.bottom +
-                  MediaQuery.of(ctx).padding.bottom,
-            ),
-            child: Container(
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(height: 12),
-                  Container(
-                    width: 36,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                  Container(
-                    margin: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: _kGreen,
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.2),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Icon(
-                            Icons.people_alt_rounded,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        const Expanded(
-                          child: Text(
-                            'Nom de la file d\'attente',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 16,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Flexible(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          TextField(
-                            controller: nameCtrl,
-                            textCapitalization: TextCapitalization.sentences,
-                            autofocus: true,
-                            onChanged: (_) {
-                              if (nameError != null) {
-                                setD(() => nameError = null);
-                              }
-                            },
-                            decoration: InputDecoration(
-                              hintText: 'Ex : Consultation, Caisse principale…',
-                              errorText: nameError,
-                              hintStyle: TextStyle(color: Colors.grey.shade400),
-                              prefixIcon: Icon(
-                                Icons.label_outline_rounded,
-                                color: _kGreen,
-                              ),
-                              filled: true,
-                              fillColor: Colors.grey.shade50,
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(
-                                  color: Colors.grey.shade200,
-                                ),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(
-                                  color: Colors.grey.shade200,
-                                ),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(
-                                  color: _kGreen,
-                                  width: 1.5,
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                          const Text(
-                            'Jours d\'ouverture',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                              color: Color(0xFF1A1C2E),
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: List.generate(7, (index) {
-                              final day = index + 1;
-                              final selected = selectedWeekdays.contains(day);
-                              return GestureDetector(
-                                onTap: () => setD(() {
-                                  if (selected) {
-                                    selectedWeekdays.remove(day);
-                                  } else {
-                                    selectedWeekdays.add(day);
-                                  }
-                                  selectedWeekdays.sort();
-                                }),
-                                child: AnimatedContainer(
-                                  duration: const Duration(milliseconds: 180),
-                                  width: 40,
-                                  height: 40,
-                                  decoration: BoxDecoration(
-                                    color: selected
-                                        ? _kGreen
-                                        : Colors.grey.shade100,
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(
-                                      color: selected
-                                          ? _kGreen
-                                          : Colors.grey.shade200,
-                                    ),
-                                  ),
-                                  alignment: Alignment.center,
-                                  child: Text(
-                                    dayLabels[index],
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w700,
-                                      color: selected
-                                          ? Colors.white
-                                          : Colors.grey.shade500,
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }),
-                          ),
-                          const SizedBox(height: 24),
-                          SizedBox(
-                            width: double.infinity,
-                            height: 52,
-                            child: ElevatedButton(
-                              onPressed: () {
-                                if (nameCtrl.text.trim().isEmpty) {
-                                  setD(
-                                    () => nameError = 'Veuillez entrer un nom',
-                                  );
-                                  return;
-                                }
-                                if (selectedWeekdays.isEmpty) {
-                                  ScaffoldMessenger.of(ctx).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'Sélectionnez au moins un jour',
-                                      ),
-                                    ),
-                                  );
-                                  return;
-                                }
-                                Navigator.pop(ctx, true);
-                              },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: _kGreen,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                                elevation: 0,
-                              ),
-                              child: const Text(
-                                'Créer la file',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 15,
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-    if (result != true) {
+    final created = await _showQueueSettingsSheet(isEdit: false);
+    if (created == null) {
       if (mounted) setState(() => _isCreatingQueue = false);
       return;
     }
+    final queueName = created.name;
     try {
       final docRef = await _firestore
           .collection('companies')
           .doc(_companyId)
           .collection('queues')
           .add({
-            'name': nameCtrl.text.trim(),
-            'weekdays': selectedWeekdays,
+            'name': queueName,
+            'weekdays': const [1, 2, 3, 4, 5],
+            'maxAdvanceDays': created.advance,
+            'reservationDeadlineMinutes': created.delay,
+            'allowMultiplePerPlage': created.allowMultiplePerPlage,
             'createdAt': FieldValue.serverTimestamp(),
           });
       if (!mounted) return;
@@ -1289,7 +1656,7 @@ class _SettingsPageState extends State<SettingsPage> {
           context,
           title: 'File d\'attente créée !',
           body:
-              'Super ! Votre file "${nameCtrl.text.trim()}" est prête.\n\nAppuyez sur la file pour configurer vos plages horaires.',
+              'Super ! Votre file "$queueName" est prête.\n\nAppuyez sur la file pour configurer vos plages horaires.',
         );
         // Step 4 : l'utilisateur doit taper la carte de file pour continuer.
         // La navigation vers QueueTimeSlotsPage se fait via le tap de la carte.
@@ -1305,7 +1672,7 @@ class _SettingsPageState extends State<SettingsPage> {
             builder: (_) => QueueTimeSlotsPage(
               companyId: _companyId!,
               queueId: docRef.id,
-              queueName: nameCtrl.text.trim(),
+              queueName: queueName,
             ),
           ),
         );
@@ -1326,7 +1693,7 @@ class _SettingsPageState extends State<SettingsPage> {
 // ============================================================
 class _AnimatedQueueCard extends StatefulWidget {
   final String name;
-  final String weekdays;
+  final String subtitle;
   final bool open; // false = fermée aux nouvelles réservations maintenant
   final DateTime? closurePlannedFor; // fermeture planifiée, pas encore active
   final Stream<int> capacityStream;
@@ -1336,7 +1703,7 @@ class _AnimatedQueueCard extends StatefulWidget {
 
   const _AnimatedQueueCard({
     required this.name,
-    required this.weekdays,
+    required this.subtitle,
     required this.open,
     this.closurePlannedFor,
     required this.capacityStream,
@@ -1469,7 +1836,7 @@ class _AnimatedQueueCardState extends State<_AnimatedQueueCard> {
                                       ),
                                       const SizedBox(height: 5),
                                       Text(
-                                        widget.weekdays,
+                                        widget.subtitle,
                                         style: TextStyle(
                                           fontSize: 12,
                                           color: Colors.grey.shade500,

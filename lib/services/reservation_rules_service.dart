@@ -10,13 +10,20 @@ class RuleCheckResult {
   final RuleViolation? violation;
   final DocumentSnapshot? conflictingReservation;
 
-  const RuleCheckResult.allowed()
+  /// Autres réservations actives du client dans CETTE file (plages
+  /// différentes) — renseigné uniquement quand la résa est autorisée grâce
+  /// au réglage « plusieurs réservations par jour » de la file, pour que
+  /// l'écran de confirmation puisse prévenir le client. Vide sinon.
+  final List<QueryDocumentSnapshot> otherActiveInQueue;
+
+  const RuleCheckResult.allowed({this.otherActiveInQueue = const []})
     : canReserve = true,
       violation = null,
       conflictingReservation = null;
 
   const RuleCheckResult.blocked(this.violation, {this.conflictingReservation})
-    : canReserve = false;
+    : canReserve = false,
+      otherActiveInQueue = const [];
 }
 
 /// Types de violations possibles
@@ -110,6 +117,34 @@ class ReservationRulesService {
     }).toList();
   }
 
+  // ── Plages couvertes par des résa actives (pour le retour auto) ──
+
+  /// Nombre de plages DISTINCTES de [queueId] (chez [companyId]) où le
+  /// client connecté a actuellement une réservation active. Utilisé après
+  /// une réservation/un remplacement pour savoir si, sur une file où le
+  /// réglage « plusieurs réservations par jour » est activé, le client a
+  /// désormais couvert toutes les plages — auquel cas on le ramène à
+  /// l'écran précédent, sinon on le laisse réserver les plages restantes.
+  Future<int> countDistinctActivePlages({
+    required String companyId,
+    required String queueId,
+  }) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return 0;
+
+    final active = await _getUserActiveReservations(user.uid);
+    final plages = <String>{};
+    for (final doc in active) {
+      final data = doc.data() as Map<String, dynamic>;
+      if (data['companyId'] != companyId || data['queueId'] != queueId) {
+        continue;
+      }
+      final tsId = data['timeSlotId'] as String?;
+      if (tsId != null) plages.add(tsId);
+    }
+    return plages.length;
+  }
+
   // ── VÉRIFICATION PRINCIPALE ───────────────────────────────────
 
   Future<RuleCheckResult> checkCanReserve({
@@ -119,6 +154,9 @@ class ReservationRulesService {
     required DateTime slotStart,
     required DateTime slotEnd,
     int maxAdvanceDays = 365,
+    // Réglage de la file : quand true, un client peut avoir une résa active
+    // par plage (timeSlotId) au lieu d'une seule pour toute la file.
+    bool allowMultiplePerPlage = false,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return const RuleCheckResult.allowed();
@@ -173,28 +211,13 @@ class ReservationRulesService {
       }
     }
 
-    // ── Règle 3 : même file ───────────────────────────────────
-    final sameQueue = sameCompany
-        .where((d) => (d.data() as Map)['queueId'] == queueId)
-        .toList();
-
-    if (sameQueue.isNotEmpty) {
-      final res = sameQueue.first;
-      final data = res.data() as Map<String, dynamic>;
-
-      if (!_isExpired(data)) {
-        return RuleCheckResult.blocked(
-          RuleViolation.activeInSameQueue,
-          conflictingReservation: res,
-        );
-      }
-      return RuleCheckResult.blocked(
-        RuleViolation.cooldownNotElapsed,
-        conflictingReservation: res,
-      );
-    }
-
     // ── Règle 4 : même entreprise, files différentes ──────────
+    // Vérifiée AVANT la règle 3 : sinon, un conflit « même file » (qui
+    // propose un remplacement) court-circuitait la fonction et empêchait
+    // de jamais détecter qu'un remplacement pouvait entrer en collision
+    // avec une résa active dans une AUTRE file de la même entreprise (bug
+    // constaté : deux résa au même horaire dans deux files différentes,
+    // obtenues via un remplacement).
     // Le client peut réserver dans plusieurs files de l'entreprise, du
     // moment que les créneaux ne se chevauchent pas (+ 5 min d'écart).
     // Le nombre total est déjà plafonné par la règle 1
@@ -226,7 +249,46 @@ class ReservationRulesService {
       }
     }
 
-    return const RuleCheckResult.allowed();
+    // ── Règle 3 : même file ───────────────────────────────────
+    final sameQueue = sameCompany
+        .where((d) => (d.data() as Map)['queueId'] == queueId)
+        .toList();
+
+    if (sameQueue.isNotEmpty) {
+      // Sans le réglage « plusieurs réservations par jour » de la file :
+      // une seule résa active pour toute la file, peu importe la plage —
+      // comportement historique. Avec le réglage : une résa par plage,
+      // donc le conflit ne porte que sur LA MÊME plage (même timeSlotId).
+      final blocking = allowMultiplePerPlage
+          ? sameQueue
+                .where((d) => (d.data() as Map)['timeSlotId'] == timeSlotId)
+                .toList()
+          : sameQueue;
+
+      if (blocking.isNotEmpty) {
+        final res = blocking.first;
+        final data = res.data() as Map<String, dynamic>;
+
+        if (!_isExpired(data)) {
+          return RuleCheckResult.blocked(
+            RuleViolation.activeInSameQueue,
+            conflictingReservation: res,
+          );
+        }
+        return RuleCheckResult.blocked(
+          RuleViolation.cooldownNotElapsed,
+          conflictingReservation: res,
+        );
+      }
+      // Réglage activé, plage différente : autorisé, mais on remonte les
+      // autres résa actives de cette file pour que l'écran de confirmation
+      // prévienne le client (il ne le devine pas tout seul).
+    }
+
+    // `sameQueue` n'arrive ici non vide que si le réglage est activé et
+    // qu'aucune de ces résa n'est sur la même plage (sinon on aurait déjà
+    // renvoyé un blocage plus haut) — donc toujours sûr à remonter tel quel.
+    return RuleCheckResult.allowed(otherActiveInQueue: sameQueue);
   }
 
   // ── MESSAGE UI ────────────────────────────────────────────────
@@ -310,12 +372,14 @@ class ReservationRulesService {
         .doc(dateStr);
 
     final userRef = _fs.collection('users').doc(user.uid);
+    final timeSlotRef = queueRef.collection('timeSlots').doc(timeSlotId);
 
     await _fs.runTransaction((tx) async {
       // Reads d'abord (obligation Firestore)
       final freshSlot = await tx.get(slotRef);
       final freshUser = await tx.get(userRef);
       final freshQueue = await tx.get(queueRef);
+      final freshTimeSlot = await tx.get(timeSlotRef);
 
       if (!freshSlot.exists) throw Exception('Créneau introuvable');
 
@@ -332,6 +396,14 @@ class ReservationRulesService {
         );
       }
 
+      // Plage en cours de suppression programmée : plus aucune nouvelle
+      // réservation, y compris sur un créneau déjà partiellement rempli.
+      if (freshTimeSlot.data()?['deleteAfter'] != null) {
+        throw Exception(
+          'Cette plage horaire n\'accepte plus de nouvelles réservations.',
+        );
+      }
+
       final freshData = freshSlot.data()!;
       final capacity = (freshData['capacity'] ?? 1) as int;
       final reserved = (freshData['reserved'] ?? 0) as int;
@@ -344,6 +416,31 @@ class ReservationRulesService {
       if (reserved >= capacity) throw Exception('Ce créneau est complet');
       if (start.difference(DateTime.now().toUtc()).inMinutes < 1) {
         throw Exception('Ce créneau a déjà commencé');
+      }
+
+      // Filet serveur : l'anticipation max et le délai min de la file ne sont
+      // que des filtres d'affichage côté client. On les fait respecter ici
+      // aussi, pour qu'une liste périmée / une course / un client modifié ne
+      // puisse pas réserver hors de la fenêtre voulue. Ne touche ni la
+      // génération des créneaux ni ce que voit l'entreprise.
+      final maxAdvanceDays = (qd?['maxAdvanceDays'] as num?)?.toInt();
+      if (maxAdvanceDays != null) {
+        // Même borne que le pré-check (Règle 0b) : autorisé jusqu'à la fin
+        // du jour « aujourd'hui + maxAdvanceDays ».
+        final n = DateTime.now();
+        final lastDay = DateTime(n.year, n.month, n.day)
+            .add(Duration(days: maxAdvanceDays + 1));
+        if (start.toLocal().isAfter(lastDay)) {
+          throw Exception(
+            'Ce créneau est trop loin dans le temps pour être réservé.',
+          );
+        }
+      }
+      final deadlineMin =
+          (freshData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
+      if (deadlineMin > 0 &&
+          start.difference(DateTime.now().toUtc()).inMinutes < deadlineMin) {
+        throw Exception('Il est trop tard pour réserver ce créneau.');
       }
 
       // Double vérification atomique du quota journalier
@@ -415,6 +512,14 @@ class ReservationRulesService {
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) throw Exception('Utilisateur non connecté');
+
+    // Filet de sécurité : remplacer un créneau par lui-même n'a aucun sens
+    // (annulerait puis recréerait la même réservation à l'identique).
+    if (oldCompanyId == newCompanyId &&
+        oldQueueId == newQueueId &&
+        oldSlotDocId == newSlotDocId) {
+      throw Exception('Vous avez déjà réservé ce créneau.');
+    }
 
     final oldResRef = _fs
         .collection('companies')
@@ -488,6 +593,19 @@ class ReservationRulesService {
         );
       }
 
+      // Plage en cours de suppression programmée : plus de réservation.
+      final newTsId = freshNewSlot.data()?['timeSlotId'] as String?;
+      if (newTsId != null && newTsId.isNotEmpty) {
+        final freshNewTs = await tx.get(
+          newQueueRef.collection('timeSlots').doc(newTsId),
+        );
+        if (freshNewTs.data()?['deleteAfter'] != null) {
+          throw Exception(
+            'Cette plage horaire n\'accepte plus de nouvelles réservations.',
+          );
+        }
+      }
+
       final newData = freshNewSlot.data()!;
       final capacity = (newData['capacity'] ?? 1) as int;
       final reserved = (newData['reserved'] ?? 0) as int;
@@ -497,6 +615,30 @@ class ReservationRulesService {
       }
       if (reserved >= capacity) {
         throw Exception('Ce créneau est maintenant complet');
+      }
+
+      // Filet serveur — mêmes garde-fous que reserveSlot : l'anticipation max
+      // et le délai min de la file sont aussi vérifiés ici (ce ne sont que des
+      // filtres d'affichage côté client), pour qu'un remplacement ne vise pas
+      // un créneau hors de la fenêtre voulue.
+      final newStart = (newData['start'] as Timestamp).toDate();
+      final maxAdvanceDays = (nq?['maxAdvanceDays'] as num?)?.toInt();
+      if (maxAdvanceDays != null) {
+        final n = DateTime.now();
+        final lastDay = DateTime(n.year, n.month, n.day)
+            .add(Duration(days: maxAdvanceDays + 1));
+        if (newStart.toLocal().isAfter(lastDay)) {
+          throw Exception(
+            'Ce créneau est trop loin dans le temps pour être réservé.',
+          );
+        }
+      }
+      final deadlineMin =
+          (newData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
+      if (deadlineMin > 0 &&
+          newStart.toUtc().difference(DateTime.now().toUtc()).inMinutes <
+              deadlineMin) {
+        throw Exception('Il est trop tard pour réserver ce créneau.');
       }
 
       final customerName = _fullName(freshUser.data() ?? {});

@@ -2,15 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
-import 'package:baxa/services/notifications/notification_service.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
-/// Écran de chargement Flutter affiché juste après le splash natif.
-/// Logo animé + "Chargement..." (points qui s'enchaînent) tant que
-/// l'initialisation (dates, notifications, timezone) n'est pas terminée,
-/// puis transition fade vers ChoosePage.
+/// Écran de chargement Flutter affiché dès la 1ère frame (le splash natif se
+/// retire à ce moment-là, voir main). Logo animé + "Chargement..." tant que
+/// l'init strictement nécessaire (formats de date, fuseau horaire) n'est pas
+/// terminée, puis bascule immédiate vers ChoosePage.
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -26,7 +25,6 @@ class _SplashScreenState extends State<SplashScreen>
 
   Timer? _dotsTimer;
   int _dotsCount = 0;
-  bool _exiting = false;
 
   @override
   void initState() {
@@ -37,8 +35,10 @@ class _SplashScreenState extends State<SplashScreen>
       duration: const Duration(milliseconds: 700),
     );
     _logoOpacity = CurvedAnimation(parent: _logoCtrl, curve: Curves.easeOut);
-    _logoSlide = Tween<Offset>(begin: const Offset(0, 0.08), end: Offset.zero)
-        .animate(CurvedAnimation(parent: _logoCtrl, curve: Curves.easeOut));
+    _logoSlide = Tween<Offset>(
+      begin: const Offset(0, 0.08),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _logoCtrl, curve: Curves.easeOut));
     _logoCtrl.forward();
 
     // ── Points qui s'enchaînent : "Chargement" → "." → ".." → "..." ────────
@@ -51,17 +51,16 @@ class _SplashScreenState extends State<SplashScreen>
   }
 
   Future<void> _loadApp() async {
-    // ── Chaque tâche est isolée : un échec (ex. notifications) ne doit
-    //    jamais bloquer indéfiniment l'écran de chargement ────────────────
+    // ── Init strictement nécessaire au premier écran : formats de date FR et
+    //    fuseau horaire. Les notifications sont initialisées après la 1ère
+    //    frame (voir main._initDeferredServices). Chaque tâche est isolée :
+    //    un échec ne bloque jamais le démarrage. ─────────────────────────────
     await Future.wait([
       _safe(() => initializeDateFormatting('fr_FR', null)),
-      _safe(() => NotificationService().init()),
       _safe(_initTimezone),
     ]);
 
     if (!mounted) return;
-    setState(() => _exiting = true);
-    await Future.delayed(const Duration(milliseconds: 350));
     _navigateToApp();
   }
 
@@ -83,7 +82,7 @@ class _SplashScreenState extends State<SplashScreen>
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
         pageBuilder: (_, __, ___) => const ChoosePage(),
-        transitionDuration: Duration.zero, // fade déjà fait par le splash
+        transitionDuration: Duration.zero, // bascule sèche, ChoosePage s'anime
         barrierColor: Colors.transparent,
       ),
     );
@@ -105,75 +104,70 @@ class _SplashScreenState extends State<SplashScreen>
     final dots = '.' * _dotsCount;
 
     return Scaffold(
-      body: AnimatedOpacity(
-        opacity: _exiting ? 0.0 : 1.0,
-        duration: const Duration(milliseconds: 350),
-        curve: Curves.easeIn,
-        child: Container(
-          width: double.infinity,
-          height: double.infinity,
-          // ── Fond blanc avec dégradé doux ───────────────────────────
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                Color(0xFFFFFFFF), // blanc pur
-                Color(0xFFF2FAF5), // blanc légèrement teinté vert
-                Color(0xFFE6F4EC), // vert très très doux
-              ],
-              stops: [0.0, 0.55, 1.0],
-            ),
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        // ── Fond blanc avec dégradé doux ───────────────────────────
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0xFFFFFFFF), // blanc pur
+              Color(0xFFF2FAF5), // blanc légèrement teinté vert
+              Color(0xFFE6F4EC), // vert très très doux
+            ],
+            stops: [0.0, 0.55, 1.0],
           ),
-          child: Center(
-            child: FadeTransition(
-              opacity: _logoOpacity,
-              child: SlideTransition(
-                position: _logoSlide,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    ShaderMask(
-                      // ── Dégradé vert sur le texte Baxa ─────────────────
-                      shaderCallback: (bounds) => const LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          Color(0xFF00C853), // vert vif
-                          Color(0xFF00BFA5), // vert-turquoise
-                          Color(0xFF1DE9B6), // vert clair lumineux
-                        ],
-                        stops: [0.0, 0.5, 1.0],
-                      ).createShader(bounds),
-                      blendMode: BlendMode.srcIn,
-                      child: Text(
-                        'Baxa',
-                        style: TextStyle(
-                          fontSize: fontSize,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -2,
-                          height: 1.0,
-                          // Couleur ignorée — ShaderMask applique le dégradé
-                          color: Colors.white,
-                        ),
+        ),
+        child: Center(
+          child: FadeTransition(
+            opacity: _logoOpacity,
+            child: SlideTransition(
+              position: _logoSlide,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ShaderMask(
+                    // ── Dégradé vert sur le texte Baxa ─────────────────
+                    shaderCallback: (bounds) => const LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        Color(0xFF00C853), // vert vif
+                        Color(0xFF00BFA5), // vert-turquoise
+                        Color(0xFF1DE9B6), // vert clair lumineux
+                      ],
+                      stops: [0.0, 0.5, 1.0],
+                    ).createShader(bounds),
+                    blendMode: BlendMode.srcIn,
+                    child: Text(
+                      'Baxa',
+                      style: TextStyle(
+                        fontSize: fontSize,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -2,
+                        height: 1.0,
+                        // Couleur ignorée — ShaderMask applique le dégradé
+                        color: Colors.white,
                       ),
                     ),
-                    const SizedBox(height: 20),
-                    SizedBox(
-                      width: 130,
-                      child: Text(
-                        'Chargement$dots',
-                        textAlign: TextAlign.left,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
-                          color: Colors.black54,
-                          letterSpacing: 0.5,
-                        ),
+                  ),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: 130,
+                    child: Text(
+                      'Chargement$dots',
+                      textAlign: TextAlign.left,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black54,
+                        letterSpacing: 0.5,
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           ),

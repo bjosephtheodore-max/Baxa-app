@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:baxa/page%20b-acceuil/customer/companyqueue_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/slots_page.dart';
+import 'package:baxa/services/favorites_service.dart';
 import 'package:baxa/services/geo_address_service.dart';
 import 'package:baxa/services/locale_service.dart';
 import 'package:baxa/services/location_service.dart';
@@ -440,14 +441,15 @@ class _SearchPageState extends State<SearchPage> {
           '🔎[NAV] push SlotsPage "$nom" @ '
           '+${DateTime.now().difference(tapAt).inMilliseconds}ms',
         );
+        SlotsPage.prefetch(companyId, queueDoc.id);
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => SlotsPage(
-              entrepriseId: companyId,
-              entrepriseNom: nom,
+            builder: (_) => SlotsPage.fromQueueData(
+              companyId: companyId,
               queueId: queueDoc.id,
-              queueName: queueData['name'] as String? ?? 'File',
+              queueData: queueData,
+              entrepriseNom: nom,
               primaryGreen: _green,
               lightGreen: _greenMid,
               onReservationSuccess: () {},
@@ -539,12 +541,11 @@ class _SearchPageState extends State<SearchPage> {
           );
         }
       } else {
-        await ref.set({
-          'nom': nom,
-          'type': type ?? '',
-          'companyId': companyId,
-          'addedAt': FieldValue.serverTimestamp(),
-        });
+        await FavoritesService.addFavorite(
+          companyId: companyId,
+          nom: nom,
+          type: type,
+        );
         setState(() => _favoriteIds.add(companyId));
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(

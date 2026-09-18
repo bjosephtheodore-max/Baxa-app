@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 import 'package:baxa/widgets/qr_code_section.dart';
 import 'package:baxa/widgets/account_status_card.dart';
 
@@ -64,10 +66,21 @@ class _StaffSettingsPageState extends State<StaffSettingsPage> {
     return Scaffold(
       backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
-        title: const Text('Paramètres'),
         backgroundColor: Colors.white,
-        foregroundColor: Colors.black87,
         elevation: 0,
+        automaticallyImplyLeading: false,
+        title: Text(
+          'Paramètres',
+          style: GoogleFonts.poppins(
+            color: const Color(0xFF1A1C2E),
+            fontWeight: FontWeight.w700,
+            fontSize: 20,
+          ),
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(color: Colors.grey.shade100, height: 1),
+        ),
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
@@ -192,6 +205,11 @@ class _StaffSettingsPageState extends State<StaffSettingsPage> {
     );
     if (confirm != true) return;
     await FirebaseAuth.instance.signOut();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const ChoosePage()),
+      (route) => false,
+    );
   }
 
   // ── Blocs visuels (miroir de company_settings_page) ──────────────

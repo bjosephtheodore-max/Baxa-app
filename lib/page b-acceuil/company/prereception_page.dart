@@ -2,6 +2,7 @@ import 'package:baxa/page%20b-acceuil/company/signin_page.dart';
 import 'package:baxa/services/locale_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:lottie/lottie.dart';
 
 class PrereceptionPage extends StatefulWidget {
   const PrereceptionPage({super.key});
@@ -10,9 +11,7 @@ class PrereceptionPage extends StatefulWidget {
   State<PrereceptionPage> createState() => _PrereceptionPageState();
 }
 
-class _PrereceptionPageState extends State<PrereceptionPage>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _bubblesController;
+class _PrereceptionPageState extends State<PrereceptionPage> {
   static const Color _green = Color(0xFF4B8B5E);
   static const Color _greenLight = Color(0xFFE8F5ED);
   static const Color _greenMid = Color(0xFFB2D3C2);
@@ -42,17 +41,7 @@ class _PrereceptionPageState extends State<PrereceptionPage>
   ];
 
   @override
-  void initState() {
-    super.initState();
-    _bubblesController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 6),
-    )..repeat();
-  }
-
-  @override
   void dispose() {
-    _bubblesController.dispose();
     _nomEntrepriseController.dispose();
     _autreTypeController.dispose();
     _villeLibreController.dispose();
@@ -291,17 +280,7 @@ class _PrereceptionPageState extends State<PrereceptionPage>
       body: Container(
         color: Colors.white,
         child: SafeArea(
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: AnimatedBuilder(
-                animation: _bubblesController,
-                builder: (_, __) => CustomPaint(
-                  painter: _BubblesPainter(_bubblesController.value),
-                ),
-              ),
-            ),
-            SingleChildScrollView(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 24),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 480),
@@ -309,17 +288,13 @@ class _PrereceptionPageState extends State<PrereceptionPage>
               children: [
                 const SizedBox(height: 0),
 
-                // Icône structure
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: const BoxDecoration(
-                    color: _greenLight,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.account_balance_outlined,
-                    size: 52,
-                    color: _green,
+                // Animation d'accueil
+                SizedBox(
+                  height: 140,
+                  child: Lottie.asset(
+                    'assets/animations/Handshake Loop.json',
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
                   ),
                 ),
 
@@ -536,47 +511,8 @@ class _PrereceptionPageState extends State<PrereceptionPage>
             ),
           ),
         ),  // SingleChildScrollView
-          ],  // Stack children
-        ),  // Stack
       ),
     ),
     );
   }
-}
-
-class _BubblesPainter extends CustomPainter {
-  final double t;
-  _BubblesPainter(this.t);
-
-  static const _color = Color(0xFF4B8B5E);
-
-  static const _bubbles = [
-    (0.10, 0.85, 22.0, 0.06, 1.0),
-    (0.25, 0.55, 12.0, 0.05, 0.65),
-    (0.42, 0.70, 30.0, 0.04, 0.80),
-    (0.60, 0.40, 16.0, 0.06, 1.15),
-    (0.75, 0.80, 10.0, 0.07, 0.50),
-    (0.88, 0.60, 24.0, 0.05, 0.90),
-    (0.33, 0.20, 14.0, 0.05, 0.70),
-    (0.55, 0.90, 8.0,  0.07, 1.10),
-    (0.70, 0.30, 18.0, 0.04, 0.60),
-    (0.90, 0.15, 10.0, 0.06, 1.00),
-  ];
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()..style = PaintingStyle.fill;
-    for (final b in _bubbles) {
-      final yNorm = ((b.$2 - t * b.$5 * 0.30) % 1.0 + 1.0) % 1.0;
-      paint.color = _color.withValues(alpha: b.$4);
-      canvas.drawCircle(
-        Offset(b.$1 * size.width, yNorm * size.height),
-        b.$3,
-        paint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(_BubblesPainter old) => old.t != t;
 }

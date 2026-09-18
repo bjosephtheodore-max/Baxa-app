@@ -259,9 +259,11 @@ class _QrCodeSectionState extends State<QrCodeSection> {
                 ),
               ),
               const SizedBox(width: 8),
-              Text(
-                'Réservez votre place en 30 secondes',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+              Flexible(
+                child: Text(
+                  'Réservez votre place en 30 secondes',
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                ),
               ),
             ],
           ),

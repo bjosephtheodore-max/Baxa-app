@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:lottie/lottie.dart';
 
 class SigninPage extends StatefulWidget {
   final String? nomEntreprise;
@@ -194,44 +193,13 @@ class SigninPageState extends State<SigninPage> {
   Widget build(BuildContext context) {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
-        statusBarColor: Color(0xFFEAF3ED),
+        statusBarColor: Colors.white,
         statusBarIconBrightness: Brightness.dark,
       ),
       child: Scaffold(
       backgroundColor: Colors.white,
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Color(0xFFEAF3ED),
-              Color(0xFFD6EBDe),
-              Color(0xFFFFFFFF),
-            ],
-            stops: [0.0, 0.35, 1.0],
-          ),
-        ),
-        child: SafeArea(
-        child: Stack(
-          children: [
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: Opacity(
-                opacity: 0.13,
-                child: SizedBox(
-                  height: 320,
-                  child: Lottie.asset(
-                    'assets/animations/Handshake Loop.json',
-                    repeat: true,
-                    fit: BoxFit.cover,
-                  ),
-                ),
-              ),
-            ),
-            Center(
+      body: SafeArea(
+        child: Center(
           child: SingleChildScrollView(
             controller: _scrollController,
             padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -307,6 +275,7 @@ class SigninPageState extends State<SigninPage> {
                           // Bannière d'erreur inline
                           if (_errorMessage != null) ...[
                             Container(
+                              key: const ValueKey('company-signin-error-banner'),
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 14,
                                 vertical: 12,
@@ -347,8 +316,13 @@ class SigninPageState extends State<SigninPage> {
 
                           // Champ Email
                           TextFormField(
+                            key: const ValueKey('company-signin-email'),
                             controller: _emailController,
                             keyboardType: TextInputType.emailAddress,
+                            autofillHints: const [
+                              AutofillHints.username,
+                              AutofillHints.email,
+                            ],
                             onTap: _scrollToBottom,
                             onChanged: (_) => _clearError(),
                             decoration: InputDecoration(
@@ -357,6 +331,17 @@ class SigninPageState extends State<SigninPage> {
                               prefixIcon: const Icon(Icons.email_outlined),
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.grey.shade300),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: const BorderSide(
+                                  color: Color.fromARGB(255, 75, 139, 94),
+                                  width: 1.5,
+                                ),
                               ),
                               filled: true,
                               fillColor: Colors.grey.shade50,
@@ -375,8 +360,19 @@ class SigninPageState extends State<SigninPage> {
 
                           // Champ Mot de passe
                           TextFormField(
+                            key: const ValueKey('company-signin-password'),
                             controller: _passwordController,
                             obscureText: _isObscure,
+                            // Toujours désactivés : évite que le basculement de
+                            // l'œil ne renégocie le clavier Android et ne vide
+                            // le champ.
+                            autocorrect: false,
+                            enableSuggestions: false,
+                            autofillHints: [
+                              _isLoginMode
+                                  ? AutofillHints.password
+                                  : AutofillHints.newPassword,
+                            ],
                             onTap: _scrollToBottom,
                             onChanged: (_) => _clearError(),
                             decoration: InputDecoration(
@@ -385,6 +381,17 @@ class SigninPageState extends State<SigninPage> {
                               prefixIcon: const Icon(Icons.lock_outline),
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.grey.shade300),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: const BorderSide(
+                                  color: Color.fromARGB(255, 75, 139, 94),
+                                  width: 1.5,
+                                ),
                               ),
                               filled: true,
                               fillColor: Colors.grey.shade50,
@@ -484,7 +491,10 @@ class SigninPageState extends State<SigninPage> {
                         onPressed: () {
                           setState(() {
                             _isLoginMode = !_isLoginMode;
-                            _formkey.currentState?.reset();
+                            // Pas de reset() : l'email et le mot de passe sont
+                            // les mêmes champs dans les deux modes — les vider à
+                            // la bascule oblige à tout retaper.
+                            _errorMessage = null;
                           });
                         },
                         child: Text(
@@ -534,11 +544,8 @@ class SigninPageState extends State<SigninPage> {
               ),
             ),
           ),  // SingleChildScrollView
-            ),  // Center
-          ],  // Stack children
-        ),  // Stack
-      ),
-    ),     // Container gradient
+        ),  // Center
+      ),     // SafeArea
     ),     // Scaffold
     );     // AnnotatedRegion
   }

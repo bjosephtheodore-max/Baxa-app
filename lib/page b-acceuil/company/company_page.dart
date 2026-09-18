@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:baxa/page b-acceuil/company/house_page.dart';
 import 'package:baxa/page b-acceuil/company/company_settings_page.dart';
-import 'package:baxa/page%20b-acceuil/company/notifications_page.dart';
+import 'package:baxa/page%20b-acceuil/company/company_notifications_page.dart';
 import 'package:baxa/page b-acceuil/company/staff_page.dart';
 import 'package:baxa/page b-acceuil/company/company_deletion_gate_page.dart';
-import 'package:baxa/services/notifications/queue_notification_service.dart';
+import 'package:baxa/services/notifications/company_messaging_service.dart';
 import 'package:baxa/services/onboarding_service.dart';
 import 'package:baxa/widgets/notifications_nav_icon.dart';
 import 'package:baxa/widgets/onboarding_widgets.dart';
@@ -21,14 +22,17 @@ class CompanyPageState extends State<CompanyPage> {
   int pageIndex = 0;
   bool _roleChecked = false;
 
+  late final String _companyId =
+      FirebaseAuth.instance.currentUser?.uid ?? '_';
+
   // Flux stable des notifications récentes de l'entreprise — alimente la
   // pastille de non-lus (barre de nav + icône de l'app). L'admin a
-  // uid == companyId, donc `notificationsHistory` de sa propre entreprise.
+  // uid == companyId.
   late final Query<Map<String, dynamic>> _recentNotifs = FirebaseFirestore
       .instance
       .collection('companies')
-      .doc(FirebaseAuth.instance.currentUser?.uid ?? '_')
-      .collection('notificationsHistory')
+      .doc(_companyId)
+      .collection('companyNotifications')
       .orderBy('createdAt', descending: true)
       .limit(50);
 
@@ -37,17 +41,23 @@ class CompanyPageState extends State<CompanyPage> {
   String? _deletionStatus;
   Map<String, dynamic>? _deletionData;
 
-  static const List<Widget> _adminPages = [
-    HousePage(),
-    CompanySettingsPage(),
-    NotificationsPage(),
+  late final List<Widget> _adminPages = [
+    const HousePage(),
+    const CompanySettingsPage(),
+    CompanyNotificationsPage(companyId: _companyId, audience: 'admin'),
   ];
 
   @override
   void initState() {
     super.initState();
     _checkRole();
-    _initializeNotificationService();
+    CompanyMessagingService.instance.start(
+      onOpenNotifications: () {
+        if (!mounted) return;
+        setState(() => pageIndex = 2);
+        NotificationsNavIcon.markSeen();
+      },
+    );
     OnboardingService().checkAndInit();
   }
 
@@ -66,6 +76,10 @@ class CompanyPageState extends State<CompanyPage> {
       if (userDoc.exists) {
         final data = userDoc.data()!;
         if (data['role'] == 'staff' && data['companyId'] != null) {
+          await FirebaseAnalytics.instance.setUserProperty(
+            name: 'role',
+            value: 'staff',
+          );
           if (mounted) {
             Navigator.pushAndRemoveUntil(
               context,
@@ -99,25 +113,14 @@ class CompanyPageState extends State<CompanyPage> {
         }
       } catch (_) {}
 
+      await FirebaseAnalytics.instance.setUserProperty(
+        name: 'role',
+        value: 'company',
+      );
       if (mounted) setState(() => _roleChecked = true);
     } catch (e) {
       if (mounted) setState(() => _roleChecked = true);
     }
-  }
-
-  Future<void> _initializeNotificationService() async {
-    try {
-      await QueueNotificationService().initialize();
-      if (mounted) setState(() {});
-    } catch (e) {
-      debugPrint('❌ Erreur initialisation notifications: $e');
-    }
-  }
-
-  @override
-  void dispose() {
-    QueueNotificationService().dispose();
-    super.dispose();
   }
 
   double _getTextScaleFactor(BuildContext context) {
@@ -154,9 +157,18 @@ class CompanyPageState extends State<CompanyPage> {
         children: [
           Scaffold(
             body: IndexedStack(index: pageIndex, children: _adminPages),
-            bottomNavigationBar: NavigationBar(
-              backgroundColor: Colors.white,
-              selectedIndex: pageIndex,
+            // Fin trait au-dessus de la barre (façon WhatsApp) plutôt qu'une
+            // ombre. Posé DEVANT la barre via un Column : mis en fond
+            // (DecoratedBox), le blanc opaque de la barre le recouvrait.
+            bottomNavigationBar: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  height: 1,
+                  color: Colors.black.withValues(alpha: 0.06),
+                ),
+                NavigationBar(
+                  selectedIndex: pageIndex,
               onDestinationSelected: (int index) {
                 if (index == 1) OnboardingService().advance(1);
                 // "Lu" à l'entrée comme à la sortie de l'onglet Notifications
@@ -170,7 +182,8 @@ class CompanyPageState extends State<CompanyPage> {
               },
               destinations: [
                 const NavigationDestination(
-                  icon: Icon(Icons.home),
+                  icon: Icon(Icons.home_outlined),
+                  selectedIcon: Icon(Icons.home_rounded),
                   label: 'Accueil',
                 ),
                 NavigationDestination(
@@ -179,7 +192,22 @@ class CompanyPageState extends State<CompanyPage> {
                     builder: (_, __) => Stack(
                       clipBehavior: Clip.none,
                       children: [
-                        const Icon(Icons.settings),
+                        const Icon(Icons.settings_outlined),
+                        if (OnboardingService().step == 1)
+                          const Positioned(
+                            top: -4,
+                            right: -4,
+                            child: PulsingDot(),
+                          ),
+                      ],
+                    ),
+                  ),
+                  selectedIcon: ListenableBuilder(
+                    listenable: OnboardingService(),
+                    builder: (_, __) => Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        const Icon(Icons.settings_rounded),
                         if (OnboardingService().step == 1)
                           const Positioned(
                             top: -4,
@@ -194,11 +222,15 @@ class CompanyPageState extends State<CompanyPage> {
                 NavigationDestination(
                   icon: NotificationsNavIcon(
                     recentNotifications: _recentNotifs,
+                    unreadWhere: (d) => (d['audience'] ?? 'admin') == 'admin',
+                    selected: pageIndex == 2,
                   ),
                   label: 'Notifications',
                 ),
               ],
-            ),
+              ),
+            ],
+          ),
           ),
           Positioned(
             bottom: 80 + MediaQuery.of(context).padding.bottom,

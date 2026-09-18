@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:baxa/services/booking_constants.dart';
 
 // ============================================================
 // TEAM PAGE — Gestion de l'équipe (côté admin uniquement)
@@ -29,24 +30,35 @@ class _TeamPageState extends State<TeamPage> {
   String? _activeCode;
   bool _isGeneratingCode = false;
 
+  // Cache mémoire (durée de l'app) pour éviter un rechargement à vide à
+  // chaque ouverture de la page : on affiche tout de suite ce qu'on a déjà
+  // vu, pendant qu'un rafraîchissement silencieux tourne en arrière-plan.
+  static String? _cachedCompanyId;
+  static String? _cachedCompanyName;
+  static String? _cachedActiveCode;
+
   @override
   void initState() {
     super.initState();
     final user = FirebaseAuth.instance.currentUser;
     _companyId = user?.uid;
+
+    final hasCache = _cachedCompanyId == _companyId && _cachedCompanyId != null;
+    if (hasCache) {
+      _companyName = _cachedCompanyName;
+      _activeCode = _cachedActiveCode;
+      _isLoading = false;
+    }
     _loadData();
   }
 
   Future<void> _loadData() async {
     if (_companyId == null) return;
     try {
-      final doc = await _firestore.collection('companies').doc(_companyId).get();
-      if (doc.exists) {
-        _companyName =
-            (doc.data() as Map<String, dynamic>)['nom'] as String? ?? 'Baxa';
-      }
-      // Chercher un code d'invitation actif existant
-      final inviteSnap = await _firestore
+      // Les deux lectures sont indépendantes : on les lance ensemble au lieu
+      // de les enchaîner pour ne pas payer deux allers-retours réseau.
+      final docFuture = _firestore.collection('companies').doc(_companyId).get();
+      final inviteFuture = _firestore
           .collection('companies')
           .doc(_companyId)
           .collection('invitations')
@@ -54,10 +66,20 @@ class _TeamPageState extends State<TeamPage> {
           .limit(1)
           .get();
 
-      if (inviteSnap.docs.isNotEmpty) {
-        _activeCode =
-            (inviteSnap.docs.first.data())['code'] as String?;
+      final doc = await docFuture;
+      final inviteSnap = await inviteFuture;
+
+      if (doc.exists) {
+        _companyName =
+            (doc.data() as Map<String, dynamic>)['nom'] as String? ?? 'Baxa';
       }
+      _activeCode = inviteSnap.docs.isNotEmpty
+          ? (inviteSnap.docs.first.data())['code'] as String?
+          : null;
+
+      _cachedCompanyId = _companyId;
+      _cachedCompanyName = _companyName;
+      _cachedActiveCode = _activeCode;
     } catch (e) {
       debugPrint('TeamPage load error: $e');
     } finally {
@@ -105,6 +127,7 @@ class _TeamPageState extends State<TeamPage> {
             'createdAt': FieldValue.serverTimestamp(),
           });
 
+      _cachedActiveCode = code;
       if (mounted) setState(() => _activeCode = code);
     } catch (e) {
       if (mounted) {
@@ -194,6 +217,165 @@ class _TeamPageState extends State<TeamPage> {
   }
 
   // ==============================================================
+  // NOMMER / RETIRER UN MEMBRE
+  // ==============================================================
+  Future<void> _showEditNameDialog({
+    required String uid,
+    required String phone,
+    required String currentName,
+  }) async {
+    final controller = TextEditingController(text: currentName);
+    final newValue = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                currentName.isEmpty ? 'Ajouter le nom' : 'Modifier le nom',
+                style: GoogleFonts.poppins(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0xFF1A1A2E),
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                textCapitalization: TextCapitalization.words,
+                decoration: InputDecoration(
+                  hintText: 'Nom du membre',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.grey.shade300),
+                  ),
+                  focusedBorder: const OutlineInputBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(12)),
+                    borderSide: BorderSide(color: _green, width: 1.5),
+                  ),
+                  filled: true,
+                  fillColor: Colors.grey.shade50,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        side: BorderSide(color: Colors.grey.shade300),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: Text(
+                        'Annuler',
+                        style: TextStyle(
+                          color: Colors.grey.shade700,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _green,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: () =>
+                          Navigator.pop(ctx, controller.text.trim()),
+                      child: const Text(
+                        'Enregistrer',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              Center(
+                child: TextButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _revokeMember(uid, phone);
+                  },
+                  icon: Icon(
+                    Icons.person_remove_rounded,
+                    color: Colors.red.shade400,
+                    size: 18,
+                  ),
+                  label: Text(
+                    'Retirer de l\'équipe',
+                    style: TextStyle(
+                      color: Colors.red.shade400,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (newValue != null && newValue.isNotEmpty && newValue != currentName) {
+      try {
+        await _firestore
+            .collection('companies')
+            .doc(_companyId)
+            .collection('staff')
+            .doc(uid)
+            .update({'displayName': newValue});
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Erreur: $e'), backgroundColor: Colors.red),
+          );
+        }
+      }
+    }
+  }
+
+  // ==============================================================
   // BUILD
   // ==============================================================
   @override
@@ -266,11 +448,13 @@ class _TeamPageState extends State<TeamPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(children: [
-                  _skBox(height: 42, width: 42, radius: 10),
-                  const SizedBox(width: 12),
-                  _skBox(height: 18, width: 140),
-                ]),
+                Row(
+                  children: [
+                    _skBox(height: 42, width: 42, radius: 10),
+                    const SizedBox(width: 12),
+                    _skBox(height: 18, width: 140),
+                  ],
+                ),
                 const SizedBox(height: 16),
                 _skBox(height: 13),
                 const SizedBox(height: 6),
@@ -357,8 +541,13 @@ class _TeamPageState extends State<TeamPage> {
           ),
           const SizedBox(height: 12),
           Text(
-            'Générez un code et partagez-le avec votre vigil ou réceptionniste. Maximum 3 membres.',
-            style: TextStyle(fontSize: 13, color: Colors.grey.shade600, height: 1.4),
+            'Générez un code et partagez-le avec votre vigil ou réceptionniste. '
+            'Maximum $kMaxActiveStaff membres.',
+            style: TextStyle(
+              fontSize: 13,
+              color: Colors.grey.shade600,
+              height: 1.4,
+            ),
           ),
           const SizedBox(height: 20),
 
@@ -506,7 +695,9 @@ class _TeamPageState extends State<TeamPage> {
                     Container(
                       margin: const EdgeInsets.only(bottom: 10),
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 14),
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(14),
@@ -574,6 +765,7 @@ class _TeamPageState extends State<TeamPage> {
               children: members.map((doc) {
                 final data = doc.data() as Map<String, dynamic>;
                 final phone = data['phone'] as String? ?? 'Numéro inconnu';
+                final displayName = data['displayName'] as String? ?? '';
                 final uid = doc.id;
                 final joinedAt = data['joinedAt'] as Timestamp?;
 
@@ -615,14 +807,22 @@ class _TeamPageState extends State<TeamPage> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              phone,
+                              displayName.isNotEmpty ? displayName : phone,
                               style: const TextStyle(
                                 fontWeight: FontWeight.w600,
                                 fontSize: 15,
                                 color: Colors.black87,
                               ),
                             ),
-                            if (joinedAt != null)
+                            if (displayName.isNotEmpty)
+                              Text(
+                                phone,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade500,
+                                ),
+                              )
+                            else if (joinedAt != null)
                               Text(
                                 'Membre depuis ${_formatDate(joinedAt.toDate())}',
                                 style: TextStyle(
@@ -635,12 +835,16 @@ class _TeamPageState extends State<TeamPage> {
                       ),
                       IconButton(
                         icon: Icon(
-                          Icons.person_remove_rounded,
-                          color: Colors.red.shade400,
-                          size: 22,
+                          Icons.edit_rounded,
+                          color: _green,
+                          size: 20,
                         ),
-                        tooltip: 'Retirer de l\'équipe',
-                        onPressed: () => _revokeMember(uid, phone),
+                        tooltip: 'Modifier le nom',
+                        onPressed: () => _showEditNameDialog(
+                          uid: uid,
+                          phone: phone,
+                          currentName: displayName,
+                        ),
                       ),
                     ],
                   ),
@@ -655,8 +859,18 @@ class _TeamPageState extends State<TeamPage> {
 
   String _formatDate(DateTime date) {
     final months = [
-      'jan', 'fév', 'mar', 'avr', 'mai', 'jun',
-      'jul', 'aoû', 'sep', 'oct', 'nov', 'déc',
+      'jan',
+      'fév',
+      'mar',
+      'avr',
+      'mai',
+      'jun',
+      'jul',
+      'aoû',
+      'sep',
+      'oct',
+      'nov',
+      'déc',
     ];
     return '${date.day} ${months[date.month - 1]} ${date.year}';
   }

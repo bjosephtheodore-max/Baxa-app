@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
+import 'package:baxa/page%20b-acceuil/customer/search_page.dart';
 
 class MyReservationsPage extends StatefulWidget {
   const MyReservationsPage({super.key});
@@ -890,6 +891,13 @@ class _MyReservationsPageState extends State<MyReservationsPage> {
       });
 
       if (!mounted) return;
+      // Retrait immédiat de la liste — la page ne se recharge (un seul .get)
+      // qu'à la réouverture ou au tirer-pour-rafraîchir.
+      setState(() {
+        _reservations = _reservations
+            .where((d) => d.reference.path != reservationRef.path)
+            .toList();
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: const Text('Réservation annulée'),
@@ -945,7 +953,10 @@ class _MyReservationsPageState extends State<MyReservationsPage> {
             ),
             const SizedBox(height: 24),
             GestureDetector(
-              onTap: () => Navigator.pop(context, true),
+              onTap: () => Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (_) => const SearchPage()),
+              ),
               child: Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 24,

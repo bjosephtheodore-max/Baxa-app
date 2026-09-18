@@ -2,8 +2,8 @@ import 'package:baxa/page%20b-acceuil/company/prereception_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/prereceptione_page.dart';
 import 'package:baxa/page b-acceuil/company/staff_auth_page.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:lottie/lottie.dart';
 
 class ChoosePage extends StatefulWidget {
   const ChoosePage({super.key});
@@ -85,35 +85,32 @@ class _ChoosePageState extends State<ChoosePage>
   Widget build(BuildContext context) {
     final width = MediaQuery.of(context).size.width;
 
-    return Scaffold(
+    // Boutons du téléphone posés sur le vert foncé des buissons (au lieu du
+    // blanc par défaut de l'app) — uniquement pendant que cet écran est
+    // affiché ; l'écran suivant retrouve son propre réglage.
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        systemNavigationBarColor: Color(0xFF0E4028),
+        systemNavigationBarIconBrightness: Brightness.light,
+        systemNavigationBarContrastEnforced: false,
+      ),
+      child: Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Color(0xFFFFFFFF),
-              Color(0xFFEAF3ED),
-              Color(0xFFD6EBDe),
-            ],
-            stops: [0.0, 0.55, 1.0],
-          ),
-        ),
+        color: Colors.white,
         child: Stack(
           children: [
             Positioned.fill(
-              child: Opacity(
-                opacity: 0.10,
-                child: Lottie.asset(
-                  'assets/animations/City Skyline Building.json',
-                  fit: BoxFit.cover,
-                  repeat: true,
-                ),
+              child: Image.asset(
+                'assets/images/welcome_grass_frame.png',
+                fit: BoxFit.cover,
+                alignment: Alignment.bottomCenter,
               ),
             ),
             SafeArea(
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+            padding: const EdgeInsets.fromLTRB(20, 24, 20, 100),
             child: Column(
               children: [
                 const SizedBox(height: 20),
@@ -249,6 +246,7 @@ class _ChoosePageState extends State<ChoosePage>
           ],  // Stack children
         ),  // Stack
       ),
+      ),  // Scaffold
     );
   }
 

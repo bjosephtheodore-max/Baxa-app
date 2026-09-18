@@ -8,6 +8,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/services/booking_constants.dart';
+import 'package:baxa/services/favorites_service.dart';
 import 'package:baxa/services/reservation_rules_service.dart';
 
 class SlotsPage extends StatefulWidget {
@@ -19,6 +20,15 @@ class SlotsPage extends StatefulWidget {
   final Color lightGreen;
   final VoidCallback onReservationSuccess;
 
+  // Config de la file connue de l'écran précédent (il vient de lire le même
+  // doc). Quand fournie, la page démarre sans attendre le serveur : bandeau
+  // de jours complet dès la 1ʳᵉ image, plus de valeur devinée.
+  // (Les jours d'ouverture, eux, viennent des plages — pas du doc file.)
+  final int? initialMaxAdvanceDays;
+  final int? initialDeadlineMinutes;
+  final DateTime? initialCutoffDate;
+  final bool? initialAllowMultiplePerPlage;
+
   const SlotsPage({
     super.key,
     required this.entrepriseId,
@@ -28,15 +38,89 @@ class SlotsPage extends StatefulWidget {
     required this.primaryGreen,
     required this.lightGreen,
     required this.onReservationSuccess,
+    this.initialMaxAdvanceDays,
+    this.initialDeadlineMinutes,
+    this.initialCutoffDate,
+    this.initialAllowMultiplePerPlage,
   });
+
+  // À utiliser quand l'écran appelant a déjà le doc `queues/{id}` en main :
+  // la page démarre alors sans attendre le serveur pour sa config.
+  factory SlotsPage.fromQueueData({
+    Key? key,
+    required String companyId,
+    required String queueId,
+    required Map<String, dynamic> queueData,
+    String entrepriseNom = '',
+    required Color primaryGreen,
+    required Color lightGreen,
+    required VoidCallback onReservationSuccess,
+  }) {
+    return SlotsPage(
+      key: key,
+      entrepriseId: companyId,
+      entrepriseNom: entrepriseNom,
+      queueId: queueId,
+      queueName: queueData['name'] as String? ?? 'File',
+      primaryGreen: primaryGreen,
+      lightGreen: lightGreen,
+      onReservationSuccess: onReservationSuccess,
+      initialMaxAdvanceDays: (queueData['maxAdvanceDays'] as num?)?.toInt() ?? 2,
+      initialDeadlineMinutes:
+          (queueData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0,
+      initialCutoffDate: (queueData['reservationCutoffDate'] as Timestamp?)
+          ?.toDate()
+          .toLocal(),
+      initialAllowMultiplePerPlage:
+          (queueData['allowMultiplePerPlage'] as bool?) ?? false,
+    );
+  }
+
+  // Préchauffe le cache Firestore (créneaux + plages) — à appeler juste avant
+  // de pousser SlotsPage. Les données arrivent souvent avant la fin de la
+  // transition de page, la liste s'affiche alors sans attente visible.
+  static void prefetch(String companyId, String queueId) {
+    final now = DateTime.now();
+    final upper = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).add(const Duration(days: _kInitialWindowDays + 1));
+    final queue = FirebaseFirestore.instance
+        .collection('companies')
+        .doc(companyId)
+        .collection('queues')
+        .doc(queueId);
+    queue
+        .collection('slots')
+        .where('start', isLessThan: Timestamp.fromDate(upper))
+        .orderBy('start')
+        .get()
+        .ignore();
+    queue.collection('timeSlots').get().ignore();
+  }
 
   @override
   State<SlotsPage> createState() => _SlotsPageState();
 }
 
+// Fenêtre (en jours) chargée au premier affichage ; le reste de l'horizon
+// d'anticipation est chargé juste après, en arrière-plan.
+const int _kInitialWindowDays = 2;
+
 class _SlotsPageState extends State<SlotsPage>
     with SingleTickerProviderStateMixin {
-  static const Color _kActiveColor = Color(0xFF16A34A);
+  // Palette unifiée de la page (un seul vert, fond chaud, zéro ombre).
+  static const Color _green = Color(0xFF4B8B5E);
+  static const Color _greenTint = Color(0xFFEEF4EF);
+  static const Color _greenTintBorder = Color(0xFFD9E6DD);
+  static const Color _bg = Color(0xFFFAF9F6);
+  static const Color _surface = Color(0xFFFFFFFF);
+  static const Color _surfaceMuted = Color(0xFFF6F5F1);
+  static const Color _ink = Color(0xFF1F2430);
+  static const Color _inkSoft = Color(0xFF6B7280);
+  static const Color _inkFaint = Color(0xFF9AA0A8);
+  static const Color _hairline = Color(0xFFEAE8E2);
 
   final FirebaseFirestore _fs = FirebaseFirestore.instance;
   final DateFormat _timeFmt = DateFormat('HH:mm');
@@ -47,8 +131,17 @@ class _SlotsPageState extends State<SlotsPage>
   bool _showPastSlots = false;
   late final AnimationController _pastSlotsCtrl;
 
-  int _maxAdvanceDays = 5;
-  List<int> _queueWeekdays = [1, 2, 3, 4, 5, 6, 7];
+  int _maxAdvanceDays = 2;
+  int _reservationDeadlineMinutes = 0;
+  bool _allowMultiplePerPlage = false;
+  // Nombre de plages actives (hors suppression programmée) de cette file —
+  // sert au retour auto conditionnel quand le réglage ci-dessus est activé.
+  int _totalActivePlages = 1;
+  // Jours où AU MOINS UNE plage de la file travaille (union des `workingDays`
+  // de toutes les plages). null = pas encore chargé → on ne déclare aucun
+  // jour « fermé » tant qu'on ne sait pas.
+  Set<int>? _openWeekdays;
+  StreamSubscription<QuerySnapshot>? _timeSlotsSub;
   DateTime? _reservationCutoffDate;
   DateTime? _closureStart;
   DateTime? _closureEnd;
@@ -66,25 +159,51 @@ class _SlotsPageState extends State<SlotsPage>
 
   String get _displayQueueName => _liveQueueName ?? widget.queueName;
 
-  late Stream<QuerySnapshot> _slotsStream;
+  // Créneaux chargés. Fenêtre courante = `_loadedWindowDays` jours à venir ;
+  // elle est élargie à tout l'horizon d'anticipation juste après le 1ᵉʳ rendu.
+  // On garde `_slots` en mémoire : élargir ne fait pas clignoter la liste.
+  List<QueryDocumentSnapshot> _slots = [];
+  bool _slotsLoaded = false;
+  int _loadedWindowDays = 0;
+  StreamSubscription<QuerySnapshot>? _slotsSub;
 
-  // LOGS TEMPORAIRES DE DIAGNOSTIC — à retirer une fois la cause trouvée.
-  late final DateTime _initAt;
-  int _buildCount = 0;
+  // Créneaux de CETTE file déjà réservés par le client (suivis en temps réel) :
+  // sert à afficher l'état « Réservé » sur la bonne carte.
+  Set<String> _myReservedSlotIds = {};
+  StreamSubscription<QuerySnapshot>? _myReservationsSub;
+
+  // Places encore libres par jour (id `AAAA-MM-JJ`), lues sur `dailyStats` —
+  // pilote les pastilles vertes du bandeau sans dépendre du chargement complet
+  // des créneaux.
+  Map<String, int> _dailyAvailable = {};
+  StreamSubscription<QuerySnapshot>? _dailyStatsSub;
 
   @override
   void initState() {
     super.initState();
-    _initAt = DateTime.now();
-    debugPrint(
-      '🔎[SLOTS] initState "${widget.entrepriseNom}"/"${widget.queueName}" @ $_initAt',
-    );
     _pastSlotsCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 300),
       reverseDuration: const Duration(milliseconds: 180),
     );
-    _slotsStream = _buildSlotsStream();
+
+    // Config transmise par l'écran précédent → démarrage sans attente serveur.
+    if (widget.initialMaxAdvanceDays != null) {
+      _maxAdvanceDays = widget.initialMaxAdvanceDays!;
+      _reservationDeadlineMinutes = widget.initialDeadlineMinutes ?? 0;
+      _reservationCutoffDate = widget.initialCutoffDate;
+      _allowMultiplePerPlage = widget.initialAllowMultiplePerPlage ?? false;
+      _configLoaded = true;
+    }
+
+    _subscribeSlots(
+      _maxAdvanceDays < _kInitialWindowDays
+          ? _maxAdvanceDays
+          : _kInitialWindowDays,
+    );
+    // Élargir à tout l'horizon d'anticipation juste après la 1ʳᵉ image.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeWidenSlots());
+
     _queueSub = _fs
         .collection('companies')
         .doc(widget.entrepriseId)
@@ -97,7 +216,146 @@ class _SlotsPageState extends State<SlotsPage>
             if (mounted) setState(() => _configLoaded = true);
           },
         );
+    _listenMyReservations();
+    _listenDailyStats();
+    _listenOpenWeekdays();
     _loadCompanyConfig();
+  }
+
+  // Jours d'ouverture réels de la file = union des `workingDays` de ses plages
+  // (`timeSlots`). C'est LA source des jours « fermés » côté client — le champ
+  // `queue.weekdays` ne reflète plus la réalité depuis que les jours sont
+  // réglés par plage.
+  void _listenOpenWeekdays() {
+    _timeSlotsSub = _fs
+        .collection('companies')
+        .doc(widget.entrepriseId)
+        .collection('queues')
+        .doc(widget.queueId)
+        .collection('timeSlots')
+        .snapshots()
+        .listen(
+          (snap) {
+            if (!mounted) return;
+            final days = <int>{};
+            var activePlages = 0;
+            for (final d in snap.docs) {
+              final data = d.data();
+              final wd = data['workingDays'] as List<dynamic>?;
+              if (wd != null) {
+                days.addAll(wd.map((e) => (e as num).toInt()));
+              } else {
+                days.addAll(const [1, 2, 3, 4, 5]); // plage legacy sans champ
+              }
+              // Une plage en cours de suppression programmée ne compte plus
+              // pour le retour auto conditionnel (plus de résa possible).
+              if (data['deleteAfter'] == null) activePlages++;
+            }
+            // TODO(diag) retirer une fois le comportement confirmé sur appareil.
+            debugPrint('🔎[SLOTS] union workingDays plages = $days');
+            setState(() {
+              _openWeekdays = days;
+              _totalActivePlages = activePlages > 0 ? activePlages : 1;
+            });
+          },
+          onError: (_) {},
+        );
+  }
+
+  // Abonnement aux créneaux sur une fenêtre de `windowDays` jours à venir.
+  // Rappelable pour élargir la fenêtre : l'ancienne liste reste affichée
+  // jusqu'à l'arrivée du nouveau snapshot (pas de clignotement).
+  void _subscribeSlots(int windowDays) {
+    _loadedWindowDays = windowDays;
+    _slotsSub?.cancel();
+    final now = DateTime.now();
+    final upper = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).add(Duration(days: windowDays + 1));
+    _slotsSub = _fs
+        .collection('companies')
+        .doc(widget.entrepriseId)
+        .collection('queues')
+        .doc(widget.queueId)
+        .collection('slots')
+        .where('start', isLessThan: Timestamp.fromDate(upper))
+        .orderBy('start')
+        .snapshots()
+        .listen(
+          (snap) {
+            if (!mounted) return;
+            setState(() {
+              _slots = snap.docs;
+              _slotsLoaded = true;
+            });
+          },
+          onError: (_) {
+            if (mounted) setState(() => _slotsLoaded = true);
+          },
+        );
+  }
+
+  void _maybeWidenSlots() {
+    if (!mounted) return;
+    if (_maxAdvanceDays > _loadedWindowDays) {
+      _subscribeSlots(_maxAdvanceDays);
+    }
+  }
+
+  // Résumé « places libres par jour » — maintenu en direct par la génération
+  // et les transactions de réservation/annulation.
+  void _listenDailyStats() {
+    _dailyStatsSub = _fs
+        .collection('companies')
+        .doc(widget.entrepriseId)
+        .collection('queues')
+        .doc(widget.queueId)
+        .collection('dailyStats')
+        .snapshots()
+        .listen(
+          (snap) {
+            if (!mounted) return;
+            setState(() {
+              _dailyAvailable = {
+                for (final d in snap.docs)
+                  d.id: (d.data()['available'] as num?)?.toInt() ?? 0,
+              };
+            });
+          },
+          onError: (_) {},
+        );
+  }
+
+  String _ymd(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
+
+  // Réservations confirmées du client dans cette file — pour marquer sa carte.
+  void _listenMyReservations() {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    _myReservationsSub = _fs
+        .collection('companies')
+        .doc(widget.entrepriseId)
+        .collection('reservations')
+        .where('customerId', isEqualTo: uid)
+        .where('queueId', isEqualTo: widget.queueId)
+        .where('status', isEqualTo: 'confirmed')
+        .snapshots()
+        .listen(
+          (snap) {
+            if (!mounted) return;
+            setState(() {
+              _myReservedSlotIds = snap.docs
+                  .map((d) => (d.data()['slotId'] as String?) ?? '')
+                  .where((id) => id.isNotEmpty)
+                  .toSet();
+            });
+          },
+          onError: (_) {},
+        );
   }
 
   // ── Suivi temps réel du doc de la file ─────────────────────────
@@ -113,56 +371,35 @@ class _SlotsPageState extends State<SlotsPage>
     }
 
     final data = doc.data()!;
-    final newMaxAdvanceDays = (data['maxAdvanceDays'] as int?) ?? 2;
-    final advanceDaysChanged = newMaxAdvanceDays != _maxAdvanceDays;
     final closureStart = (data['closureStart'] as Timestamp?)?.toDate();
     final closureEnd = (data['closureEnd'] as Timestamp?)?.toDate();
+    // TODO(diag) retirer une fois le comportement confirmé sur appareil.
+    debugPrint('🔎[SLOTS] queue.weekdays = ${data['weekdays']}');
     setState(() {
       _queueUnavailable = false;
       _queueClosed = isQueueClosedNow(closureStart, closureEnd);
       _queueClosureEnd = closureEnd;
       _liveQueueName = data['name'] as String? ?? _liveQueueName;
-      _maxAdvanceDays = newMaxAdvanceDays;
-      _queueWeekdays =
-          (data['weekdays'] as List<dynamic>?)?.map((e) => e as int).toList() ??
-          [1, 2, 3, 4, 5, 6, 7];
+      _maxAdvanceDays = (data['maxAdvanceDays'] as int?) ?? 2;
+      _reservationDeadlineMinutes =
+          (data['reservationDeadlineMinutes'] as int?) ?? 0;
       _reservationCutoffDate = (data['reservationCutoffDate'] as Timestamp?)
           ?.toDate()
           .toLocal();
+      _allowMultiplePerPlage = (data['allowMultiplePerPlage'] as bool?) ?? false;
       _configLoaded = true;
-      if (advanceDaysChanged) {
-        _slotsStream = _buildSlotsStream();
-      }
     });
-  }
-
-  // Recréée uniquement quand _maxAdvanceDays change réellement, pour éviter
-  // que le StreamBuilder ne se réabonne (et clignote) à chaque setState.
-  Stream<QuerySnapshot> _buildSlotsStream() {
-    final now = DateTime.now();
-    return _fs
-        .collection('companies')
-        .doc(widget.entrepriseId)
-        .collection('queues')
-        .doc(widget.queueId)
-        .collection('slots')
-        .where(
-          'start',
-          isLessThan: Timestamp.fromDate(
-            DateTime(
-              now.year,
-              now.month,
-              now.day,
-            ).add(Duration(days: _maxAdvanceDays + 1)),
-          ),
-        )
-        .orderBy('start')
-        .snapshots();
+    // L'horizon réel a peut-être grandi → élargir la fenêtre chargée.
+    _maybeWidenSlots();
   }
 
   @override
   void dispose() {
     _queueSub?.cancel();
+    _slotsSub?.cancel();
+    _myReservationsSub?.cancel();
+    _dailyStatsSub?.cancel();
+    _timeSlotsSub?.cancel();
     _pastSlotsCtrl.dispose();
     super.dispose();
   }
@@ -189,11 +426,8 @@ class _SlotsPageState extends State<SlotsPage>
           _companyDeleted = cd['status'] == 'deleted';
         });
       }
-    } catch (e) {
-      debugPrint(
-        '🔎[SLOTS] _loadCompanyConfig erreur "${widget.queueName}" après '
-        '${DateTime.now().difference(_initAt).inMilliseconds}ms: $e',
-      );
+    } catch (_) {
+      // Doc entreprise illisible (droits, réseau) : on garde l'état courant.
     }
   }
 
@@ -226,11 +460,6 @@ class _SlotsPageState extends State<SlotsPage>
 
   @override
   Widget build(BuildContext context) {
-    _buildCount++;
-    debugPrint(
-      '🔎[SLOTS] build() #$_buildCount "${widget.queueName}" @ '
-      '+${DateTime.now().difference(_initAt).inMilliseconds}ms',
-    );
     if (_companyDeleted || _queueUnavailable || _queueClosed) {
       final String title;
       final String subtitle;
@@ -253,12 +482,12 @@ class _SlotsPageState extends State<SlotsPage>
             : 'Cette file ne prend pas de nouvelles réservations pour le moment.';
       }
       return Scaffold(
-        backgroundColor: const Color(0xFFF8F7F4),
+        backgroundColor: _bg,
         appBar: AppBar(
           backgroundColor: Colors.transparent,
           elevation: 0,
           leading: BackButton(
-            color: const Color(0xFF1A1C2E),
+            color: _ink,
             onPressed: () => Navigator.of(context).pop(),
           ),
         ),
@@ -272,132 +501,162 @@ class _SlotsPageState extends State<SlotsPage>
       );
     }
 
+    final now = DateTime.now();
+    final deadline = Duration(minutes: _reservationDeadlineMinutes);
+
+    final allFutureSlots = _slots.where((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      final start = (data['start'] as Timestamp).toDate().toLocal();
+      final end = (data['end'] as Timestamp).toDate().toLocal();
+      return end.isAfter(now) && start.isAfter(now.add(deadline));
+    }).toList();
+
+    final availableDays = <DateTime>[];
+    if (_configLoaded) {
+      final today = _dateOnly(now);
+      for (int i = 0; i <= _maxAdvanceDays; i++) {
+        availableDays.add(today.add(Duration(days: i)));
+      }
+      if (!availableDays.any((d) => _isSameDay(d, _selectedDate))) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) setState(() => _selectedDate = availableDays.first);
+        });
+      }
+    }
+
+    final allDailySlots = _slots.where((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      final start = (data['start'] as Timestamp).toDate().toLocal();
+      return _isSameDay(start, _selectedDate);
+    }).toList();
+
+    final futureDailySlots = allFutureSlots.where((doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      final start = (data['start'] as Timestamp).toDate().toLocal();
+      return _isSameDay(start, _selectedDate);
+    }).toList();
+
+    // Jour « fermé » = connu ET aucune plage n'y travaille. Tant que les
+    // plages ne sont pas chargées, on ne ferme rien.
+    final isClosedDay =
+        _openWeekdays != null &&
+        !_openWeekdays!.contains(_selectedDate.weekday);
+    final isCutoffDay =
+        _reservationCutoffDate != null &&
+        _dateOnly(_selectedDate).isAfter(_dateOnly(_reservationCutoffDate!));
+    final selectedDay = _dateOnly(_selectedDate);
+    final isClosurePeriodDay =
+        _closureStart != null &&
+        _closureEnd != null &&
+        !selectedDay.isBefore(_dateOnly(_closureStart!)) &&
+        !selectedDay.isAfter(_dateOnly(_closureEnd!));
+
+    // Le jour sélectionné est-il encore en cours de chargement (fenêtre pas
+    // encore assez large, ou tout premier chargement) ?
+    final selectedOffset = _dateOnly(_selectedDate).difference(_dateOnly(now)).inDays;
+    final dayLoading = !_slotsLoaded || selectedOffset > _loadedWindowDays;
+    final windowComplete = _slotsLoaded && _loadedWindowDays >= _maxAdvanceDays;
+
+    Widget content;
+    if (!_configLoaded) {
+      // Config pas encore connue (appelant sans `initial*`) : on ne dessine
+      // pas le bandeau de jours tant qu'on ignore l'horizon réel.
+      content = _slotsLoaded
+          ? _buildSlotSkeleton()
+          : const Center(child: CircularProgressIndicator(color: _green));
+    } else if (isClosurePeriodDay) {
+      content = _buildClosurePeriodDayState();
+    } else if (isCutoffDay) {
+      content = _buildCutoffDayState();
+    } else if (isClosedDay) {
+      content = _buildClosedDayState();
+    } else if (allDailySlots.isEmpty && dayLoading) {
+      content = _buildSlotSkeleton();
+    } else if (allDailySlots.isEmpty) {
+      content = _buildEmptyState(
+        noSlots: allFutureSlots.isEmpty && windowComplete,
+      );
+    } else {
+      content = _buildSlotList(allDailySlots);
+    }
+
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F7F4),
-      body: StreamBuilder<QuerySnapshot>(
-        stream: _slotsStream,
-        builder: (context, snapshot) {
-          // LOG TEMPORAIRE DE DIAGNOSTIC — à retirer une fois la cause trouvée.
-          if (snapshot.hasData) {
-            final changes = snapshot.data!.docChanges;
-            debugPrint(
-              '🔎[SLOTS-STREAM] "${widget.queueName}" snapshot @ '
-              '+${DateTime.now().difference(_initAt).inMilliseconds}ms — '
-              'docs=${snapshot.data!.docs.length}, '
-              'fromCache=${snapshot.data!.metadata.isFromCache}, '
-              'changes=${changes.length}'
-              '${changes.isNotEmpty ? ' [${changes.map((c) => '${c.type.name}:${c.doc.id}').join(', ')}]' : ''}',
-            );
-          }
-          final now = DateTime.now();
-          List<QueryDocumentSnapshot> allFutureSlots = [];
-          List<DateTime> availableDays = [];
-
-          if (snapshot.hasData) {
-            allFutureSlots = snapshot.data!.docs.where((doc) {
-              final data = doc.data() as Map<String, dynamic>;
-              final start = (data['start'] as Timestamp).toDate().toLocal();
-              final end = (data['end'] as Timestamp).toDate().toLocal();
-              final deadlineMinutes =
-                  (data['reservationDeadlineMinutes'] as int?) ?? 0;
-              return end.isAfter(now) &&
-                  start.isAfter(now.add(Duration(minutes: deadlineMinutes)));
-            }).toList();
-          }
-
-          if (_configLoaded) {
-            final today = _dateOnly(now);
-            for (int i = 0; i <= _maxAdvanceDays; i++) {
-              availableDays.add(today.add(Duration(days: i)));
-            }
-            if (!availableDays.any((d) => _isSameDay(d, _selectedDate))) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) {
-                  setState(() => _selectedDate = availableDays.first);
-                }
-              });
-            }
-          }
-
-          final allDailySlots = snapshot.hasData
-              ? snapshot.data!.docs.where((doc) {
-                  final data = doc.data() as Map<String, dynamic>;
-                  final start = (data['start'] as Timestamp).toDate().toLocal();
-                  return _isSameDay(start, _selectedDate);
-                }).toList()
-              : <QueryDocumentSnapshot>[];
-
-          final futureDailySlots = allFutureSlots.where((doc) {
-            final data = doc.data() as Map<String, dynamic>;
-            final start = (data['start'] as Timestamp).toDate().toLocal();
-            return _isSameDay(start, _selectedDate);
-          }).toList();
-
-          final Map<String, int> dayAvailableCounts = {};
-          for (final doc in allFutureSlots) {
-            final data = doc.data() as Map<String, dynamic>;
-            final start = (data['start'] as Timestamp).toDate().toLocal();
-            final capacity = (data['capacity'] ?? 1) as int;
-            final reserved = (data['reserved'] ?? 0) as int;
-            final status = (data['status'] ?? 'open') as String;
-            if (status == 'open' && capacity - reserved > 0) {
-              final key = _dateOnly(start).toIso8601String();
-              dayAvailableCounts[key] = (dayAvailableCounts[key] ?? 0) + 1;
-            }
-          }
-
-          final isClosedDay = !_queueWeekdays.contains(_selectedDate.weekday);
-          final isCutoffDay =
-              _reservationCutoffDate != null &&
-              _dateOnly(
-                _selectedDate,
-              ).isAfter(_dateOnly(_reservationCutoffDate!));
-          final selectedDay = _dateOnly(_selectedDate);
-          final isClosurePeriodDay =
-              _closureStart != null &&
-              _closureEnd != null &&
-              !selectedDay.isBefore(_dateOnly(_closureStart!)) &&
-              !selectedDay.isAfter(_dateOnly(_closureEnd!));
-
-          Widget content;
-          if (snapshot.connectionState == ConnectionState.waiting ||
-              !_configLoaded) {
-            content = Center(
-              child: CircularProgressIndicator(color: widget.primaryGreen),
-            );
-          } else if (isClosurePeriodDay) {
-            content = _buildClosurePeriodDayState();
-          } else if (isCutoffDay) {
-            content = _buildCutoffDayState();
-          } else if (isClosedDay) {
-            content = _buildClosedDayState();
-          } else if (allDailySlots.isEmpty) {
-            content = _buildEmptyState(noSlots: allFutureSlots.isEmpty);
-          } else {
-            content = _buildSlotList(allDailySlots);
-          }
-
-          return Column(
-            children: [
-              _buildUnifiedHeader(
-                availableDays: availableDays,
-                isClosurePeriodDay: isClosurePeriodDay,
-                isClosedDay: isClosedDay,
-                availableCount:
-                    (!isClosurePeriodDay &&
-                        !isCutoffDay &&
-                        !isClosedDay &&
-                        snapshot.hasData)
-                    ? futureDailySlots.length
-                    : -1,
-                totalCount: allDailySlots.length,
-                dayAvailableCounts: dayAvailableCounts,
-              ),
-              Expanded(child: content),
-            ],
-          );
-        },
+      backgroundColor: _bg,
+      body: Column(
+        children: [
+          _buildUnifiedHeader(
+            availableDays: availableDays,
+            isClosurePeriodDay: isClosurePeriodDay,
+            isClosedDay: isClosedDay,
+            availableCount:
+                (!isClosurePeriodDay &&
+                    !isCutoffDay &&
+                    !isClosedDay &&
+                    !dayLoading)
+                ? futureDailySlots.length
+                : -1,
+            totalCount: allDailySlots.length,
+          ),
+          Expanded(child: content),
+        ],
       ),
+    );
+  }
+
+  // Aperçu gris pendant le court instant où les créneaux du jour se chargent
+  // (le bandeau de jours, lui, est déjà complet).
+  Widget _buildSlotSkeleton() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 48),
+      children: List.generate(5, (_) {
+        return Container(
+          height: 56,
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            color: _surface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: _hairline),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 118,
+                      height: 13,
+                      decoration: BoxDecoration(
+                        color: _hairline,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    Container(
+                      width: 56,
+                      height: 9,
+                      decoration: BoxDecoration(
+                        color: _hairline,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                width: 82,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: _hairline,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ],
+          ),
+        );
+      }),
     );
   }
 
@@ -409,60 +668,36 @@ class _SlotsPageState extends State<SlotsPage>
     required bool isClosedDay,
     int availableCount = -1,
     int totalCount = 0,
-    required Map<String, int> dayAvailableCounts,
   }) {
     return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.06),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
+      decoration: const BoxDecoration(
+        color: _bg,
+        border: Border(bottom: BorderSide(color: _hairline)),
       ),
       child: SafeArea(
         bottom: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Ligne 1 : retour · nom de la file · badge
+            // Ligne 1 : retour · nom de la file · compteur du jour
             Padding(
-              padding: const EdgeInsets.fromLTRB(4, 0, 16, 0),
+              padding: const EdgeInsets.fromLTRB(4, 4, 16, 4),
               child: Row(
                 children: [
                   BackButton(
-                    color: const Color(0xFF1A1C2E),
+                    color: _ink,
                     onPressed: () => Navigator.of(context).pop(),
                   ),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _displayQueueName,
-                          style: const TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w700,
-                            color: Color(0xFF1A1C2E),
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        if (widget.entrepriseNom.isNotEmpty)
-                          Text(
-                            widget.entrepriseNom,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey.shade500,
-                              fontWeight: FontWeight.w400,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                      ],
+                    child: Text(
+                      _displayQueueName,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                        color: _ink,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   if (availableCount >= 0) ...[
@@ -472,53 +707,61 @@ class _SlotsPageState extends State<SlotsPage>
                 ],
               ),
             ),
-            // Ligne 2 : carousel de jours
+            // Ligne 2 : bandeau de jours (une ligne + pastille de dispo)
             if (availableDays.isNotEmpty)
               SizedBox(
                 height: 64,
                 child: ListView.builder(
                   scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                   itemCount: availableDays.length,
                   itemBuilder: (context, i) {
                     final day = availableDays[i];
                     final isSelected = _isSameDay(day, _selectedDate);
-                    final isClosedChip = !_queueWeekdays.contains(day.weekday);
-                    final key = _dateOnly(day).toIso8601String();
-                    final count = dayAvailableCounts[key] ?? 0;
+                    final isClosedChip =
+                        _openWeekdays != null &&
+                        !_openWeekdays!.contains(day.weekday);
+                    final hasSlots = (_dailyAvailable[_ymd(day)] ?? 0) > 0;
 
-                    final Color chipBg = isSelected
-                        ? _kActiveColor
-                        : Colors.transparent;
-                    final Color chipBorder = isSelected
-                        ? _kActiveColor
-                        : Colors.grey.shade200;
                     final Color labelColor = isSelected
                         ? Colors.white
                         : isClosedChip
-                        ? Colors.grey.shade300
-                        : const Color(0xFF1A1C2E);
-                    final Color countColor = isSelected
-                        ? Colors.white.withValues(alpha: 0.85)
-                        : count > 0
-                        ? _kActiveColor
-                        : Colors.grey.shade400;
+                        ? const Color(0xFFC7C7C2)
+                        : _ink;
+                    final Color dotColor = isSelected
+                        ? Colors.white.withValues(alpha: 0.9)
+                        : hasSlots
+                        ? _green
+                        : Colors.transparent;
 
                     return GestureDetector(
-                      onTap: () => setState(() {
-                        _selectedDate = day;
-                        _showPastSlots = false;
-                      }),
+                      onTap: () {
+                        setState(() {
+                          _selectedDate = day;
+                          _showPastSlots = false;
+                        });
+                        // Jour au-delà de la fenêtre déjà chargée → l'élargir.
+                        final off = _dateOnly(
+                          day,
+                        ).difference(_dateOnly(DateTime.now())).inDays;
+                        if (off > _loadedWindowDays) _maybeWidenSlots();
+                      },
                       child: Container(
                         margin: const EdgeInsets.only(right: 8),
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 7,
+                          horizontal: 15,
+                          vertical: 9,
                         ),
                         decoration: BoxDecoration(
-                          color: chipBg,
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: chipBorder),
+                          color: isSelected ? _green : Colors.transparent,
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: isSelected
+                                ? _green
+                                : isClosedChip
+                                ? const Color(0xFFF0EEE9)
+                                : _hairline,
+                          ),
                         ),
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
@@ -531,13 +774,13 @@ class _SlotsPageState extends State<SlotsPage>
                                 color: labelColor,
                               ),
                             ),
-                            const SizedBox(height: 2),
-                            Text(
-                              count > 0 ? '$count dispo' : '·',
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w600,
-                                color: countColor,
+                            const SizedBox(height: 5),
+                            Container(
+                              width: 5,
+                              height: 5,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: dotColor,
                               ),
                             ),
                           ],
@@ -560,11 +803,11 @@ class _SlotsPageState extends State<SlotsPage>
     final pastSlots = <QueryDocumentSnapshot>[];
     final upcomingSlots = <QueryDocumentSnapshot>[];
 
+    final deadline = Duration(minutes: _reservationDeadlineMinutes);
     for (final doc in allDailySlots) {
       final data = doc.data() as Map<String, dynamic>;
       final start = (data['start'] as Timestamp).toDate().toLocal();
-      final deadlineMinutes = (data['reservationDeadlineMinutes'] as int?) ?? 0;
-      if (!start.isAfter(now.add(Duration(minutes: deadlineMinutes)))) {
+      if (!start.isAfter(now.add(deadline))) {
         pastSlots.add(doc);
       } else {
         upcomingSlots.add(doc);
@@ -600,11 +843,51 @@ class _SlotsPageState extends State<SlotsPage>
       );
     }
 
-    _appendSlotsWithGaps(items, upcomingSlots);
+    // Créneaux à venir groupés par moment de la journée (Matin / Après-midi / Soir).
+    int? currentPeriod;
+    bool firstLabel = true;
+    final periodSlots = <QueryDocumentSnapshot>[];
+    void flushPeriod() {
+      if (periodSlots.isEmpty) return;
+      items.add(_buildPeriodLabel(currentPeriod!, isFirst: firstLabel));
+      firstLabel = false;
+      _appendSlotsWithGaps(items, List.of(periodSlots));
+      periodSlots.clear();
+    }
+
+    for (final doc in upcomingSlots) {
+      final start =
+          ((doc.data() as Map<String, dynamic>)['start'] as Timestamp)
+              .toDate()
+              .toLocal();
+      final p = _periodOf(start);
+      if (currentPeriod != null && p != currentPeriod) flushPeriod();
+      currentPeriod = p;
+      periodSlots.add(doc);
+    }
+    flushPeriod();
 
     return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 48),
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 48),
       children: items,
+    );
+  }
+
+  int _periodOf(DateTime d) => d.hour < 12 ? 0 : (d.hour < 18 ? 1 : 2);
+
+  Widget _buildPeriodLabel(int period, {required bool isFirst}) {
+    const labels = ['Matin', 'Après-midi', 'Soir'];
+    return Padding(
+      padding: EdgeInsets.fromLTRB(2, isFirst ? 4 : 18, 0, 10),
+      child: Text(
+        labels[period].toUpperCase(),
+        style: const TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.7,
+          color: _inkFaint,
+        ),
+      ),
     );
   }
 
@@ -630,6 +913,7 @@ class _SlotsPageState extends State<SlotsPage>
 
   Widget _buildPastSlotsToggle(int count) {
     return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: () {
         setState(() => _showPastSlots = !_showPastSlots);
         if (_showPastSlots) {
@@ -638,14 +922,8 @@ class _SlotsPageState extends State<SlotsPage>
           _pastSlotsCtrl.reverse();
         }
       },
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.grey.shade50,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.grey.shade200),
-        ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(2, 2, 2, 8),
         child: Row(
           children: [
             Icon(
@@ -653,59 +931,38 @@ class _SlotsPageState extends State<SlotsPage>
                   ? Icons.keyboard_arrow_up_rounded
                   : Icons.keyboard_arrow_down_rounded,
               size: 16,
-              color: Colors.grey.shade500,
+              color: _inkFaint,
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 6),
             Text(
               _showPastSlots
                   ? 'Masquer les créneaux passés'
                   : '$count créneau${count > 1 ? 'x' : ''} passé${count > 1 ? 's' : ''}',
-              style: TextStyle(
-                color: Colors.grey.shade500,
+              style: const TextStyle(
+                color: _inkFaint,
                 fontSize: 13,
                 fontWeight: FontWeight.w500,
               ),
             ),
-            const Spacer(),
-            if (!_showPastSlots)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade200,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(
-                  '$count',
-                  style: TextStyle(
-                    color: Colors.grey.shade600,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildSlotBadge(int available, int total, {bool onColor = false}) {
+  Widget _buildSlotBadge(int available, int total) {
     if (total == 0) return const SizedBox.shrink();
 
     final isEndOfDay =
-        available == 0 &&
-        total > 0 &&
-        _isSameDay(_selectedDate, DateTime.now());
+        available == 0 && _isSameDay(_selectedDate, DateTime.now());
     final isFull = available == 0 && !isEndOfDay;
 
     if (isEndOfDay) {
-      return Text(
+      return const Text(
         'Fin de journée',
         style: TextStyle(
-          color: onColor
-              ? Colors.white.withValues(alpha: 0.65)
-              : Colors.grey.shade400,
-          fontSize: 10,
+          color: _inkFaint,
+          fontSize: 11,
           fontWeight: FontWeight.w500,
         ),
       );
@@ -713,21 +970,17 @@ class _SlotsPageState extends State<SlotsPage>
 
     if (isFull) {
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: onColor
-              ? Colors.white.withValues(alpha: 0.2)
-              : Colors.orange.shade50,
-          borderRadius: BorderRadius.circular(6),
-          border: onColor
-              ? Border.all(color: Colors.white.withValues(alpha: 0.3))
-              : Border.all(color: Colors.orange.shade200),
+          color: _surfaceMuted,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: _hairline),
         ),
-        child: Text(
+        child: const Text(
           'Complet',
           style: TextStyle(
-            color: onColor ? Colors.white : Colors.orange.shade700,
-            fontSize: 10,
+            color: _inkFaint,
+            fontSize: 12,
             fontWeight: FontWeight.w600,
           ),
         ),
@@ -735,18 +988,16 @@ class _SlotsPageState extends State<SlotsPage>
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
       decoration: BoxDecoration(
-        color: onColor
-            ? Colors.white.withValues(alpha: 0.2)
-            : _kActiveColor.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(6),
+        color: _greenTint,
+        borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         '$available libre${available > 1 ? 's' : ''}',
-        style: TextStyle(
-          color: onColor ? Colors.white : _kActiveColor,
-          fontSize: 10,
+        style: const TextStyle(
+          color: _green,
+          fontSize: 12,
           fontWeight: FontWeight.w600,
         ),
       ),
@@ -754,57 +1005,23 @@ class _SlotsPageState extends State<SlotsPage>
   }
 
   Widget _buildGapSeparator(DateTime gapStart, DateTime gapEnd, int minutes) {
-    final h = minutes ~/ 60;
-    final m = minutes % 60;
-    final label = h > 0
-        ? (m > 0 ? '${h}h${m.toString().padLeft(2, '0')}' : '${h}h')
-        : '${m}min';
-
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 10),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(
         children: [
-          Expanded(child: Container(height: 1, color: Colors.grey.shade200)),
-          Container(
-            margin: const EdgeInsets.symmetric(horizontal: 10),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.grey.shade200),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.coffee_rounded,
-                  size: 13,
-                  color: Colors.grey.shade500,
-                ),
-                const SizedBox(width: 6),
-                Column(
-                  children: [
-                    Text(
-                      'Pause · $label',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.grey.shade600,
-                      ),
-                    ),
-                    Text(
-                      '${_timeFmt.format(gapStart)} → ${_timeFmt.format(gapEnd)}',
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: Colors.grey.shade400,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+          Expanded(child: Container(height: 1, color: _hairline)),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Text(
+              'Pause · ${_timeFmt.format(gapStart)} – ${_timeFmt.format(gapEnd)}',
+              style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+                color: _inkFaint,
+              ),
             ),
           ),
-          Expanded(child: Container(height: 1, color: Colors.grey.shade200)),
+          Expanded(child: Container(height: 1, color: _hairline)),
         ],
       ),
     );
@@ -821,178 +1038,179 @@ class _SlotsPageState extends State<SlotsPage>
     final status = (data['status'] ?? 'open') as String;
     final timeSlotId = (data['timeSlotId'] ?? '') as String;
 
-    final deadlineMinutes = (data['reservationDeadlineMinutes'] as int?) ?? 0;
     final now = DateTime.now();
-    final isPast = !start.isAfter(now.add(Duration(minutes: deadlineMinutes)));
+    final isPast = !start.isAfter(
+      now.add(Duration(minutes: _reservationDeadlineMinutes)),
+    );
+    final isMine = !isPast && _myReservedSlotIds.contains(slotDoc.id);
     final remaining = capacity - reserved;
     final isFull = remaining <= 0;
-    final isAvailable = status == 'open' && remaining > 0 && !isPast;
-    final fillRatio = capacity > 0 ? reserved / capacity : 1.0;
+    final isAvailable =
+        status == 'open' && remaining > 0 && !isPast && !isMine;
 
-    final Color leftBorderColor = isAvailable
-        ? _kActiveColor
-        : isPast
-        ? Colors.grey.shade200
-        : Colors.grey.shade300;
+    final timeLabel =
+        '${_timeFmt.format(start)} – ${_timeFmt.format(end)}';
 
-    final Color cardBg = isAvailable
-        ? _kActiveColor.withValues(alpha: 0.08)
-        : Colors.white;
+    // Surface + texte selon l'état (2 états réels : disponible / complet,
+    // plus « réservé » pour la carte du client et l'atténuation du passé).
+    final Color cardBg;
+    final Color cardBorder;
+    final Color timeColor;
+    if (isPast) {
+      cardBg = _surface;
+      cardBorder = const Color(0xFFEFEDE7);
+      timeColor = _inkFaint;
+    } else if (isMine) {
+      cardBg = _greenTint;
+      cardBorder = _greenTintBorder;
+      timeColor = _ink;
+    } else if (isFull) {
+      cardBg = _surfaceMuted;
+      cardBorder = _hairline;
+      timeColor = _inkFaint;
+    } else {
+      cardBg = _surface;
+      cardBorder = _hairline;
+      timeColor = _ink;
+    }
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+    final String caption;
+    if (isPast) {
+      caption = 'Créneau passé';
+    } else if (isMine) {
+      caption = 'Vous êtes inscrit';
+    } else if (isFull) {
+      caption = '$capacity place${capacity > 1 ? 's' : ''}';
+    } else {
+      caption = '$remaining place${remaining > 1 ? 's' : ''}';
+    }
+
+    final Widget trailing;
+    if (isMine) {
+      trailing = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: _green),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Container(width: 7, color: leftBorderColor),
-            Expanded(
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: isAvailable
-                      ? () => _onSlotTap(
-                          slotDoc: slotDoc,
-                          start: start,
-                          end: end,
-                          timeSlotId: timeSlotId,
-                        )
-                      : null,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 13,
-                    ),
-                    child: Column(
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    '${_timeFmt.format(start)} – ${_timeFmt.format(end)}',
-                                    style: TextStyle(
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.w700,
-                                      color: isPast
-                                          ? Colors.grey.shade400
-                                          : const Color(0xFF1A1A2E),
-                                      letterSpacing: -0.5,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 3),
-                                  Text(
-                                    isPast
-                                        ? 'Créneau passé'
-                                        : isFull
-                                        ? '$capacity places · Complet'
-                                        : '$remaining place${remaining > 1 ? 's' : ''} libre${remaining > 1 ? 's' : ''}',
-                                    style: TextStyle(
-                                      color: Colors.grey.shade400,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            if (isPast)
-                              Icon(
-                                Icons.history_rounded,
-                                color: Colors.grey.shade300,
-                                size: 18,
-                              )
-                            else if (isFull)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 4,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: Colors.grey.shade100,
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                    color: Colors.grey.shade200,
-                                  ),
-                                ),
-                                child: Text(
-                                  'Complet',
-                                  style: TextStyle(
-                                    color: Colors.grey.shade500,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              )
-                            else if (isAvailable)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 14,
-                                  vertical: 7,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: _kActiveColor,
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                                child: const Text(
-                                  'Réserver',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              )
-                            else
-                              Icon(
-                                Icons.lock_outline_rounded,
-                                color: Colors.grey.shade300,
-                                size: 18,
-                              ),
-                          ],
-                        ),
-                        if (capacity > 1 && !isFull && !isPast) ...[
-                          const SizedBox(height: 8),
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(3),
-                            child: LinearProgressIndicator(
-                              value: fillRatio,
-                              minHeight: 3,
-                              backgroundColor: reserved > 0
-                                  ? Colors.grey.shade100
-                                  : Colors.transparent,
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                reserved == 0
-                                    ? Colors.transparent
-                                    : fillRatio > 0.75
-                                    ? Colors.orange.shade400
-                                    : _kActiveColor.withValues(alpha: 0.65),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
+            Icon(Icons.check_rounded, size: 15, color: _green),
+            SizedBox(width: 4),
+            Text(
+              'Réservé',
+              style: TextStyle(
+                color: _green,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
               ),
             ),
           ],
+        ),
+      );
+    } else if (isAvailable) {
+      trailing = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+        decoration: BoxDecoration(
+          color: _green,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: const Text(
+          'Réserver',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      );
+    } else if (isFull) {
+      trailing = const Text(
+        'Complet',
+        style: TextStyle(
+          color: _inkFaint,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+      );
+    } else if (isPast) {
+      trailing = const Icon(
+        Icons.history_rounded,
+        size: 18,
+        color: Color(0xFFC7C7C2),
+      );
+    } else {
+      trailing = const Icon(
+        Icons.lock_outline_rounded,
+        size: 18,
+        color: Color(0xFFC7C7C2),
+      );
+    }
+
+    final bool tappable = isAvailable || isMine;
+
+    return Opacity(
+      opacity: isPast ? 0.55 : 1,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        decoration: BoxDecoration(
+          color: cardBg,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: cardBorder),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: tappable
+                ? () => _onSlotTap(
+                    slotDoc: slotDoc,
+                    start: start,
+                    end: end,
+                    timeSlotId: timeSlotId,
+                  )
+                : null,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 11,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          timeLabel,
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: timeColor,
+                            fontFeatures: const [
+                              FontFeature.tabularFigures(),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          caption,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w400,
+                            color: _inkFaint,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  trailing,
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -1006,17 +1224,39 @@ class _SlotsPageState extends State<SlotsPage>
     required DateTime end,
     required String timeSlotId,
   }) async {
+    // Le client tape le créneau qu'il a DÉJÀ réservé : rien à remplacer.
+    if (_myReservedSlotIds.contains(slotDoc.id)) {
+      _showBlockedSnackbar('Vous avez déjà réservé ce créneau.');
+      return;
+    }
+
     final result = await _rulesService.checkCanReserve(
       companyId: widget.entrepriseId,
       queueId: widget.queueId,
       timeSlotId: timeSlotId,
       slotStart: start,
       slotEnd: end,
+      maxAdvanceDays: _maxAdvanceDays,
+      allowMultiplePerPlage: _allowMultiplePerPlage,
     );
 
     if (!mounted) return;
 
     if (result.canReserve) {
+      // Autorisé grâce au réglage « plusieurs réservations par jour », mais
+      // le client a déjà une résa active ailleurs dans cette file : on le
+      // prévient plutôt que de le laisser réserver sans qu'il s'en rende
+      // compte.
+      if (result.otherActiveInQueue.isNotEmpty) {
+        await _showSecondReservationDialog(
+          slotDoc: slotDoc,
+          start: start,
+          end: end,
+          timeSlotId: timeSlotId,
+          otherActiveInQueue: result.otherActiveInQueue,
+        );
+        return;
+      }
       _showConfirmDialog(
         slotDoc: slotDoc,
         start: start,
@@ -1029,10 +1269,15 @@ class _SlotsPageState extends State<SlotsPage>
     switch (result.violation!) {
       case RuleViolation.activeInSameQueue:
         final conflict = result.conflictingReservation!;
+        final conflictData = conflict.data() as Map<String, dynamic>;
         final conflictStart =
-            ((conflict.data() as Map<String, dynamic>)['slotStart']
-                    as Timestamp)
-                .toDate();
+            (conflictData['slotStart'] as Timestamp).toDate();
+        // Filet de sécurité si _myReservedSlotIds n'est pas encore chargé :
+        // le créneau visé est exactement celui déjà réservé → aucun sens.
+        if (conflictData['slotId'] == slotDoc.id) {
+          _showBlockedSnackbar('Vous avez déjà réservé ce créneau.');
+          break;
+        }
         // On ne propose "remplacer" que pour un rendez-vous pas encore
         // commencé — remplacer un créneau déjà en cours n'a pas de sens.
         if (conflictStart.isAfter(DateTime.now())) {
@@ -1193,129 +1438,102 @@ class _SlotsPageState extends State<SlotsPage>
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
+        backgroundColor: _surface,
+        surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        contentPadding: EdgeInsets.zero,
+        contentPadding: const EdgeInsets.fromLTRB(20, 24, 20, 16),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 28),
+              padding: const EdgeInsets.all(13),
               decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [_kActiveColor, Color(0xFF0D6B2A)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                color: _greenTint,
+                shape: BoxShape.circle,
               ),
-              child: Column(
+              child: const Icon(
+                Icons.event_available_rounded,
+                color: _green,
+                size: 26,
+              ),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              'Confirmer la réservation',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: _ink,
+              ),
+            ),
+            const SizedBox(height: 18),
+            _detailRow(Icons.queue_rounded, 'File', _displayQueueName),
+            const SizedBox(height: 10),
+            _detailRow(
+              Icons.schedule_rounded,
+              'Heure',
+              '${_timeFmt.format(start)} – ${_timeFmt.format(end)}',
+            ),
+            const SizedBox(height: 10),
+            _detailRow(
+              Icons.calendar_month_rounded,
+              'Date',
+              _dateFmtFull.format(start),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: _surfaceMuted,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: _hairline),
+              ),
+              child: const Row(
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.22),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.event_available_rounded,
-                      color: Colors.white,
-                      size: 30,
-                    ),
+                  Icon(
+                    Icons.notifications_active_rounded,
+                    color: _inkFaint,
+                    size: 16,
                   ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Confirmer la réservation',
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Vous recevrez des rappels et pourrez annuler depuis vos réservations.',
+                      style: TextStyle(fontSize: 12, color: _inkSoft),
                     ),
                   ),
                 ],
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                children: [
-                  _detailRow(Icons.queue_rounded, 'File', _displayQueueName),
-                  const SizedBox(height: 10),
-                  _detailRow(
-                    Icons.schedule_rounded,
-                    'Heure',
-                    '${_timeFmt.format(start)} – ${_timeFmt.format(end)}',
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _green,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
                   ),
-                  const SizedBox(height: 10),
-                  _detailRow(
-                    Icons.calendar_month_rounded,
-                    'Date',
-                    _dateFmtFull.format(start),
+                ),
+                child: const Text(
+                  'Confirmer la réservation',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
                   ),
-                  const SizedBox(height: 16),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: _kActiveColor.withValues(alpha: 0.07),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: _kActiveColor.withValues(alpha: 0.18),
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.notifications_active_rounded,
-                          color: _kActiveColor,
-                          size: 16,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            'Vous recevrez des rappels et pourrez annuler depuis vos réservations.',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: _kActiveColor.withValues(alpha: 0.85),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: ElevatedButton(
-                      onPressed: () => Navigator.pop(ctx, true),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _kActiveColor,
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                      ),
-                      child: const Text(
-                        'Confirmer la réservation',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 15,
-                        ),
-                      ),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.pop(ctx, false),
-                    child: Text(
-                      'Annuler',
-                      style: TextStyle(
-                        color: Colors.grey.shade500,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ),
-                ],
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text(
+                'Annuler',
+                style: TextStyle(color: _inkFaint, fontSize: 14),
               ),
             ),
           ],
@@ -1329,6 +1547,182 @@ class _SlotsPageState extends State<SlotsPage>
         start: start,
         end: end,
         timeSlotId: timeSlotId,
+      );
+    }
+  }
+
+  // Affiché quand la file autorise « plusieurs réservations par jour » et
+  // que le client a déjà une résa active ailleurs dans cette même file
+  // (plage différente). Prévient plutôt que de réserver en silence.
+  Future<void> _showSecondReservationDialog({
+    required QueryDocumentSnapshot slotDoc,
+    required DateTime start,
+    required DateTime end,
+    required String timeSlotId,
+    required List<QueryDocumentSnapshot> otherActiveInQueue,
+  }) async {
+    final single = otherActiveInQueue.length == 1;
+
+    Widget existingRow(QueryDocumentSnapshot doc) {
+      final data = doc.data() as Map<String, dynamic>;
+      final s = (data['slotStart'] as Timestamp).toDate().toLocal();
+      final e = (data['slotEnd'] as Timestamp).toDate().toLocal();
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Row(
+          children: [
+            const Icon(Icons.event_rounded, size: 15, color: _inkFaint),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '${_dayLabel(s)} · ${_timeFmt.format(s)} – ${_timeFmt.format(e)}',
+                style: const TextStyle(fontSize: 12.5, color: _inkSoft),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _surface,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        contentPadding: const EdgeInsets.fromLTRB(20, 24, 20, 16),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(13),
+              decoration: const BoxDecoration(
+                color: _greenTint,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.event_available_rounded,
+                color: _green,
+                size: 26,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              single
+                  ? 'Vous avez déjà une réservation dans cette file'
+                  : 'Vous avez déjà ${otherActiveInQueue.length} réservations dans cette file',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: _ink,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: _surfaceMuted,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: _hairline),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final doc in otherActiveInQueue) existingRow(doc),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            _detailRow(
+              Icons.schedule_rounded,
+              'Nouveau créneau',
+              '${_timeFmt.format(start)} – ${_timeFmt.format(end)}',
+            ),
+            const SizedBox(height: 10),
+            _detailRow(
+              Icons.calendar_month_rounded,
+              'Date',
+              _dateFmtFull.format(start),
+            ),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, 'confirm'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _green,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'Confirmer la réservation',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                  ),
+                ),
+              ),
+            ),
+            if (single) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                height: 46,
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(ctx, 'replace'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _inkSoft,
+                    side: const BorderSide(color: _hairline),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  child: const Text(
+                    'Remplacer ma réservation',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13.5,
+                    ),
+                  ),
+                ),
+              ),
+            ] else ...[
+              const SizedBox(height: 10),
+              const Text(
+                'Pour modifier une réservation existante, gérez-la depuis '
+                'Mes réservations.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 11.5, color: _inkFaint),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+
+    if (!mounted || action == null) return;
+
+    if (action == 'confirm') {
+      await _doReserve(
+        slotDoc: slotDoc,
+        start: start,
+        end: end,
+        timeSlotId: timeSlotId,
+      );
+    } else if (action == 'replace') {
+      await _showReplaceDialog(
+        slotDoc: slotDoc,
+        newStart: start,
+        newEnd: end,
+        timeSlotId: timeSlotId,
+        existingRes: otherActiveInQueue.first,
       );
     }
   }
@@ -1352,6 +1746,8 @@ class _SlotsPageState extends State<SlotsPage>
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
+        backgroundColor: _surface,
+        surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
         contentPadding: EdgeInsets.zero,
         content: Column(
@@ -1361,7 +1757,7 @@ class _SlotsPageState extends State<SlotsPage>
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 22),
               decoration: BoxDecoration(
-                color: Colors.orange.shade50,
+                color: _surfaceMuted,
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(24),
                 ),
@@ -1370,13 +1766,13 @@ class _SlotsPageState extends State<SlotsPage>
                 children: [
                   Container(
                     padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade100,
+                    decoration: const BoxDecoration(
+                      color: _greenTint,
                       shape: BoxShape.circle,
                     ),
-                    child: Icon(
+                    child: const Icon(
                       Icons.swap_horiz_rounded,
-                      color: Colors.orange.shade700,
+                      color: _green,
                       size: 30,
                     ),
                   ),
@@ -1399,15 +1795,15 @@ class _SlotsPageState extends State<SlotsPage>
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.red.shade50,
+                      color: _surfaceMuted,
                       borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: Colors.red.shade100),
+                      border: Border.all(color: _hairline),
                     ),
                     child: Row(
                       children: [
-                        Icon(
+                        const Icon(
                           Icons.remove_circle_outline_rounded,
-                          color: Colors.red.shade400,
+                          color: _inkFaint,
                           size: 18,
                         ),
                         const SizedBox(width: 10),
@@ -1417,9 +1813,9 @@ class _SlotsPageState extends State<SlotsPage>
                             children: [
                               Text(
                                 'Actuel · $existingQueue',
-                                style: TextStyle(
+                                style: const TextStyle(
                                   fontSize: 11,
-                                  color: Colors.red.shade400,
+                                  color: _inkSoft,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
@@ -1455,17 +1851,17 @@ class _SlotsPageState extends State<SlotsPage>
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: _kActiveColor.withValues(alpha: 0.06),
+                      color: _green.withValues(alpha: 0.06),
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
-                        color: _kActiveColor.withValues(alpha: 0.2),
+                        color: _green.withValues(alpha: 0.2),
                       ),
                     ),
                     child: Row(
                       children: [
                         Icon(
                           Icons.add_circle_outline_rounded,
-                          color: _kActiveColor,
+                          color: _green,
                           size: 18,
                         ),
                         const SizedBox(width: 10),
@@ -1477,7 +1873,7 @@ class _SlotsPageState extends State<SlotsPage>
                                 'Nouveau · $_displayQueueName',
                                 style: TextStyle(
                                   fontSize: 11,
-                                  color: _kActiveColor,
+                                  color: _green,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
@@ -1516,14 +1912,14 @@ class _SlotsPageState extends State<SlotsPage>
                     child: ElevatedButton(
                       onPressed: () => Navigator.pop(ctx, true),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: _kActiveColor,
+                        backgroundColor: _green,
                         elevation: 0,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(14),
                         ),
                       ),
                       child: const Text(
-                        'Confirmer le remplacement',
+                        'Remplacer',
                         style: TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.w700,
@@ -1563,6 +1959,24 @@ class _SlotsPageState extends State<SlotsPage>
   }
 
   // ── Transactions ──────────────────────────────────────────────
+
+  // File normale (réglage éteint) : retour dès la 1ʳᵉ résa, comme avant.
+  // File « plusieurs réservations par jour » : on ne ramène le client que
+  // lorsqu'il a désormais une résa active dans TOUTES les plages de la
+  // file — sinon il reste sur l'écran pour réserver les plages restantes.
+  Future<bool> _shouldReturnAfterReservation() async {
+    if (!_allowMultiplePerPlage) return true;
+    try {
+      final count = await _rulesService.countDistinctActivePlages(
+        companyId: widget.entrepriseId,
+        queueId: widget.queueId,
+      );
+      return count >= _totalActivePlages;
+    } catch (_) {
+      // Repli sûr en cas d'échec de la requête : comportement d'avant.
+      return true;
+    }
+  }
 
   Future<void> _doReserve({
     required QueryDocumentSnapshot slotDoc,
@@ -1610,12 +2024,13 @@ class _SlotsPageState extends State<SlotsPage>
           await _maybeShowFavoritePrompt(widgetAShown: widgetAShown);
         }
 
-        // Widget D : rappel du quota journalier (à la 4e réservation du jour)
-        if (mounted) {
-          await _maybeShowDailyLimitPrompt();
-        }
+        // Le rappel « plus qu'une réservation aujourd'hui » n'est plus un
+        // widget local : c'est la Cloud Function `notifyDailyQuotaWarning`
+        // qui envoie une notification quand le quota du jour tombe à 1.
 
-        if (mounted) Navigator.pop(context);
+        if (mounted && await _shouldReturnAfterReservation() && mounted) {
+          Navigator.pop(context);
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1661,7 +2076,9 @@ class _SlotsPageState extends State<SlotsPage>
           await _maybeShowFavoritePrompt(widgetAShown: false);
         }
 
-        if (mounted) Navigator.pop(context);
+        if (mounted && await _shouldReturnAfterReservation() && mounted) {
+          Navigator.pop(context);
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1749,6 +2166,49 @@ class _SlotsPageState extends State<SlotsPage>
 
       if (!mounted) return;
 
+      // Écriture réelle du favori + retour visuel — succès ET échec (fini le
+      // catch silencieux : si ça rate, l'utilisateur en est informé).
+      Future<void> addFavoriteNow() async {
+        try {
+          await FavoritesService.addFavorite(
+            companyId: widget.entrepriseId,
+            nom: resolvedNom,
+            type: companyType,
+          );
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: const Row(
+                  children: [
+                    Icon(Icons.star_rounded, color: Colors.white, size: 16),
+                    SizedBox(width: 8),
+                    Text('Ajouté aux favoris'),
+                  ],
+                ),
+                backgroundColor: widget.primaryGreen,
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            );
+          }
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Impossible d\'ajouter aux favoris : $e'),
+                backgroundColor: Colors.red.shade600,
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            );
+          }
+        }
+      }
+
       await showModalBottomSheet(
         context: context,
         backgroundColor: Colors.transparent,
@@ -1760,62 +2220,34 @@ class _SlotsPageState extends State<SlotsPage>
             if (currentUser == null) return;
 
             if (currentUser.isAnonymous) {
-              // Widget C : l'utilisateur doit d'abord s'inscrire
+              // Widget C : l'utilisateur doit d'abord s'inscrire — même
+              // parcours que le favori posé par appui long (search_page) :
+              // une fois l'inscription terminée, le favori est ajouté
+              // directement, sans que le client ait à refaire le geste.
               if (!mounted) return;
               await showModalBottomSheet(
                 context: context,
                 backgroundColor: Colors.transparent,
                 isDismissible: true,
                 builder: (ctx2) => _RegistrationNeededSheet(
-                  onRegister: () {
+                  onRegister: () async {
                     Navigator.pop(ctx2);
-                    if (mounted) {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(builder: (_) => const SigninePage()),
-                      );
+                    if (!mounted) return;
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const SigninePage()),
+                    );
+                    if (!mounted) return;
+                    final u = FirebaseAuth.instance.currentUser;
+                    if (u != null && !u.isAnonymous) {
+                      await addFavoriteNow();
                     }
                   },
                   onLater: () => Navigator.pop(ctx2),
                 ),
               );
             } else {
-              // Ajout réel aux favoris
-              try {
-                await _fs
-                    .collection('users')
-                    .doc(currentUser.uid)
-                    .collection('favorites')
-                    .doc(widget.entrepriseId)
-                    .set({
-                      'nom': resolvedNom,
-                      'type': companyType,
-                      'companyId': widget.entrepriseId,
-                      'addedAt': FieldValue.serverTimestamp(),
-                    });
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: const Row(
-                        children: [
-                          Icon(
-                            Icons.star_rounded,
-                            color: Colors.white,
-                            size: 16,
-                          ),
-                          SizedBox(width: 8),
-                          Text('Ajouté aux favoris'),
-                        ],
-                      ),
-                      backgroundColor: widget.primaryGreen,
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                  );
-                }
-              } catch (_) {}
+              await addFavoriteNow();
             }
           },
           onDismiss: () => Navigator.pop(ctx),
@@ -1824,47 +2256,6 @@ class _SlotsPageState extends State<SlotsPage>
 
       // Marquer comme montré (qu'il ait ajouté ou annulé)
       await prefs.setBool(promptedKey, true);
-    } catch (_) {}
-  }
-
-  // ── Rappel du quota journalier (Widget D) ─────────────────────
-
-  Future<void> _maybeShowDailyLimitPrompt() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-
-    try {
-      final ref = _fs.collection('users').doc(user.uid);
-      final snap = await ref.get();
-      final data = snap.data() ?? {};
-
-      final today = DateTime.now();
-      final todayStr =
-          '${today.year}-${today.month.toString().padLeft(2, '0')}-'
-          '${today.day.toString().padLeft(2, '0')}';
-      final lastDate = data['lastBookingDate'] as String? ?? '';
-      final dailyCount = lastDate == todayStr
-          ? (data['dailyBookingCount'] as int? ?? 0)
-          : 0;
-
-      // Affiché une seule fois, quand il reste exactement 1 réservation
-      if (dailyCount != kMaxDailyReservations - 1) return;
-
-      final shownCount = (data['dailyLimitPromptShownCount'] as int?) ?? 0;
-      if (shownCount >= 2) return;
-
-      if (!mounted) return;
-      await showModalBottomSheet(
-        context: context,
-        backgroundColor: Colors.transparent,
-        isDismissible: true,
-        builder: (ctx) =>
-            _DailyLimitPromptSheet(onOk: () => Navigator.pop(ctx)),
-      );
-
-      await ref.set({
-        'dailyLimitPromptShownCount': FieldValue.increment(1),
-      }, SetOptions(merge: true));
     } catch (_) {}
   }
 
@@ -2382,99 +2773,6 @@ class _RegistrationNeededSheet extends StatelessWidget {
             child: Text(
               'Plus tard',
               style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ── Widget D : rappel du quota journalier ─────────────────────────────────
-
-class _DailyLimitPromptSheet extends StatelessWidget {
-  final VoidCallback onOk;
-
-  const _DailyLimitPromptSheet({required this.onOk});
-
-  @override
-  Widget build(BuildContext context) {
-    const green = Color(0xFF4B8B5E);
-    final bottomPadding = 16.0 + MediaQuery.of(context).padding.bottom;
-
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      padding: EdgeInsets.fromLTRB(24, 16, 24, bottomPadding),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 36,
-            height: 4,
-            decoration: BoxDecoration(
-              color: Colors.grey.shade300,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: Colors.amber.shade50,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              Icons.info_rounded,
-              color: Colors.amber.shade600,
-              size: 28,
-            ),
-          ),
-          const SizedBox(height: 14),
-          Text(
-            'Plus qu\'une réservation aujourd\'hui',
-            style: GoogleFonts.poppins(
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-              color: const Color(0xFF1A1A2E),
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Vous pouvez effectuer jusqu\'à $kMaxDailyReservations réservations par jour. '
-            'Vous en avez déjà utilisé ${kMaxDailyReservations - 1} — il ne vous en reste qu\'une.\n\n'
-            'Une fois ce quota atteint, vous pourrez toujours vous rendre directement dans l\'établissement pour vous inscrire sur place.',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey.shade600,
-              height: 1.5,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 24),
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: ElevatedButton(
-              onPressed: onOk,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: green,
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
-              child: const Text(
-                'Ok',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                ),
-              ),
             ),
           ),
         ],

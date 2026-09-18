@@ -408,7 +408,6 @@ class AgendaService {
     required DateTime date,
     required int newCapacity,
     required ModificationType type,
-    bool applyToFuture = false,
     String? timeSlotId,
   }) async {
     try {
@@ -455,14 +454,17 @@ class AgendaService {
         } else {
           await _syncGlobalConfig(queueId, {'capacityPerSlot': newCapacity});
         }
-        if (applyToFuture) {
-          await _applyCapacityToFutureDays(
-            queueId,
-            newCapacity,
-            date,
-            timeSlotId: timeSlotId,
-          );
-        }
+        // « Permanente » = permanent partout : on répercute aussi la nouvelle
+        // capacité sur les créneaux libres déjà générés des jours suivants
+        // (sinon ils gardent l'ancienne valeur — la CF de nuit ne réécrit
+        // jamais un créneau existant). Pas de case à cocher : le libellé
+        // « Permanente » suffit, comme pour la durée.
+        await _applyCapacityToFutureDays(
+          queueId,
+          newCapacity,
+          date,
+          timeSlotId: timeSlotId,
+        );
       }
 
       return ModificationResult(
@@ -662,7 +664,11 @@ class AgendaService {
     ]);
   }
 
-  /// Applique une nouvelle capacité aux 30 prochains jours en parallèle
+  /// Répercute une nouvelle capacité sur les créneaux LIBRES déjà générés, de
+  /// demain jusqu'au bout de l'horizon — en une seule requête + des batchs,
+  /// au lieu d'une boucle jour par jour. Un créneau réservé n'est jamais
+  /// réduit sous son nombre de réservations (même clamp que la journée en
+  /// cours).
   Future<void> _applyCapacityToFutureDays(
     String queueId,
     int newCapacity,
@@ -674,17 +680,31 @@ class AgendaService {
       fromDate.month,
       fromDate.day,
     ).add(const Duration(days: 1));
+    // Fenêtre large : couvre toute anticipation raisonnable en une requête.
+    final horizonEnd = tomorrow.add(const Duration(days: 60));
 
-    await Future.wait([
-      for (int i = 0; i < 30; i++)
-        modifySlotCapacity(
-          queueId: queueId,
-          date: tomorrow.add(Duration(days: i)),
-          newCapacity: newCapacity,
-          type: ModificationType.ponctuelle,
-          timeSlotId: timeSlotId,
-        ),
-    ]);
+    final snap = await _slotsRef(queueId)
+        .where('start', isGreaterThanOrEqualTo: tomorrow)
+        .where('start', isLessThan: horizonEnd)
+        .where('status', isEqualTo: 'open')
+        .get();
+
+    WriteBatch batch = _firestore.batch();
+    int pending = 0;
+    for (final doc in snap.docs) {
+      final data = doc.data() as Map<String, dynamic>;
+      if (timeSlotId != null && data['timeSlotId'] != timeSlotId) continue;
+      final reserved = (data['reserved'] as num?)?.toInt() ?? 0;
+      final effectiveCapacity = newCapacity < reserved ? reserved : newCapacity;
+      batch.update(doc.reference, {'capacity': effectiveCapacity});
+      pending++;
+      if (pending == 400) {
+        await batch.commit();
+        batch = _firestore.batch();
+        pending = 0;
+      }
+    }
+    if (pending > 0) await batch.commit();
   }
 
   // ==============================================================

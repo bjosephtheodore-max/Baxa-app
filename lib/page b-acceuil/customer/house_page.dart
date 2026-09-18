@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:baxa/page%20b-acceuil/customer/search_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/persona_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/my_reservations_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/companyqueue_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/slots_page.dart';
+import 'package:baxa/page%20b-acceuil/customer/reservation_ticket_page.dart';
 import 'package:baxa/page b-acceuil/customer/annulation_confirmation_page.dart';
 import 'package:baxa/services/notifications/gestionnaire_annulations_page.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -40,6 +42,13 @@ class _HousePageState extends State<HousePage>
   late final ScrollController _scrollController;
   Stream<QuerySnapshot>? _appointmentsStream;
   Stream<QuerySnapshot>? _favoritesStream;
+  // "Prochains rendez-vous" filtre par rapport à l'heure actuelle dans le
+  // builder du StreamBuilder — qui ne se réexécute que sur une nouvelle
+  // émission Firestore, jamais juste parce que le temps a passé. Sans ce
+  // tick, une carte dont le créneau se termine reste affichée jusqu'à ce
+  // qu'un autre événement Firestore (ou un aller-retour sur la page) force
+  // un rebuild. Ce timer ne fait que forcer ce rebuild périodiquement.
+  Timer? _appointmentsTick;
 
   late final AnimationController _headerAnimCtrl;
   late final Animation<double> _headerFade;
@@ -89,12 +98,16 @@ class _HousePageState extends State<HousePage>
           .limit(10)
           .snapshots();
     }
+    _appointmentsTick = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
   void dispose() {
     _scrollController.dispose();
     _headerAnimCtrl.dispose();
+    _appointmentsTick?.cancel();
     super.dispose();
   }
 
@@ -209,14 +222,15 @@ class _HousePageState extends State<HousePage>
           '🔎[NAV-FAV] push SlotsPage "$nom" @ '
           '+${DateTime.now().difference(tapAt).inMilliseconds}ms',
         );
+        SlotsPage.prefetch(companyId, queueDoc.id);
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => SlotsPage(
-              entrepriseId: companyId,
-              entrepriseNom: nom,
+            builder: (_) => SlotsPage.fromQueueData(
+              companyId: companyId,
               queueId: queueDoc.id,
-              queueName: queueData['name'] as String? ?? 'File',
+              queueData: queueData,
+              entrepriseNom: nom,
               primaryGreen: _green,
               lightGreen: _greenLight,
               onReservationSuccess: () {},
@@ -231,10 +245,8 @@ class _HousePageState extends State<HousePage>
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => CompanyQueuePage(
-              entrepriseId: companyId,
-              entrepriseNom: nom,
-            ),
+            builder: (_) =>
+                CompanyQueuePage(entrepriseId: companyId, entrepriseNom: nom),
           ),
         );
       }
@@ -247,10 +259,8 @@ class _HousePageState extends State<HousePage>
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => CompanyQueuePage(
-              entrepriseId: companyId,
-              entrepriseNom: nom,
-            ),
+            builder: (_) =>
+                CompanyQueuePage(entrepriseId: companyId, entrepriseNom: nom),
           ),
         );
       }
@@ -783,8 +793,8 @@ class _HousePageState extends State<HousePage>
     final storedName = (data['companyName'] as String?)?.isNotEmpty == true
         ? data['companyName'] as String
         : (data['queueName'] as String?)?.isNotEmpty == true
-            ? data['queueName'] as String
-            : null;
+        ? data['queueName'] as String
+        : null;
     final companyId = data['companyId'] as String?;
 
     if (storedName != null) {
@@ -820,12 +830,24 @@ class _HousePageState extends State<HousePage>
     final slotEnd = (data['slotEnd'] as Timestamp).toDate();
     final queueName = data['queueName'] as String? ?? '';
 
+    final now = DateTime.now();
+    // "En cours" : le créneau a démarré mais n'est pas encore fini — c'est
+    // la seule fenêtre où la carte mène au ticket vivant (voir discussion
+    // produit : avant/après, il n'y a rien à prouver, pas la peine que la
+    // carte devienne un bouton).
+    final isOngoing = !now.isBefore(slotStart) && now.isBefore(slotEnd);
+
     return Container(
       width: 260,
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: isOngoing ? _greenLight : Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade100, width: 1),
+        border: Border.all(
+          color: isOngoing
+              ? _green.withValues(alpha: 0.35)
+              : Colors.grey.shade100,
+          width: 1,
+        ),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.05),
@@ -836,131 +858,178 @@ class _HousePageState extends State<HousePage>
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(15),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(width: 4, color: _green),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(6),
-                          decoration: BoxDecoration(
-                            color: _greenLight,
-                            borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: isOngoing
+              ? () => _openTicket(companyName, queueName, slotStart, slotEnd)
+              : null,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Container(width: 4, color: _green),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: isOngoing ? Colors.white : _greenLight,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(
+                              Icons.event_available_rounded,
+                              color: _green,
+                              size: 14,
+                            ),
                           ),
-                          child: const Icon(
-                            Icons.event_available_rounded,
-                            color: _green,
-                            size: 14,
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              companyName,
+                              style: GoogleFonts.poppins(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                                color: _dark,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isOngoing ? Colors.white : _greenLight,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: _green.withValues(alpha: 0.3),
+                                width: 1,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.check_circle_rounded,
+                                  size: 9,
+                                  color: _green,
+                                ),
+                                const SizedBox(width: 3),
+                                Text(
+                                  isOngoing ? 'En cours' : 'Confirmé',
+                                  style: const TextStyle(
+                                    fontSize: 9,
+                                    color: _green,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (queueName.isNotEmpty && queueName != companyName) ...[
+                        const SizedBox(height: 2),
+                        Padding(
+                          padding: const EdgeInsets.only(left: 34),
                           child: Text(
-                            companyName,
-                            style: GoogleFonts.poppins(
-                              fontWeight: FontWeight.w700,
+                            queueName,
+                            style: TextStyle(
                               fontSize: 12,
-                              color: _dark,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.grey.shade500,
                             ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 6,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: _greenLight,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: _green.withValues(alpha: 0.3),
-                              width: 1,
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.check_circle_rounded,
-                                size: 9,
-                                color: _green,
-                              ),
-                              const SizedBox(width: 3),
-                              const Text(
-                                'Confirmé',
-                                style: TextStyle(
-                                  fontSize: 9,
-                                  color: _green,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
                       ],
-                    ),
-                    if (queueName.isNotEmpty &&
-                        queueName != companyName) ...[
-                      const SizedBox(height: 2),
-                      Padding(
-                        padding: const EdgeInsets.only(left: 34),
-                        child: Text(
-                          queueName,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.grey.shade500,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                      const SizedBox(height: 8),
+                      Text(
+                        _getRelativeTime(slotStart),
+                        style: GoogleFonts.poppins(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: _dark,
                         ),
                       ),
-                    ],
-                    const SizedBox(height: 8),
-                    Text(
-                      _getRelativeTime(slotStart),
-                      style: GoogleFonts.poppins(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: _dark,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Row(
-                      children: [
-                        const Icon(
-                          Icons.access_time_rounded,
-                          size: 12,
-                          color: _green,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          '${_timeFmt.format(slotStart)} – ${_timeFmt.format(slotEnd)}',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.access_time_rounded,
+                            size: 12,
                             color: _green,
                           ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${_timeFmt.format(slotStart)} – ${_timeFmt.format(slotEnd)}',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: _green,
+                            ),
+                          ),
+                        ],
+                      ),
+                      // Affordance visible seulement pendant que la carte est
+                      // réellement cliquable — sans ça le fond verdâtre seul
+                      // ne dit pas clairement que la carte mène au ticket.
+                      if (isOngoing) ...[
+                        const SizedBox(height: 6),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            Text(
+                              'Voir mon ticket',
+                              style: GoogleFonts.poppins(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: _green,
+                              ),
+                            ),
+                            const Icon(
+                              Icons.chevron_right_rounded,
+                              size: 15,
+                              color: _green,
+                            ),
+                          ],
                         ),
                       ],
-                    ),
-                    const SizedBox(height: 6),
-                    _CancelButton(onTap: () => _showCancelSheet(doc)),
-                  ],
+                      const SizedBox(height: 6),
+                      _CancelButton(onTap: () => _showCancelSheet(doc)),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openTicket(
+    String companyName,
+    String queueName,
+    DateTime slotStart,
+    DateTime slotEnd,
+  ) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ReservationTicketPage(
+          companyName: companyName,
+          queueName: queueName,
+          slotStart: slotStart,
+          slotEnd: slotEnd,
         ),
       ),
     );
@@ -1066,7 +1135,8 @@ class _HousePageState extends State<HousePage>
           return _buildEmptyFavorites();
         }
 
-        final docs = [...snapshot.data!.docs]..sort((a, b) {
+        final docs = [...snapshot.data!.docs]
+          ..sort((a, b) {
             final aData = a.data() as Map<String, dynamic>;
             final bData = b.data() as Map<String, dynamic>;
             final aTs =
@@ -1102,8 +1172,10 @@ class _HousePageState extends State<HousePage>
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(14),
-                        border:
-                            Border.all(color: Colors.grey.shade100, width: 1),
+                        border: Border.all(
+                          color: Colors.grey.shade100,
+                          width: 1,
+                        ),
                         boxShadow: [
                           BoxShadow(
                             color: Colors.black.withValues(alpha: 0.04),
@@ -1120,10 +1192,7 @@ class _HousePageState extends State<HousePage>
                             height: 40,
                             decoration: BoxDecoration(
                               gradient: const LinearGradient(
-                                colors: [
-                                  Color(0xFF4B8B5E),
-                                  Color(0xFF1B3A2A),
-                                ],
+                                colors: [Color(0xFF4B8B5E), Color(0xFF1B3A2A)],
                                 begin: Alignment.topLeft,
                                 end: Alignment.bottomRight,
                               ),
@@ -1377,8 +1446,10 @@ class _CancelButtonState extends State<_CancelButton>
         weight: 22,
       ),
       TweenSequenceItem(
-        tween: Tween<double>(begin: 0.88, end: 1.0)
-            .chain(CurveTween(curve: Curves.elasticOut)),
+        tween: Tween<double>(
+          begin: 0.88,
+          end: 1.0,
+        ).chain(CurveTween(curve: Curves.elasticOut)),
         weight: 78,
       ),
     ]).animate(_ctrl);

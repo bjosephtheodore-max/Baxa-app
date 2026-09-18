@@ -1,15 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:baxa/page b-acceuil/company/settings_page.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 import 'package:baxa/services/booking_constants.dart';
 import 'package:baxa/services/slot_generation_service.dart';
+import 'package:baxa/services/reservation_admin_service.dart';
 import 'package:baxa/widgets/account_status_card.dart';
 import 'package:baxa/widgets/qr_code_section.dart';
 import 'package:baxa/services/location_service.dart';
 import 'package:baxa/services/onboarding_service.dart';
 import 'package:baxa/widgets/onboarding_widgets.dart';
+import 'package:baxa/widgets/baxa_date_picker_theme.dart';
 import 'package:baxa/services/geo_address_service.dart';
 
 class CompanySettingsPage extends StatefulWidget {
@@ -27,7 +30,6 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
   String? _companyId;
   Map<String, dynamic>? _companyData;
   bool _isLoading = true;
-  bool _notificationsEnabled = true;
 
   // Rappel « ajoutez votre position » : masquable, mais seulement pour la
   // session — il revient tant que la position n'est pas renseignée.
@@ -73,7 +75,6 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
 
         setState(() {
           _companyData = data;
-          _notificationsEnabled = data['notificationsEnabled'] ?? true;
           _isLoading = false;
         });
       }
@@ -93,14 +94,17 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
         elevation: 0,
         backgroundColor: Colors.white,
         automaticallyImplyLeading: false,
-        toolbarHeight: 48,
         title: Text(
           'Paramètres',
-          style: TextStyle(
-            color: _green,
+          style: GoogleFonts.poppins(
+            color: const Color(0xFF1A1C2E),
             fontWeight: FontWeight.w700,
-            fontSize: 23,
+            fontSize: 20,
           ),
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(color: Colors.grey.shade100, height: 1),
         ),
       ),
       body: ListenableBuilder(
@@ -127,7 +131,9 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
         child: _isLoading
             ? const Center(child: CircularProgressIndicator())
             : SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
+                // Marge basse élargie : la barre de navigation flotte au-dessus
+                // du contenu (extendBody).
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -158,8 +164,6 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                     _buildAccountStatusSection(),
                     const SizedBox(height: 24),
                     _buildClosureSection(),
-                    const SizedBox(height: 24),
-                    _buildNotificationsSection(),
                     const SizedBox(height: 24),
                     _buildSecuritySection(),
                     const SizedBox(height: 28),
@@ -573,60 +577,6 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     );
   }
 
-  // ==================== NOTIFICATIONS ====================
-  Widget _buildNotificationsSection() {
-    return _buildSection(
-      title: 'Préférences',
-      icon: Icons.notifications,
-      children: [
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.grey.shade300),
-          ),
-          child: Row(
-            children: [
-              Icon(Icons.notifications_active, color: _green, size: 24),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Notifications importantes',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    SizedBox(height: 4),
-                    Text(
-                      'Recommandé pour une optimisation optimale',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                  ],
-                ),
-              ),
-              Switch(
-                value: _notificationsEnabled,
-                onChanged: (value) {
-                  if (!value) {
-                    _showNotificationDisableDialog();
-                  } else {
-                    _updateNotificationPreference(true);
-                  }
-                },
-                activeColor: _green,
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
   // ==================== SÉCURITÉ ====================
   Widget _buildSecuritySection() {
     return _buildSection(
@@ -702,81 +652,13 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
   // Ré-authentification par mot de passe avant d'ouvrir le parcours de
   // suppression. L'email est déjà connu — on ne redemande que le mot de passe.
   Future<void> _reauthThenShowLeaveSheet() async {
-    final user = _auth.currentUser;
-    final email = user?.email;
-    if (user == null || email == null) return;
-
-    final pwdCtrl = TextEditingController();
-    String? errorText;
+    final email = _auth.currentUser?.email;
+    if (email == null) return;
 
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setD) => AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-          ),
-          title: const Text('Confirmez votre identité'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                email,
-                style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: pwdCtrl,
-                obscureText: true,
-                autofocus: true,
-                decoration: InputDecoration(
-                  labelText: 'Mot de passe',
-                  errorText: errorText,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Annuler'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                if (pwdCtrl.text.isEmpty) {
-                  setD(() => errorText = 'Entrez votre mot de passe');
-                  return;
-                }
-                try {
-                  final cred = EmailAuthProvider.credential(
-                    email: email,
-                    password: pwdCtrl.text,
-                  );
-                  await user.reauthenticateWithCredential(cred);
-                  if (ctx.mounted) Navigator.pop(ctx, true);
-                } on FirebaseAuthException catch (e) {
-                  setD(
-                    () => errorText = e.code == 'wrong-password'
-                        ? 'Mot de passe incorrect'
-                        : 'Vérification impossible',
-                  );
-                }
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _green,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Confirmer'),
-            ),
-          ],
-        ),
-      ),
+      builder: (_) => _ReauthPasswordDialog(email: email),
     );
-    pwdCtrl.dispose();
     if (ok == true && mounted) {
       await _showLeaveSheet();
     }
@@ -810,225 +692,35 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     );
     if (confirm != true) return;
     await FirebaseAuth.instance.signOut();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const ChoosePage()),
+      (route) => false,
+    );
   }
 
   // ==================== QUITTER BAXA ====================
 
   static const int _graceDays = 7;
 
-  Widget _leaveTimelineRow({
-    required IconData icon,
-    required String title,
-    required String text,
-  }) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          padding: const EdgeInsets.all(7),
-          decoration: BoxDecoration(
-            color: Colors.grey.shade100,
-            borderRadius: BorderRadius.circular(9),
-          ),
-          child: Icon(icon, size: 16, color: Colors.grey.shade700),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                text,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.grey.shade600,
-                  height: 1.35,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
   Future<void> _showLeaveSheet() async {
     final companyName = _companyData?['nom'] as String? ?? 'votre structure';
-    final reasonCtrl = TextEditingController();
 
-    final confirmed = await showModalBottomSheet<bool>(
+    // Le contenu est un StatefulWidget dédié : il possède et libère lui-même
+    // son TextEditingController dans dispose(), ce qui évite le crash
+    // « _dependents.isEmpty is not true » qd on libère le contrôleur pendant
+    // que la feuille se referme encore.
+    final reason = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (sheetCtx) => Padding(
-        padding: EdgeInsets.only(
-          bottom:
-              MediaQuery.of(sheetCtx).viewInsets.bottom +
-              MediaQuery.of(sheetCtx).padding.bottom,
-        ),
-        child: Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-          ),
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Center(
-                  child: Container(
-                    width: 36,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: Colors.red.shade50,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(
-                        Icons.exit_to_app_rounded,
-                        color: Colors.red.shade600,
-                        size: 22,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'Quitter Baxa',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.grey.shade900,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 18),
-                _leaveTimelineRow(
-                  icon: Icons.nightlight_round,
-                  title: 'Dès maintenant',
-                  text:
-                      '$companyName est fermé aux nouvelles réservations. Les '
-                      'réservations en cours sont annulées et les clients prévenus.',
-                ),
-                const SizedBox(height: 12),
-                _leaveTimelineRow(
-                  icon: Icons.timer_outlined,
-                  title: 'Pendant $_graceDays jours',
-                  text:
-                      'Reconnectez-vous et annulez la suppression pour tout '
-                      'réactiver.',
-                ),
-                const SizedBox(height: 12),
-                _leaveTimelineRow(
-                  icon: Icons.delete_forever_rounded,
-                  title: 'Après $_graceDays jours',
-                  text:
-                      'Le compte, les files et toutes les données sont '
-                      'définitivement supprimés. L\'équipe est déconnectée.',
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  'Pourquoi partez-vous ? (facultatif)',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey.shade700,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: reasonCtrl,
-                  maxLines: 3,
-                  maxLength: 300,
-                  decoration: InputDecoration(
-                    hintText: 'Votre retour nous aide à améliorer Baxa.',
-                    hintStyle: TextStyle(
-                      fontSize: 13,
-                      color: Colors.grey.shade400,
-                    ),
-                    filled: true,
-                    fillColor: Colors.grey.shade50,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.grey.shade200),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.grey.shade200),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: _green),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () => Navigator.pop(sheetCtx, false),
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          side: BorderSide(color: Colors.grey.shade300),
-                          foregroundColor: Colors.grey.shade800,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: const Text('Retour'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: () => Navigator.pop(sheetCtx, true),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red.shade600,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: const Text('Quitter Baxa'),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
+      builder: (_) =>
+          _LeaveBaxaSheet(companyName: companyName, graceDays: _graceDays),
     );
 
-    if (confirmed == true && mounted) {
-      await _submitLeaveRequest(reasonCtrl.text.trim());
+    if (reason != null && mounted) {
+      await _submitLeaveRequest(reason);
     }
-    reasonCtrl.dispose();
   }
 
   Future<void> _submitLeaveRequest(String reason) async {
@@ -1081,21 +773,29 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
         final ss = (d.data()['slotStart'] as Timestamp?)?.toDate();
         return ss != null && ss.isAfter(now);
       }).toList();
-      WriteBatch b = _firestore.batch();
-      int c = 0;
-      for (final d in toCancel) {
-        b.update(d.reference, {
-          'status': 'cancelled',
-          'cancelledAt': FieldValue.serverTimestamp(),
-          'cancellationSource': 'company_closure',
-        });
-        if (++c >= 400) {
-          await b.commit();
-          b = _firestore.batch();
-          c = 0;
+      await cancelReservationsBatch(
+        firestore: _firestore,
+        companyId: companyId,
+        reservationDocs: toCancel,
+        cancellationSource: 'company_closure',
+      );
+
+      // L'établissement part : l'accès du staff s'arrête tout de suite (le
+      // listener de révocation les déconnecte). En cas de retour dans les
+      // 7 jours, l'admin ré-invite ses membres avec de nouveaux codes.
+      final staffSnap = await _firestore
+          .collection('companies')
+          .doc(companyId)
+          .collection('staff')
+          .where('isActive', isEqualTo: true)
+          .get();
+      if (staffSnap.docs.isNotEmpty) {
+        final staffBatch = _firestore.batch();
+        for (final s in staffSnap.docs) {
+          staffBatch.update(s.reference, {'isActive': false});
         }
+        await staffBatch.commit();
       }
-      if (c > 0) await b.commit();
 
       if (!mounted) return;
       await showDialog<void>(
@@ -1472,23 +1172,12 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
           return true;
         }).toList();
 
-        WriteBatch b = _firestore.batch();
-        int c = 0;
-        for (final doc in caught) {
-          b.update(doc.reference, {
-            'status': 'cancelled',
-            'cancelledAt': FieldValue.serverTimestamp(),
-            'cancellationSource': 'company_closure',
-          });
-          c++;
-          cancelled++;
-          if (c >= 400) {
-            await b.commit();
-            b = _firestore.batch();
-            c = 0;
-          }
-        }
-        if (c > 0) await b.commit();
+        cancelled = await cancelReservationsBatch(
+          firestore: _firestore,
+          companyId: _companyId!,
+          reservationDocs: caught,
+          cancellationSource: 'company_closure',
+        );
       }
 
       if (!mounted) return;
@@ -2725,88 +2414,6 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     );
   }
 
-  Future<void> _showNotificationDisableDialog() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.orange.shade50,
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  Icons.notifications_off_rounded,
-                  color: Colors.orange.shade600,
-                  size: 32,
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Desactiver les notifications ?',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Les notifications vous permettent de suivre vos reservations en temps reel.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.pop(ctx, false),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: Colors.grey.shade300),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                      child: const Text(
-                        'Annuler',
-                        style: TextStyle(color: Colors.black87),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () => Navigator.pop(ctx, true),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.orange.shade600,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                      child: const Text('Desactiver'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-
-    if (confirm == true) {
-      _updateNotificationPreference(false);
-    }
-  }
-
   // ==================== ACTIONS ====================
 
   Future<void> _updateField(String field, dynamic value) async {
@@ -2850,34 +2457,6 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Informations mises à jour')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Erreur: $e')));
-      }
-    }
-  }
-
-  Future<void> _updateNotificationPreference(bool enabled) async {
-    if (_companyId == null) return;
-
-    try {
-      await _firestore.collection('companies').doc(_companyId).update({
-        'notificationsEnabled': enabled,
-      });
-
-      setState(() => _notificationsEnabled = enabled);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              enabled ? 'Notifications activées' : 'Notifications désactivées',
-            ),
-          ),
         );
       }
     } catch (e) {
@@ -3073,6 +2652,8 @@ class _PlanClosureSheetState extends State<_PlanClosureSheet> {
       firstDate: first,
       lastDate: DateTime(DateTime.now().year + 2),
       helpText: 'Premier jour de fermeture',
+      builder: (context, child) =>
+          Theme(data: baxaDatePickerTheme(context, _indigo), child: child!),
     );
     if (picked != null && mounted) {
       setState(() {
@@ -3091,6 +2672,8 @@ class _PlanClosureSheetState extends State<_PlanClosureSheet> {
       firstDate: first,
       lastDate: DateTime(s.year + 2),
       helpText: 'Jour de réouverture',
+      builder: (context, child) =>
+          Theme(data: baxaDatePickerTheme(context, _indigo), child: child!),
     );
     if (picked != null && mounted) setState(() => _end = picked);
   }
@@ -3401,6 +2984,446 @@ class _PlanClosureSheetState extends State<_PlanClosureSheet> {
             color: Colors.white,
             fontWeight: FontWeight.w700,
             fontSize: 14,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// Ré-authentification par mot de passe — StatefulWidget dédié pour que le
+// TextEditingController vive et meure avec le widget (évite le crash
+// « _dependents.isEmpty is not true »).
+// ============================================================
+class _ReauthPasswordDialog extends StatefulWidget {
+  final String email;
+  const _ReauthPasswordDialog({required this.email});
+
+  @override
+  State<_ReauthPasswordDialog> createState() => _ReauthPasswordDialogState();
+}
+
+class _ReauthPasswordDialogState extends State<_ReauthPasswordDialog> {
+  static const Color _green = Color.fromARGB(255, 75, 139, 94);
+
+  final _pwdCtrl = TextEditingController();
+  String? _errorText;
+  bool _checking = false;
+  bool _obscure = true;
+
+  @override
+  void dispose() {
+    _pwdCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _confirm() async {
+    if (_pwdCtrl.text.isEmpty) {
+      setState(() => _errorText = 'Entrez votre mot de passe');
+      return;
+    }
+    setState(() {
+      _checking = true;
+      _errorText = null;
+    });
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        if (mounted) Navigator.pop(context, false);
+        return;
+      }
+      final cred = EmailAuthProvider.credential(
+        email: widget.email,
+        password: _pwdCtrl.text,
+      );
+      await user.reauthenticateWithCredential(cred);
+      if (mounted) Navigator.pop(context, true);
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _checking = false;
+        _errorText =
+            (e.code == 'wrong-password' || e.code == 'invalid-credential')
+            ? 'Mot de passe incorrect'
+            : 'Vérification impossible';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: _green.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.lock_outline_rounded,
+                color: _green,
+                size: 26,
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Confirmez votre mot de passe',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1A1C2E),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Pour continuer, saisissez le mot de passe de\n${widget.email}',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                color: Colors.grey.shade600,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 20),
+            TextField(
+              controller: _pwdCtrl,
+              obscureText: _obscure,
+              autofocus: true,
+              onSubmitted: (_) => _confirm(),
+              onChanged: (_) {
+                if (_errorText != null) setState(() => _errorText = null);
+              },
+              decoration: InputDecoration(
+                hintText: 'Mot de passe',
+                errorText: _errorText,
+                filled: true,
+                fillColor: Colors.grey.shade50,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _obscure
+                        ? Icons.visibility_off_rounded
+                        : Icons.visibility_rounded,
+                    size: 20,
+                    color: Colors.grey.shade500,
+                  ),
+                  onPressed: () => setState(() => _obscure = !_obscure),
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade200),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade200),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: _green, width: 1.5),
+                ),
+                errorBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.red.shade300),
+                ),
+                focusedErrorBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(
+                    color: Colors.red.shade400,
+                    width: 1.5,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: _checking
+                        ? null
+                        : () => Navigator.pop(context, false),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      side: BorderSide(color: Colors.grey.shade300),
+                      foregroundColor: Colors.grey.shade800,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text('Annuler'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: _checking ? null : _confirm,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _green,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: _checking
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text('Confirmer'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// Feuille « Quitter Baxa » — StatefulWidget dédié (même raison : le
+// TextEditingController du champ « raison » vit et meurt avec le widget).
+// Renvoie via Navigator.pop la raison saisie (String, possiblement vide)
+// si l'entreprise confirme ; null si elle revient en arrière.
+// ============================================================
+class _LeaveBaxaSheet extends StatefulWidget {
+  final String companyName;
+  final int graceDays;
+
+  const _LeaveBaxaSheet({required this.companyName, required this.graceDays});
+
+  @override
+  State<_LeaveBaxaSheet> createState() => _LeaveBaxaSheetState();
+}
+
+class _LeaveBaxaSheetState extends State<_LeaveBaxaSheet> {
+  static const Color _green = Color.fromARGB(255, 75, 139, 94);
+
+  final _reasonCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _reasonCtrl.dispose();
+    super.dispose();
+  }
+
+  Widget _timelineRow({
+    required IconData icon,
+    required String title,
+    required String text,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(7),
+          decoration: BoxDecoration(
+            color: Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Icon(icon, size: 16, color: Colors.grey.shade700),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                text,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey.shade600,
+                  height: 1.35,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom:
+            MediaQuery.of(context).viewInsets.bottom +
+            MediaQuery.of(context).padding.bottom,
+      ),
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      Icons.exit_to_app_rounded,
+                      color: Colors.red.shade600,
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Quitter Baxa',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.grey.shade900,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              _timelineRow(
+                icon: Icons.nightlight_round,
+                title: 'Dès maintenant',
+                text:
+                    '${widget.companyName} est fermé aux nouvelles réservations. '
+                    'Les réservations en cours sont annulées et les clients prévenus.',
+              ),
+              const SizedBox(height: 12),
+              _timelineRow(
+                icon: Icons.timer_outlined,
+                title: 'Pendant ${widget.graceDays} jours',
+                text:
+                    'Reconnectez-vous et annulez la suppression pour tout '
+                    'réactiver.',
+              ),
+              const SizedBox(height: 12),
+              _timelineRow(
+                icon: Icons.delete_forever_rounded,
+                title: 'Après ${widget.graceDays} jours',
+                text:
+                    'Le compte, les files et toutes les données sont '
+                    'définitivement supprimés. L\'équipe est déconnectée.',
+              ),
+              const SizedBox(height: 20),
+              Text(
+                'Pourquoi partez-vous ? (facultatif)',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey.shade700,
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _reasonCtrl,
+                maxLines: 3,
+                maxLength: 300,
+                decoration: InputDecoration(
+                  hintText: 'Votre retour nous aide à améliorer Baxa.',
+                  hintStyle: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey.shade400,
+                  ),
+                  filled: true,
+                  fillColor: Colors.grey.shade50,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.grey.shade200),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.grey.shade200),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: _green),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        side: BorderSide(color: Colors.grey.shade300),
+                        foregroundColor: Colors.grey.shade800,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text('Retour'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () =>
+                          Navigator.pop(context, _reasonCtrl.text.trim()),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade600,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text('Quitter Baxa'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       ),

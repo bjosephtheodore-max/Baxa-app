@@ -5,6 +5,7 @@ import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/notification_settings_page.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -275,9 +276,20 @@ class _PersonaPageState extends State<PersonaPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: _bgColor,
-      appBar: AppBar(
+    // Boutons du téléphone posés sur le même fond que la page (au lieu du
+    // blanc par défaut de l'app) — uniquement pendant que cet écran est
+    // affiché ; l'écran précédent retrouve son propre réglage en revenant.
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        systemNavigationBarColor: _bgColor,
+        systemNavigationBarIconBrightness: Brightness.dark,
+        systemNavigationBarContrastEnforced: false,
+      ),
+      child: Scaffold(
+        backgroundColor: _bgColor,
+        appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
         leading: IconButton(
@@ -434,6 +446,7 @@ class _PersonaPageState extends State<PersonaPage> {
                 ],
               ),
             ),
+      ),
     );
   }
 

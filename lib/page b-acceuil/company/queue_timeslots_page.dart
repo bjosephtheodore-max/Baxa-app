@@ -4,7 +4,11 @@ part of 'settings_page.dart';
 class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
-  List<int> _queueWeekdays = [1, 2, 3, 4, 5];
+  // Jours cochés par défaut à la création d'une plage (lundi → vendredi).
+  // Chaque plage porte ensuite ses propres `workingDays` ; il n'y a plus de
+  // réglage « jours d'ouverture » au niveau de la file — donc cette valeur
+  // ne change jamais.
+  final List<int> _queueWeekdays = const [1, 2, 3, 4, 5];
 
   // Streams stockés en instance — évite la réinscription à chaque rebuild.
   late final Stream<QuerySnapshot> _slotsStream;
@@ -25,7 +29,6 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
         .doc(widget.queueId);
     _slotsStream = queueRef.collection('timeSlots').snapshots();
     _capacityStream = _buildCapacityStream(queueRef);
-    _loadQueueWeekdays();
     if (widget.autoOpenSlotDialog) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _showTimeSlotDialog();
@@ -60,31 +63,11 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
     });
   }
 
-  Future<void> _loadQueueWeekdays() async {
-    try {
-      final doc = await _firestore
-          .collection('companies')
-          .doc(widget.companyId)
-          .collection('queues')
-          .doc(widget.queueId)
-          .get();
-      if (doc.exists) {
-        final data = doc.data() as Map<String, dynamic>;
-        final days =
-            (data['weekdays'] as List<dynamic>?)?.map((e) => e as int).toList();
-        if (days != null) {
-          // Mise à jour sans setState — le stream capturera la nouvelle valeur
-          // lors de sa prochaine émission Firestore.
-          _queueWeekdays = days;
-        }
-      }
-    } catch (_) {}
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F8FA),
+      // Blanc uni (comme l'accueil company) — plus de fond teinté.
+      backgroundColor: Colors.white,
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.white,
@@ -106,6 +89,13 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
               style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
             ),
           ],
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(
+            color: Colors.black.withValues(alpha: 0.06),
+            height: 1,
+          ),
         ),
       ),
       body: ListenableBuilder(

@@ -1,15 +1,18 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/agenda_service.dart';
+import 'package:baxa/services/booking_constants.dart';
 import 'package:baxa/page b-acceuil/company/team_page.dart';
 import 'package:baxa/main.dart' show routeObserver;
 import 'package:baxa/services/onboarding_service.dart';
 import 'package:baxa/widgets/onboarding_widgets.dart';
+import 'package:baxa/widgets/baxa_date_picker_theme.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 
 part 'house_widgets.dart';
@@ -40,10 +43,53 @@ class _HousePageState extends State<HousePage>
 
   // ── Contrôleurs UI (restent dans le widget) ───────────────
   late PageController _pageController;
+  bool _pageControllerReady = false;
   final Map<String, ScrollController> _scrollControllers = {};
   bool _quickAddLoading = false;
   final Map<String, bool> _pastExpanded = {};
   final Map<String, bool> _headerExpanded = {};
+
+  // Anti-double-tap : les boutons +/- et « Bloquer la plage » ouvrent des
+  // bottom sheets/dialogs asynchrones (_selectTimeSlot, _showModifDialog…)
+  // AVANT le verrou Firestore (_busyTimeSlotIds) — un double-tap rapide
+  // relance donc le handler une 2e fois pendant que le 1er dialog s'ouvre
+  // encore, et on se retrouve avec 2 dialogs superposés. Un verrou par file,
+  // posé dès l'entrée du handler, empêche ça.
+  final Set<String> _liveEditBusyQueueIds = {};
+
+  // Bouton « + » : se range vers la barre du bas quand on défile vers le bas
+  // (l'utilisateur cherche un créneau plus loin), revient quand on défile
+  // vers le haut. Purement visuel — aucun impact sur l'ajout de client.
+  bool _fabVisible = true;
+
+  bool _handleUserScroll(UserScrollNotification n) {
+    // Le défilement horizontal du PageView (entre files) ne compte pas.
+    if (n.metrics.axis != Axis.vertical) return false;
+    if (n.direction == ScrollDirection.reverse && _fabVisible) {
+      setState(() => _fabVisible = false);
+    } else if (n.direction == ScrollDirection.forward && !_fabVisible) {
+      setState(() => _fabVisible = true);
+    }
+    return false;
+  }
+
+  // ── Barre de date : repli continu lié au défilement ───────
+  // 0 = pleinement dépliée, 1 = pleinement repliée dans l'en-tête. Un
+  // ValueNotifier (pas setState) : la valeur change à chaque pixel défilé,
+  // seuls la barre de date et le petit bouton calendrier de l'AppBar
+  // doivent se redessiner, jamais toute la page.
+  static const double _dateBarCollapseDistance = 70;
+  final ValueNotifier<double> _dateBarCollapse = ValueNotifier(0);
+
+  bool _handleDateBarScroll(ScrollNotification n) {
+    if (n.metrics.axis != Axis.vertical) return false;
+    final progress = (n.metrics.pixels / _dateBarCollapseDistance).clamp(
+      0.0,
+      1.0,
+    );
+    _dateBarCollapse.value = progress;
+    return false;
+  }
 
   @override
   bool get wantKeepAlive => true;
@@ -53,7 +99,6 @@ class _HousePageState extends State<HousePage>
   void initState() {
     super.initState();
     _n = _HouseNotifier();
-    _pageController = PageController(viewportFraction: 0.88);
     _n.initialize();
   }
 
@@ -62,13 +107,48 @@ class _HousePageState extends State<HousePage>
     super.didChangeDependencies();
     final route = ModalRoute.of(context);
     if (route != null) routeObserver.subscribe(this, route);
+    _configurePageController();
+  }
+
+  // ── Largeur des créneaux (multi-files) ────────────────────
+  // Réglage indépendant de la barre de navigation — c'est ICI qu'il faut
+  // changer le chiffre pour resserrer/élargir les créneaux quand il y a
+  // plusieurs files. Espace
+  // visible mais discret sur les côtés, adapté en fraction de la largeur
+  // d'écran (jamais une taille figée). Réparti en deux pour qu'on ne perde
+  // pas le petit espace entre deux files voisines : une partie sert
+  // d'aperçu de la file suivante (viewportFraction), l'autre reste comme
+  // gouttière entre les cartes elles-mêmes (le padding de la ListView,
+  // `_queueCardGutter`).
+  static const double _queueSideMargin = 18;
+  static const double _queueCardGutter = 6;
+
+  void _configurePageController() {
+    final width = MediaQuery.of(context).size.width;
+    if (width <= 0) return;
+    final outsideGap = _queueSideMargin - _queueCardGutter;
+    final fraction = (1 - (2 * outsideGap / width)).clamp(0.85, 0.99);
+    if (_pageControllerReady &&
+        (fraction - _pageController.viewportFraction).abs() < 0.01) {
+      return; // rien de notable n'a changé, on garde le controller (et sa position)
+    }
+    final keepPage = _pageControllerReady && _pageController.hasClients
+        ? _pageController.page?.round()
+        : null;
+    if (_pageControllerReady) _pageController.dispose();
+    _pageController = PageController(
+      viewportFraction: fraction,
+      initialPage: keepPage ?? 0,
+    );
+    _pageControllerReady = true;
   }
 
   @override
   void dispose() {
     routeObserver.unsubscribe(this);
     _n.dispose();
-    _pageController.dispose();
+    _dateBarCollapse.dispose();
+    if (_pageControllerReady) _pageController.dispose();
     for (final sc in _scrollControllers.values) {
       sc.dispose();
     }
@@ -117,7 +197,7 @@ class _HousePageState extends State<HousePage>
             );
           });
           return const Scaffold(
-            backgroundColor: Color(0xFFF6FAF7),
+            backgroundColor: Colors.white,
             body: Center(child: CircularProgressIndicator(color: _green)),
           );
         }
@@ -128,37 +208,91 @@ class _HousePageState extends State<HousePage>
 
   Widget _buildScaffold() {
     return Scaffold(
-        backgroundColor: const Color(0xFFF6FAF7),
-        appBar: _buildAppBar(),
-        body: _n.isLoading
-            ? const Center(child: CircularProgressIndicator(color: _green))
-            : _n.loadFailed
-            ? _buildRetryState()
-            : !_n.hasQueues
-            ? _buildEmptyState()
-            : Column(
-                children: [
-                  _buildDateBar(),
-                  Expanded(child: _buildAgendaBody()),
-                ],
+      // Tout en blanc (comme WhatsApp) : l'AppBar, la barre de date et la
+      // barre du bas sont déjà blanches — plus de "marche" verdâtre entre
+      // l'en-tête et le contenu. La séparation en-tête/contenu passe par un
+      // fin trait (voir plus bas), pas par un fond de couleur différente.
+      backgroundColor: Colors.white,
+      appBar: _buildAppBar(),
+      body: _n.isLoading
+          ? const Center(child: CircularProgressIndicator(color: _green))
+          : _n.loadFailed
+          ? _buildRetryState()
+          : !_n.hasQueues
+          ? _buildEmptyState()
+          : NotificationListener<ScrollNotification>(
+              onNotification: _handleDateBarScroll,
+              child: NotificationListener<UserScrollNotification>(
+                onNotification: _handleUserScroll,
+                child: Column(
+                  children: [
+                    ValueListenableBuilder<double>(
+                      valueListenable: _dateBarCollapse,
+                      builder: (_, collapse, child) => Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ClipRect(
+                            child: Align(
+                              alignment: Alignment.topCenter,
+                              heightFactor: 1 - collapse,
+                              child: Opacity(
+                                opacity: 1 - collapse,
+                                child: child,
+                              ),
+                            ),
+                          ),
+                          // Limite en-tête / contenu : un fin trait, toujours
+                          // présent — il se retrouve sous la barre de date
+                          // quand elle est ouverte, sous l'AppBar quand elle
+                          // est repliée. Remplace l'ombre d'avant, qui faisait
+                          // une "marche" sur fond blanc.
+                          Container(
+                            height: 1,
+                            color: Colors.black.withValues(alpha: 0.06),
+                          ),
+                        ],
+                      ),
+                      child: _buildDateBar(),
+                    ),
+                    Expanded(child: _buildAgendaBody()),
+                  ],
+                ),
               ),
-        floatingActionButton: _n.hasQueues
-            ? FloatingActionButton(
-                onPressed: _quickAddLoading ? null : _showQuickAddDialog,
-                backgroundColor: _green,
-                child: _quickAddLoading
-                    ? const SizedBox(
-                        width: 22,
-                        height: 22,
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2.5,
-                        ),
-                      )
-                    : const Icon(Icons.add, color: Colors.white),
-              )
-            : null,
-        floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+            ),
+      floatingActionButton: _n.hasQueues
+          ? AnimatedSlide(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              offset: _fabVisible ? Offset.zero : const Offset(0, 1.4),
+              child: AnimatedScale(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                scale: _fabVisible ? 1.0 : 0.4,
+                child: AnimatedOpacity(
+                  duration: const Duration(milliseconds: 160),
+                  opacity: _fabVisible ? 1.0 : 0.0,
+                  child: IgnorePointer(
+                    ignoring: !_fabVisible,
+                    child: FloatingActionButton(
+                      onPressed: _quickAddLoading ? null : _showQuickAddDialog,
+                      backgroundColor: _green,
+                      child: _quickAddLoading
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                color: Colors.white,
+                                strokeWidth: 2.5,
+                              ),
+                            )
+                          : const Icon(Icons.add, color: Colors.white),
+                    ),
+                  ),
+                ),
+              ),
+            )
+          : null,
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 
@@ -179,6 +313,27 @@ class _HousePageState extends State<HousePage>
         ),
       ),
       actions: [
+        // Icône calendrier : n'apparaît que dans le dernier tiers du repli
+        // de la barre de date (pas dès le premier pixel défilé), et ouvre
+        // le même sélecteur qu'un appui sur la barre elle-même.
+        ValueListenableBuilder<double>(
+          valueListenable: _dateBarCollapse,
+          builder: (_, collapse, __) {
+            final iconOpacity = ((collapse - 0.7) / 0.3).clamp(0.0, 1.0);
+            if (iconOpacity == 0) return const SizedBox.shrink();
+            return Opacity(
+              opacity: iconOpacity,
+              child: IgnorePointer(
+                ignoring: iconOpacity < 0.4,
+                child: IconButton(
+                  icon: const Icon(Icons.calendar_month_rounded, color: _green),
+                  tooltip: 'Changer la date',
+                  onPressed: _pickDate,
+                ),
+              ),
+            );
+          },
+        ),
         if (!_n.isStaff)
           IconButton(
             icon: const Icon(Icons.group_rounded, color: _green),
@@ -195,22 +350,14 @@ class _HousePageState extends State<HousePage>
   // ── Barre de date ─────────────────────────────────────────
   Widget _buildDateBar() {
     final now = DateTime.now();
-    final isToday = _n.selectedDate.year == now.year &&
+    final isToday =
+        _n.selectedDate.year == now.year &&
         _n.selectedDate.month == now.month &&
         _n.selectedDate.day == now.day;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.07),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
+      color: Colors.white,
       child: Row(
         children: [
           IconButton(
@@ -224,9 +371,14 @@ class _HousePageState extends State<HousePage>
               onTap: _pickDate,
               borderRadius: BorderRadius.circular(8),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
-                  color: isToday ? _green.withValues(alpha: 0.08) : Colors.grey.shade50,
+                  color: isToday
+                      ? _green.withValues(alpha: 0.08)
+                      : Colors.grey.shade50,
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
                     color: isToday ? _green : Colors.grey.shade300,
@@ -302,19 +454,26 @@ class _HousePageState extends State<HousePage>
     }
     if (_n.queues.length == 1) return _buildQueueOrLoader(0);
 
-    return Column(
+    return Stack(
+      fit: StackFit.expand,
       children: [
-        Expanded(
-          child: PageView.builder(
-            controller: _pageController,
-            itemCount: _n.queues.length,
-            itemBuilder: (_, index) => Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: _buildQueueOrLoader(index),
-            ),
-          ),
+        // Aucun padding ici : la marge visible vient uniquement du
+        // `viewportFraction` du PageView, calculé dans
+        // `_configurePageController` à partir de `_queueSideMargin`.
+        PageView.builder(
+          controller: _pageController,
+          itemCount: _n.queues.length,
+          itemBuilder: (_, index) => _buildQueueOrLoader(index),
         ),
-        _buildPageIndicators(),
+        // Indicateurs de file, en légère surimpression en bas de l'agenda
+        // (pas de bande opaque qui réserverait de la place et cacherait la
+        // carte suivante).
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: IgnorePointer(child: _buildPageIndicators()),
+        ),
       ],
     );
   }
@@ -332,24 +491,24 @@ class _HousePageState extends State<HousePage>
         final current = _pageController.hasClients
             ? (_pageController.page ?? 0).round()
             : 0;
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 24, top: 4),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(_n.queues.length, (i) {
-              final isActive = i == current;
-              return AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                width: isActive ? 24 : 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: isActive ? _green : Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-              );
-            }),
-          ),
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: List.generate(_n.queues.length, (i) {
+            final isActive = i == current;
+            final closed = _n.queues[i]?.isClosedNow ?? false;
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              margin: const EdgeInsets.symmetric(horizontal: 4),
+              width: isActive ? 24 : 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: closed
+                    ? const Color(0xFFD64545)
+                    : (isActive ? _green : Colors.grey.shade300),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            );
+          }),
         );
       },
     );
@@ -374,33 +533,40 @@ class _HousePageState extends State<HousePage>
       if (i > 0 && hasMultiplePlages && current.timeSlotId.isNotEmpty) {
         final prev = slots[i - 1];
         if (prev.timeSlotId != current.timeSlotId) {
-          widgets.add(_PlageSeparator(
-            plageNumber: plageOrder[current.timeSlotId]!,
-            startTime: current.start,
-            timeFormat: _timeFormat,
-          ));
+          widgets.add(
+            _PlageSeparator(
+              plageNumber: plageOrder[current.timeSlotId]!,
+              startTime: current.start,
+              timeFormat: _timeFormat,
+            ),
+          );
         }
       }
 
-      widgets.add(_SlotCard(
-        slot: current,
-        timeFormat: _timeFormat,
-        isPast: _isPastSlot(current),
-        onTap: () => _showSlotDetails(current, queue),
-      ));
+      widgets.add(
+        _SlotCard(
+          slot: current,
+          timeFormat: _timeFormat,
+          isPast: _isPastSlot(current),
+          onTap: () => _showSlotDetails(current, queue),
+        ),
+      );
 
       if (i < slots.length - 1) {
         final next = slots[i + 1];
-        final sameTimeslot = current.timeSlotId.isNotEmpty &&
+        final sameTimeslot =
+            current.timeSlotId.isNotEmpty &&
             current.timeSlotId == next.timeSlotId;
         if (sameTimeslot) {
           final gap = next.start.difference(current.end);
           if (gap.inMinutes > 0) {
-            widgets.add(_TimeslotSeparator(
-              endTime: current.end,
-              startTime: next.start,
-              timeFormat: _timeFormat,
-            ));
+            widgets.add(
+              _TimeslotSeparator(
+                endTime: current.end,
+                startTime: next.start,
+                timeFormat: _timeFormat,
+              ),
+            );
           }
         }
       }
@@ -409,6 +575,11 @@ class _HousePageState extends State<HousePage>
   }
 
   Widget _buildQueueView(_QueueAgenda queue) {
+    // Plusieurs files : la carte de la file affichée occupe toute la largeur
+    // de son "slot" dans le PageView (la marge visible vient uniquement du
+    // viewportFraction, déjà égale à celle de la barre de navigation) — pas
+    // de padding en plus ici. Une seule file : padding habituel, inchangé.
+    final isMultiQueue = _n.queues.length > 1;
     final slotsForQueue = queue.slots.toList()
       ..sort((a, b) => a.start.compareTo(b.start));
 
@@ -428,13 +599,16 @@ class _HousePageState extends State<HousePage>
       _n.selectedDate.day,
     );
     final isToday = selectedDay == today;
-    final isWorkingDay = queue.weekdays.isEmpty ||
+    final isWorkingDay =
+        queue.weekdays.isEmpty ||
         queue.weekdays.contains(_n.selectedDate.weekday);
     final isDayOver = isToday && isWorkingDay;
-    final isBeyondHorizon =
-        selectedDay.isAfter(today.add(const Duration(days: 7)));
-    final isBeforeHistory =
-        selectedDay.isBefore(today.subtract(const Duration(days: 7)));
+    final isBeyondHorizon = selectedDay.isAfter(
+      today.add(const Duration(days: 7)),
+    );
+    final isBeforeHistory = selectedDay.isBefore(
+      today.subtract(const Duration(days: 7)),
+    );
 
     // Séparation passé / à venir uniquement pour aujourd'hui.
     final pastSlots = isToday
@@ -445,9 +619,17 @@ class _HousePageState extends State<HousePage>
         : slotsForQueue;
 
     final pastWidgets = _buildSlotWidgetList(
-        pastSlots, plageOrder, hasMultiplePlages, queue);
+      pastSlots,
+      plageOrder,
+      hasMultiplePlages,
+      queue,
+    );
     final upcomingWidgets = _buildSlotWidgetList(
-        upcomingSlots, plageOrder, hasMultiplePlages, queue);
+      upcomingSlots,
+      plageOrder,
+      hasMultiplePlages,
+      queue,
+    );
 
     final isExpanded = _pastExpanded[queue.id] ?? false;
 
@@ -458,9 +640,16 @@ class _HousePageState extends State<HousePage>
       child: ListView(
         controller: _scrollControllerFor(queue.id),
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: EdgeInsets.symmetric(
+          horizontal: isMultiQueue ? _queueCardGutter : 12,
+          vertical: 8,
+        ),
         children: [
           _buildQueueHeaderCard(queue),
+          if (queue.isClosedNow || queue.closurePlannedFor != null) ...[
+            const SizedBox(height: 12),
+            _buildClosureBanner(queue),
+          ],
           const SizedBox(height: 12),
 
           if (slotsForQueue.isEmpty)
@@ -508,10 +697,7 @@ class _HousePageState extends State<HousePage>
                         : isDayOver
                         ? 'Les créneaux d\'aujourd\'hui sont tous passés'
                         : '',
-                    style: TextStyle(
-                      color: Colors.grey.shade400,
-                      fontSize: 12,
-                    ),
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
                   ),
                   const SizedBox(height: 16),
                   if (!isBeyondHorizon && !isBeforeHistory)
@@ -538,14 +724,10 @@ class _HousePageState extends State<HousePage>
                 isCountApproximate:
                     upcomingSlots.isEmpty && _n.hasMore(queue.id),
                 isExpanded: isExpanded,
-                onTap: () => setState(
-                  () => _pastExpanded[queue.id] = !isExpanded,
-                ),
+                onTap: () =>
+                    setState(() => _pastExpanded[queue.id] = !isExpanded),
               ),
-              _PastSlotsSection(
-                isExpanded: isExpanded,
-                children: pastWidgets,
-              ),
+              _PastSlotsSection(isExpanded: isExpanded, children: pastWidgets),
             ],
 
             // ── Créneaux à venir ─────────────────────────────────────────
@@ -560,7 +742,10 @@ class _HousePageState extends State<HousePage>
                 child: SizedBox(
                   width: 24,
                   height: 24,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: _green),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: _green,
+                  ),
                 ),
               ),
             )
@@ -580,6 +765,83 @@ class _HousePageState extends State<HousePage>
     );
   }
 
+  // ── Bandeau de fermeture ──────────────────────────────────
+  // Fermeture active → rouge doux · fermeture seulement programmée → ambre.
+  Widget _buildClosureBanner(_QueueAgenda queue) {
+    final planned = queue.closurePlannedFor;
+    final active = queue.isClosedNow;
+
+    final String title;
+    final String subtitle;
+    final IconData icon;
+    final Color base;
+
+    if (active) {
+      base = const Color(0xFFD64545);
+      icon = Icons.lock_outline_rounded;
+      title = 'Réservations fermées';
+      final end = queue.closureEnd;
+      subtitle = (end != null && end.isAfter(DateTime.now()))
+          ? 'Rouvre le ${DateFormat('d MMMM', 'fr_FR').format(end)}. '
+                'Les clients déjà réservés restent à honorer.'
+          : 'Jusqu\'à nouvel ordre. Les clients déjà réservés restent à honorer.';
+    } else {
+      base = const Color(0xFFB26B00);
+      icon = Icons.event_busy_rounded;
+      title = 'Fermeture prévue';
+      subtitle =
+          'À partir du ${DateFormat('d MMMM', 'fr_FR').format(planned!)}. '
+          'Les réservations restent ouvertes d\'ici là.';
+    }
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: base.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: base.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(7),
+            decoration: BoxDecoration(
+              color: base.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(icon, size: 17, color: base),
+          ),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: GoogleFonts.poppins(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: base,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.35,
+                    color: Colors.grey.shade700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Carte en-tête de file ─────────────────────────────────
   Widget _buildQueueHeaderCard(_QueueAgenda queue) {
     final now = DateTime.now();
@@ -591,15 +853,18 @@ class _HousePageState extends State<HousePage>
 
     return _QueueHeaderCard(
       queue: queue,
-      currentDuration:
-          queue.timeSlotCount == 1 ? _n.currentDuration(queue) : null,
-      currentCapacity:
-          queue.timeSlotCount == 1 ? _n.currentCapacity(queue) : null,
+      currentDuration: queue.timeSlotCount == 1
+          ? _n.currentDuration(queue)
+          : null,
+      currentCapacity: queue.timeSlotCount == 1
+          ? _n.currentCapacity(queue)
+          : null,
       onDurationChanged: (delta) => _onDurationChanged(queue, delta),
       onCapacityChanged: (delta) => _onCapacityChanged(queue, delta),
       onBlock: () => _onBlockRequest(queue),
       onUnblock: () => _onUnblock(queue),
-      isPastDay: selectedDay.isBefore(today) ||
+      isPastDay:
+          selectedDay.isBefore(today) ||
           (queue.weekdays.isNotEmpty &&
               !queue.weekdays.contains(_n.selectedDate.weekday)),
       isExpanded: isExpanded,
@@ -636,7 +901,8 @@ class _HousePageState extends State<HousePage>
         companyId: _n.companyId ?? '',
         green: _green,
         isPast: _isPastSlot(slot),
-        onAddClient: (name) => _createManualAppointmentForSlot(name, queue, slot),
+        onAddClient: (name) =>
+            _createManualAppointmentForSlot(name, queue, slot),
         onDeleteClient: (customer) =>
             _deleteManualClientForSlot(customer, queue, slot),
       ),
@@ -652,8 +918,20 @@ class _HousePageState extends State<HousePage>
       lastDate: DateTime.now().add(const Duration(days: 365)),
       locale: const Locale('fr'),
       helpText: 'Créneaux visibles : J-7 → J+7',
+      builder: (context, child) =>
+          Theme(data: baxaDatePickerTheme(context, _green), child: child!),
     );
-    if (picked != null && picked != _n.selectedDate) _n.setDate(picked);
+    // Comparaison sur le jour seul : le calendrier renvoie toujours minuit,
+    // alors que `_n.selectedDate` garde l'heure de sa dernière sélection —
+    // une comparaison stricte les verrait "différents" même en rappuyant
+    // sur OK sur le jour déjà affiché, et déclencherait un rafraîchissement
+    // pour rien.
+    final sameDay =
+        picked != null &&
+        picked.year == _n.selectedDate.year &&
+        picked.month == _n.selectedDate.month &&
+        picked.day == _n.selectedDate.day;
+    if (picked != null && !sameDay) _n.setDate(picked);
   }
 
   Future<void> _jumpToNextSlotDate(String queueId) async {
@@ -689,14 +967,21 @@ class _HousePageState extends State<HousePage>
     if (queues.isEmpty) return;
     var currentIndex = 0;
     if (queues.length > 1 && _pageController.hasClients) {
-      currentIndex =
-          (_pageController.page ?? 0).round().clamp(0, queues.length - 1);
+      currentIndex = (_pageController.page ?? 0).round().clamp(
+        0,
+        queues.length - 1,
+      );
     }
     final bestQueue = queues[currentIndex];
 
-    final hasCandidate = !bestQueue.isBlocked &&
-        bestQueue.slots.any((s) =>
-            !s.isBlocked && s.reserved < s.capacity && s.start.isAfter(lowerBound));
+    final hasCandidate =
+        !bestQueue.isBlocked &&
+        bestQueue.slots.any(
+          (s) =>
+              !s.isBlocked &&
+              s.reserved < s.capacity &&
+              s.start.isAfter(lowerBound),
+        );
 
     if (!hasCandidate) {
       if (mounted) {
@@ -856,9 +1141,7 @@ class _HousePageState extends State<HousePage>
         ),
         backgroundColor: const Color(0xFF1A1C2E),
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         margin: const EdgeInsets.all(16),
         elevation: 4,
         duration: const Duration(seconds: 3),
@@ -912,9 +1195,7 @@ class _HousePageState extends State<HousePage>
         ),
         backgroundColor: const Color(0xFF1A1C2E),
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         margin: const EdgeInsets.all(16),
         elevation: 4,
         duration: const Duration(seconds: 3),
@@ -925,40 +1206,50 @@ class _HousePageState extends State<HousePage>
 
   // ── Blocage ───────────────────────────────────────────────
   Future<void> _onBlockRequest(_QueueAgenda queue) async {
-    if (_n.companyId == null) return;
-    final timeslots = await _n.fetchTimeSlots(queue.id);
-    if (timeslots.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Aucun créneau à bloquer')),
-        );
-      }
-      return;
-    }
-    if (!mounted) return;
-    await showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (_) => _BlockSheet(
-        timeslots: timeslots,
-        daySlots: queue.slots,
-        onConfirm: ({required String? timeSlotId, required String reason}) async {
-          final error = await _n.blockTimeSlot(
-            queueId: queue.id,
-            timeSlotId: timeSlotId,
-            reason: reason,
+    if (!_liveEditBusyQueueIds.add(queue.id)) return;
+    try {
+      if (_n.companyId == null) return;
+      final timeslots = await _n.fetchTimeSlots(queue.id);
+      if (timeslots.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Aucun créneau à bloquer')),
           );
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text(error ?? 'Créneaux bloqués ✅'),
-              backgroundColor: error != null ? Colors.red.shade600 : null,
-            ));
-          }
-          return null;
-        },
-      ),
-    );
+        }
+        return;
+      }
+      if (!mounted) return;
+      await showModalBottomSheet(
+        context: context,
+        backgroundColor: Colors.transparent,
+        isScrollControlled: true,
+        builder: (_) => _BlockSheet(
+          timeslots: timeslots,
+          daySlots: queue.slots,
+          onConfirm:
+              ({required String? timeSlotId, required String reason}) async {
+                final error = await _n.blockTimeSlot(
+                  queueId: queue.id,
+                  timeSlotId: timeSlotId,
+                  reason: reason,
+                );
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(error ?? 'Créneaux bloqués ✅'),
+                      backgroundColor: error != null
+                          ? Colors.red.shade600
+                          : null,
+                    ),
+                  );
+                }
+                return null;
+              },
+        ),
+      );
+    } finally {
+      _liveEditBusyQueueIds.remove(queue.id);
+    }
   }
 
   Future<void> _onUnblock(_QueueAgenda queue) async {
@@ -968,67 +1259,76 @@ class _HousePageState extends State<HousePage>
 
   // ── Modification durée ────────────────────────────────────
   Future<void> _onDurationChanged(_QueueAgenda queue, int delta) async {
-    final tsInfo = await _selectTimeSlot(queue);
-    if (tsInfo == null) return;
+    if (!_liveEditBusyQueueIds.add(queue.id)) return;
+    try {
+      final tsInfo = await _selectTimeSlot(queue);
+      if (tsInfo == null) return;
 
-    final newDuration = (tsInfo.duration + delta).clamp(5, 120);
-    if (newDuration == tsInfo.duration) return;
+      final newDuration = (tsInfo.duration + delta).clamp(5, 120);
+      if (newDuration == tsInfo.duration) return;
 
-    final plageStart = _parseTimeString(tsInfo.startTime, _n.selectedDate);
-    final plageEnd = _parseTimeString(tsInfo.endTime, _n.selectedDate);
-    final slotsInRange = queue.slots
-        .where((s) =>
-            !s.start.isBefore(plageStart) && !s.end.isAfter(plageEnd))
-        .toList();
+      final plageStart = _parseTimeString(tsInfo.startTime, _n.selectedDate);
+      final plageEnd = _parseTimeString(tsInfo.endTime, _n.selectedDate);
+      final slotsInRange = queue.slots
+          .where(
+            (s) => !s.start.isBefore(plageStart) && !s.end.isAfter(plageEnd),
+          )
+          .toList();
 
-    final now = DateTime.now();
-    final isViewingToday = _n.selectedDate.year == now.year &&
-        _n.selectedDate.month == now.month &&
-        _n.selectedDate.day == now.day;
-    final todayDone = isViewingToday &&
-        (slotsInRange.isEmpty ||
-            slotsInRange.every((s) => s.end.isBefore(now)));
+      final now = DateTime.now();
+      final isViewingToday =
+          _n.selectedDate.year == now.year &&
+          _n.selectedDate.month == now.month &&
+          _n.selectedDate.day == now.day;
+      final todayDone =
+          isViewingToday &&
+          (slotsInRange.isEmpty ||
+              slotsInRange.every((s) => s.end.isBefore(now)));
 
-    final res = await _showModifDialog(
-      context,
-      title: 'Modifier la durée',
-      preview: 'Durée : ${tsInfo.duration} min → $newDuration min',
-      hasReservations: _n.hasReservationsInSlots(slotsInRange),
-      isCapacity: false,
-      todayDone: todayDone,
-    );
-    if (res == null) return;
+      final res = await _showModifDialog(
+        context,
+        title: 'Modifier la durée',
+        preview: 'Durée : ${tsInfo.duration} min → $newDuration min',
+        hasReservations: _n.hasReservationsInSlots(slotsInRange),
+        isCapacity: false,
+        todayDone: todayDone,
+      );
+      if (res == null) return;
 
-    _n.setQueueLoading(queue.id);
-    final result = await _n.applyDurationChange(
-      queue: queue,
-      tsInfo: tsInfo,
-      plageStart: plageStart,
-      plageEnd: plageEnd,
-      newDuration: newDuration,
-      type: res.type,
-    );
-    if (mounted) {
-      _snackBar(result);
-      _n.refreshSilent();
-      // Cette modification vient de créer une trace de révocation — si
-      // c'est la 1ère fois que l'icône de retour apparaît pour cette
-      // entreprise, on le signale une seule fois.
-      if (result.success) {
-        final seen = await _n.hasSeenRevertHint();
-        if (!seen && mounted) {
-          await showIconDiscoverySpotlight(
-            context,
-            mockIcon: Icons.timer,
-            badgeIcon: Icons.undo_rounded,
-            title: 'Nouveau : bouton retour',
-            body: 'Cette icône apparaît après une modification de durée en '
-                'direct. Vous avez 5 minutes pour l\'annuler en appuyant '
-                'simplement dessus.',
-          );
-          if (mounted) await _n.markRevertHintSeen();
+      _n.setQueueLoading(queue.id);
+      final result = await _n.applyDurationChange(
+        queue: queue,
+        tsInfo: tsInfo,
+        plageStart: plageStart,
+        plageEnd: plageEnd,
+        newDuration: newDuration,
+        type: res.type,
+      );
+      if (mounted) {
+        _snackBar(result);
+        _n.refreshSilent();
+        // Cette modification vient de créer une trace de révocation — si
+        // c'est la 1ère fois que l'icône de retour apparaît pour cette
+        // entreprise, on le signale une seule fois.
+        if (result.success) {
+          final seen = await _n.hasSeenRevertHint();
+          if (!seen && mounted) {
+            await showIconDiscoverySpotlight(
+              context,
+              mockIcon: Icons.timer,
+              badgeIcon: Icons.undo_rounded,
+              title: 'Nouveau : bouton retour',
+              body:
+                  'Cette icône apparaît après une modification de durée en '
+                  'direct. Vous avez 5 minutes pour l\'annuler en appuyant '
+                  'simplement dessus.',
+            );
+            if (mounted) await _n.markRevertHintSeen();
+          }
         }
       }
+    } finally {
+      _liveEditBusyQueueIds.remove(queue.id);
     }
   }
 
@@ -1042,69 +1342,64 @@ class _HousePageState extends State<HousePage>
   }
 
   // ── Modification capacité ─────────────────────────────────
+  // Ne jamais bloquer la réduction de capacité au prétexte qu'un créneau est
+  // complet : `modifySlotCapacity` clampe déjà, créneau par créneau, la
+  // nouvelle capacité au nombre de réservations existantes (un créneau
+  // complet garde sa capacité et ses réservations intactes, les autres
+  // s'ajustent normalement). Un pré-check bloquant ici serait redondant et,
+  // pire, empêcherait un ajustement légitime dès qu'UN SEUL créneau de la
+  // plage est complet.
   Future<void> _onCapacityChanged(_QueueAgenda queue, int delta) async {
-    final tsInfo = await _selectTimeSlot(queue);
-    if (tsInfo == null) return;
+    if (!_liveEditBusyQueueIds.add(queue.id)) return;
+    try {
+      final tsInfo = await _selectTimeSlot(queue);
+      if (tsInfo == null) return;
 
-    final newCapacity = (tsInfo.capacity + delta).clamp(1, 50);
-    if (newCapacity == tsInfo.capacity) return;
+      final newCapacity = (tsInfo.capacity + delta).clamp(1, 50);
+      if (newCapacity == tsInfo.capacity) return;
 
-    final plageStart = _parseTimeString(tsInfo.startTime, _n.selectedDate);
-    final plageEnd = _parseTimeString(tsInfo.endTime, _n.selectedDate);
-    final slotsInRange = queue.slots
-        .where((s) =>
-            !s.start.isBefore(plageStart) && !s.end.isAfter(plageEnd))
-        .toList();
+      final plageStart = _parseTimeString(tsInfo.startTime, _n.selectedDate);
+      final plageEnd = _parseTimeString(tsInfo.endTime, _n.selectedDate);
+      final slotsInRange = queue.slots
+          .where(
+            (s) => !s.start.isBefore(plageStart) && !s.end.isAfter(plageEnd),
+          )
+          .toList();
 
-    if (delta < 0 && _n.hasReservationsInSlots(slotsInRange)) {
-      final maxReserved = slotsInRange
-          .map((s) => s.reserved)
-          .fold(0, (a, b) => a > b ? a : b);
-      if (newCapacity < maxReserved) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(
-              '⚠️ Capacité minimale : $maxReserved '
-              '(créneaux avec réservations existantes)',
-            ),
-            backgroundColor: Colors.orange.shade700,
-            duration: const Duration(seconds: 4),
-          ));
-        }
-        return;
+      final now = DateTime.now();
+      final isViewingToday =
+          _n.selectedDate.year == now.year &&
+          _n.selectedDate.month == now.month &&
+          _n.selectedDate.day == now.day;
+      final todayDone =
+          isViewingToday &&
+          (slotsInRange.isEmpty ||
+              slotsInRange.every((s) => s.end.isBefore(now)));
+
+      final res = await _showModifDialog(
+        context,
+        title: 'Modifier la capacité',
+        preview: 'Capacité : ${tsInfo.capacity} pers. → $newCapacity pers.',
+        hasReservations: _n.hasReservationsInSlots(slotsInRange),
+        isCapacity: true,
+        todayDone: todayDone,
+      );
+      if (res == null) return;
+
+      _n.setQueueLoading(queue.id);
+      final result = await _n.agenda.modifySlotCapacity(
+        queueId: queue.id,
+        date: _n.selectedDate,
+        newCapacity: newCapacity,
+        type: res.type,
+        timeSlotId: tsInfo.id,
+      );
+      if (mounted) {
+        _snackBar(result);
+        _n.refreshSilent();
       }
-    }
-
-    final now = DateTime.now();
-    final isViewingToday = _n.selectedDate.year == now.year &&
-        _n.selectedDate.month == now.month &&
-        _n.selectedDate.day == now.day;
-    final todayDone = isViewingToday &&
-        (slotsInRange.isEmpty ||
-            slotsInRange.every((s) => s.end.isBefore(now)));
-
-    final res = await _showModifDialog(
-      context,
-      title: 'Modifier la capacité',
-      preview: 'Capacité : ${tsInfo.capacity} pers. → $newCapacity pers.',
-      hasReservations: _n.hasReservationsInSlots(slotsInRange),
-      isCapacity: true,
-      todayDone: todayDone,
-    );
-    if (res == null) return;
-
-    _n.setQueueLoading(queue.id);
-    final result = await _n.agenda.modifySlotCapacity(
-      queueId: queue.id,
-      date: _n.selectedDate,
-      newCapacity: newCapacity,
-      type: res.type,
-      applyToFuture: res.applyToFuture,
-      timeSlotId: tsInfo.id,
-    );
-    if (mounted) {
-      _snackBar(result);
-      _n.refreshSilent();
+    } finally {
+      _liveEditBusyQueueIds.remove(queue.id);
     }
   }
 
@@ -1281,7 +1576,8 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
     final tf = widget.timeFormat;
     final isFull = _reservedCount >= slot.capacity;
     final isBlocked = slot.isBlocked;
-    final canAdd = !isFull && !isBlocked && !widget.isPast && widget.onAddClient != null;
+    final canAdd =
+        !isFull && !isBlocked && !widget.isPast && widget.onAddClient != null;
     final remaining = slot.capacity - _reservedCount;
 
     final bottomPadding = 28.0 + MediaQuery.of(context).padding.bottom;
@@ -1453,10 +1749,7 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
               else
                 Text(
                   'Aucun nom trouvé',
-                  style: TextStyle(
-                    color: Colors.grey.shade500,
-                    fontSize: 14,
-                  ),
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
                 ),
               const SizedBox(height: 12),
             ] else ...[
@@ -1577,7 +1870,7 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
 
   Widget _statusBadge(bool isBlocked, bool isFull, int remaining) {
     if (isBlocked) return _badge('Bloqué', Colors.red.shade600);
-    if (isFull) return _badge('Complet', Colors.red.shade400);
+    if (isFull) return _badge('Complet', _green);
     if (remaining < widget.slot.capacity) {
       return _badge('$remaining pl.', Colors.orange.shade500);
     }
@@ -1651,6 +1944,8 @@ class _QueueAgenda {
   final QueueStats stats;
   final List<int> weekdays;
   final int timeSlotCount;
+  final DateTime? closureStart;
+  final DateTime? closureEnd;
 
   _QueueAgenda({
     required this.id,
@@ -1661,13 +1956,23 @@ class _QueueAgenda {
     required this.stats,
     this.weekdays = const [],
     this.timeSlotCount = 0,
+    this.closureStart,
+    this.closureEnd,
   });
+
+  bool get isClosedNow => isQueueClosedNow(closureStart, closureEnd);
+
+  /// Fermeture posée mais pas encore active (date de début future).
+  DateTime? get closurePlannedFor {
+    final cs = closureStart;
+    if (cs == null || isClosedNow) return null;
+    return cs.isAfter(DateTime.now()) ? cs : null;
+  }
 }
 
 class _ModifResult {
   final ModificationType type;
-  final bool applyToFuture;
-  _ModifResult({required this.type, this.applyToFuture = false});
+  _ModifResult({required this.type});
 }
 
 class _TimeSlotInfo {
@@ -1699,4 +2004,3 @@ class _TimeSlotInfo {
     this.deleteAfter,
   });
 }
-

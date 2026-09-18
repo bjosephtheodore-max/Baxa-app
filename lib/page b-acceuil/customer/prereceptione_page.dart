@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:baxa/page%20b-acceuil/customer/customer_page.dart';
 import 'package:baxa/services/locale_service.dart';
 import 'package:baxa/services/location_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:geolocator/geolocator.dart';
@@ -17,8 +17,7 @@ class PrereceptionePage extends StatefulWidget {
   State<PrereceptionePage> createState() => _PrereceptionePageState();
 }
 
-class _PrereceptionePageState extends State<PrereceptionePage>
-    with SingleTickerProviderStateMixin {
+class _PrereceptionePageState extends State<PrereceptionePage> {
   static const Color _green = Color(0xFF4B8B5E);
   static const Color _textDark = Color(0xFF1A2E1F);
 
@@ -27,20 +26,8 @@ class _PrereceptionePageState extends State<PrereceptionePage>
   final _nomController = TextEditingController();
   bool _loading = false;
 
-  late final AnimationController _blobCtrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _blobCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 8),
-    )..repeat();
-  }
-
   @override
   void dispose() {
-    _blobCtrl.dispose();
     _prenomController.dispose();
     _nomController.dispose();
     super.dispose();
@@ -62,6 +49,10 @@ class _PrereceptionePageState extends State<PrereceptionePage>
         'createdAt': FieldValue.serverTimestamp(),
         ...LocaleService.toFirestoreMap(),
       }, SetOptions(merge: true));
+      await FirebaseAnalytics.instance.setUserProperty(
+        name: 'role',
+        value: 'customer',
+      );
       try {
         await FirebaseMessaging.instance.requestPermission();
         final token = await FirebaseMessaging.instance.getToken();
@@ -117,22 +108,11 @@ class _PrereceptionePageState extends State<PrereceptionePage>
 
   @override
   Widget build(BuildContext context) {
-    final keyboardH = MediaQuery.of(context).viewInsets.bottom;
     return Scaffold(
       resizeToAvoidBottomInset: true,
       backgroundColor: Colors.white,
       body: Stack(
         children: [
-          // ── Blobs animés en fond ─────────────────────────────────
-          Positioned.fill(
-            bottom: -keyboardH,
-            child: AnimatedBuilder(
-              animation: _blobCtrl,
-              builder: (_, __) =>
-                  CustomPaint(painter: _BlobPainter(_blobCtrl.value)),
-            ),
-          ),
-
           // ── Contenu ─────────────────────────────────────────────
           SafeArea(
             child: Padding(
@@ -290,63 +270,4 @@ class _PrereceptionePageState extends State<PrereceptionePage>
       validator: (v) => (v == null || v.trim().isEmpty) ? 'Obligatoire' : null,
     );
   }
-}
-
-// ── Blobs animés ───────────────────────────────────────────────────────────────
-class _BlobPainter extends CustomPainter {
-  final double t;
-  const _BlobPainter(this.t);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    _drawBlob(
-      canvas,
-      Offset(
-        size.width * (0.15 + 0.08 * sin(t * 2 * pi)),
-        size.height * (0.20 + 0.06 * cos(t * 2 * pi * 0.7)),
-      ),
-      size.width * (0.38 + 0.04 * sin(t * 2 * pi * 1.3)),
-      const Color(0xFFB7E4C7).withValues(alpha: 0.45),
-    );
-
-    _drawBlob(
-      canvas,
-      Offset(
-        size.width * (0.80 + 0.07 * cos(t * 2 * pi * 0.9)),
-        size.height * (0.35 + 0.08 * sin(t * 2 * pi * 1.1)),
-      ),
-      size.width * (0.32 + 0.03 * cos(t * 2 * pi * 1.5)),
-      const Color(0xFF95D5B2).withValues(alpha: 0.35),
-    );
-
-    _drawBlob(
-      canvas,
-      Offset(
-        size.width * (0.50 + 0.10 * sin(t * 2 * pi * 1.2)),
-        size.height * (0.72 + 0.05 * cos(t * 2 * pi * 0.8)),
-      ),
-      size.width * (0.44 + 0.05 * sin(t * 2 * pi * 0.6)),
-      const Color(0xFF74C69D).withValues(alpha: 0.28),
-    );
-
-    _drawBlob(
-      canvas,
-      Offset(
-        size.width * (0.10 + 0.06 * cos(t * 2 * pi * 1.4)),
-        size.height * (0.65 + 0.07 * sin(t * 2 * pi * 0.9)),
-      ),
-      size.width * (0.28 + 0.03 * cos(t * 2 * pi)),
-      const Color(0xFFD8F3DC).withValues(alpha: 0.55),
-    );
-  }
-
-  void _drawBlob(Canvas canvas, Offset center, double radius, Color color) {
-    final paint = Paint()
-      ..color = color
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 48);
-    canvas.drawCircle(center, radius, paint);
-  }
-
-  @override
-  bool shouldRepaint(_BlobPainter old) => old.t != t;
 }

@@ -15,6 +15,11 @@ const PROJECT_ID =
 const TASKS_LOCATION = "us-central1";
 const TASKS_QUEUE = "reservation-notifications";
 
+// Nombre maximum de réservations qu'un client peut créer par jour.
+// MIROIR de kMaxDailyReservations (lib/services/booking_constants.dart) —
+// si la limite change là-bas, la changer ici aussi.
+const MAX_DAILY_RESERVATIONS = 5;
+
 // ────────────────────────────────────────────────────────────────────
 // Une file est « fermée maintenant » si une fermeture (closureStart /
 // closureEnd ; closureEnd absent = fermeture indéterminée) englobe
@@ -35,35 +40,51 @@ function isQueueClosedNow(closureStart, closureEnd, now) {
 
 // ────────────────────────────────────────────────────────────────────
 // Résumé « recherche » d'une entreprise, écrit sur companies/{id} :
-//   queueCount : nombre de files
-//   closedNow  : true si TOUTES les files sont fermées maintenant
-//   reopenAt   : date de réouverture si toutes datées (absent sinon)
-// Permet à la page de recherche client de filtrer / étiqueter sans lire
-// la sous-collection `queues` de chaque entreprise.
+//   queueCount        : nombre de files
+//   closedNow         : true si TOUTES les files sont fermées maintenant
+//   reopenAt          : date de réouverture si toutes datées (absent sinon)
+//   closurePlannedFor : plus proche fermeture posée mais PAS encore active
+//                       (absent si aucune / si déjà fermé)
+// Permet à la page de recherche client de filtrer / étiqueter, et à la CF
+// onCompanyStateChange de prévenir le staff, sans lire la sous-collection
+// `queues` de chaque entreprise.
 // ────────────────────────────────────────────────────────────────────
 async function writeCompanySearchSummary(companyId, queuesDocs, now) {
+  const n = now || new Date();
   const count = queuesDocs.length;
   let allClosed = count > 0;
   let latestEnd = null;
   let anyIndefinite = false;
+  let earliestPlanned = null;
+
   for (const q of queuesDocs) {
     const d = q.data();
-    if (!isQueueClosedNow(d.closureStart, d.closureEnd, now)) {
-      allClosed = false;
-      break;
-    }
-    if (d.closureEnd) {
-      const e = d.closureEnd.toDate();
-      if (latestEnd === null || e > latestEnd) latestEnd = e;
-    } else {
-      anyIndefinite = true;
+    const closed = isQueueClosedNow(d.closureStart, d.closureEnd, n);
+    if (!closed) allClosed = false;
+
+    if (closed) {
+      if (d.closureEnd) {
+        const e = d.closureEnd.toDate();
+        if (latestEnd === null || e > latestEnd) latestEnd = e;
+      } else {
+        anyIndefinite = true;
+      }
+    } else if (d.closureStart) {
+      const cs = d.closureStart.toDate();
+      if (cs > n && (earliestPlanned === null || cs < earliestPlanned)) {
+        earliestPlanned = cs;
+      }
     }
   }
+
   const update = {
     queueCount: count,
     closedNow: allClosed,
     reopenAt: (allClosed && !anyIndefinite && latestEnd)
       ? admin.firestore.Timestamp.fromDate(latestEnd)
+      : admin.firestore.FieldValue.delete(),
+    closurePlannedFor: (!allClosed && earliestPlanned)
+      ? admin.firestore.Timestamp.fromDate(earliestPlanned)
       : admin.firestore.FieldValue.delete(),
   };
   try {
@@ -75,51 +96,79 @@ async function writeCompanySearchSummary(companyId, queuesDocs, now) {
 }
 
 // ====================================================================
-// FONCTION 2 : Nettoyage automatique des notifications > 7 jours
+// FONCTION 2 : Nettoyage automatique du journal de notifications entreprise
+//
+// Durée de vie PAR TYPE (le journal doit rester lisible — surtout des
+// récaps, jamais un magma) :
+//   récap de plage ............ 30 jours
+//   bilan hebdo (sous-utilisée)  7 jours
+//   plage complète / bientôt / nouveau membre .... 2 jours
+//   résumé du matin / coup de coude ............. 24 h
+// Purge aussi l'ancienne collection `notificationsHistory` (transition).
 // ====================================================================
-exports.cleanOldNotifications = functions.pubsub
-  .schedule("0 2 * * *") // Tous les jours à 2h du matin UTC
-  .timeZone("Europe/Paris")
-  .onRun(async (context) => {
-    console.log("🧹 Nettoyage des notifications anciennes...");
+const COMPANY_NOTIF_TTL_HOURS = {
+  plage_recap: 30 * 24,
+  plage_underused: 7 * 24,
+  plage_full: 2 * 24,
+  plage_near_full: 2 * 24,
+  staff_joined: 2 * 24,
+  day_digest: 24,
+  queue_checkin: 24,
+};
+const COMPANY_NOTIF_DEFAULT_TTL_HOURS = 7 * 24;
 
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+exports.cleanOldNotifications = functions.pubsub
+  .schedule("0 2 * * *")
+  .timeZone("Europe/Paris")
+  .onRun(async () => {
+    const now = Date.now();
+    // Rien de plus jeune que 24h ne peut être expiré — pré-filtre grossier.
+    const coarseCutoff = new Date(now - 24 * 3600 * 1000);
+    const sevenDaysAgo = new Date(now - 7 * 24 * 3600 * 1000);
 
     let totalDeleted = 0;
     const companiesSnap = await db.collection("companies").get();
 
     for (const companyDoc of companiesSnap.docs) {
-      const companyId = companyDoc.id;
-
-      const oldNotifs = await db
-        .collection("companies")
-        .doc(companyId)
-        .collection("notificationsHistory")
-        .where("createdAt", "<", sevenDaysAgo)
+      // ── Journal unifié : purge par type ──
+      const journalSnap = await companyDoc.ref
+        .collection("companyNotifications")
+        .where("createdAt", "<", coarseCutoff)
         .get();
-
-      if (oldNotifs.empty) continue;
 
       let batch = db.batch();
       let count = 0;
-
-      for (const doc of oldNotifs.docs) {
-        batch.delete(doc.ref);
-        count++;
-        if (count >= 500) {
-          await batch.commit();
-          batch = db.batch();
-          count = 0;
+      for (const doc of journalSnap.docs) {
+        const d = doc.data();
+        const created = d.createdAt ? d.createdAt.toDate().getTime() : 0;
+        const ttlH = COMPANY_NOTIF_TTL_HOURS[d.type] ||
+          COMPANY_NOTIF_DEFAULT_TTL_HOURS;
+        if (created && now - created > ttlH * 3600 * 1000) {
+          batch.delete(doc.ref);
+          totalDeleted++;
+          if (++count >= 400) {
+            await batch.commit();
+            batch = db.batch();
+            count = 0;
+          }
         }
       }
       if (count > 0) await batch.commit();
 
-      totalDeleted += oldNotifs.size;
-      console.log(`✅ ${companyId}: ${oldNotifs.size} notification(s) supprimée(s)`);
+      // ── Ancienne collection (transition) : > 7 jours ──
+      const oldNotifs = await companyDoc.ref
+        .collection("notificationsHistory")
+        .where("createdAt", "<", sevenDaysAgo)
+        .get();
+      if (!oldNotifs.empty) {
+        let b2 = db.batch();
+        oldNotifs.docs.forEach((doc) => b2.delete(doc.ref));
+        await b2.commit();
+        totalDeleted += oldNotifs.size;
+      }
     }
 
-    console.log(`🎉 Total supprimé : ${totalDeleted} notification(s)`);
+    console.log(`🧹 Journal entreprise : ${totalDeleted} notification(s) purgée(s)`);
     return { success: true, totalDeleted };
   });
 
@@ -392,9 +441,8 @@ exports.generateSlots = functions.pubsub
             };
             await timeSlotDoc.ref.update(promoted);
             tsData = { ...tsData, ...promoted };
-            if (tsData.maxAdvanceDays) {
-              await queueDoc.ref.update({ maxAdvanceDays: tsData.maxAdvanceDays });
-            }
+            // `maxAdvanceDays` est désormais un réglage de la FILE (doc file),
+            // plus de la plage : rien à resynchroniser ici.
             console.log(`🔄 File ${queueId} / plage ${timeSlotDoc.id} : modification programmée promue`);
           }
 
@@ -426,8 +474,8 @@ exports.generateSlots = functions.pubsub
               }
             : null;
 
-          const maxAdvanceDays = Math.min(tsData.maxAdvanceDays || 7, 30);
-
+          // Horizon de génération fixe (8 jours). Ce que le client VOIT est
+          // borné séparément par `maxAdvanceDays` du doc file (filtre d'affichage).
           for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
             const targetDate = new Date(today);
             targetDate.setDate(targetDate.getDate() + dayOffset);
@@ -608,10 +656,27 @@ exports.sendPushOnNotification = functions.firestore
     const reservationId = data.payload && data.payload.reservationId;
     const tag = reservationId ? `resa-${reservationId}` : undefined;
 
+    // Deep-link vers le ticket vivant : uniquement pour l'étape "c'est ton
+    // tour" (voir la discussion produit — un créneau confirmé/passé n'a
+    // rien à prouver, pas besoin d'y emmener directement). Les valeurs
+    // FCM `data` doivent être des chaînes, d'où les vérifications ici.
+    const p = data.payload || {};
+    const dataPayload =
+      data.kind === "validation" && p.slotStart && p.slotEnd
+        ? {
+            deepLink: "ticket",
+            companyName: p.companyName || "",
+            queueName: p.queueName || "",
+            slotStart: p.slotStart,
+            slotEnd: p.slotEnd,
+          }
+        : undefined;
+
     try {
       await admin.messaging().send({
         token: fcmToken,
         notification: { title, body },
+        ...(dataPayload ? { data: dataPayload } : {}),
         android: {
           priority: "high",
           ...(tag ? { notification: { tag } } : {}),
@@ -645,6 +710,84 @@ exports.onReservationCreated = functions.firestore
       console.log(`✅ reservationCount +1 pour ${companyId}`);
     } catch (e) {
       console.error(`❌ Erreur reservationCount pour ${companyId}:`, e.message);
+    }
+
+    // Alerte remplissage de la plage concernée (plage_full / plage_near_full).
+    try {
+      await checkPlageFillAfterReservation(companyId, snap.data());
+    } catch (e) {
+      console.error(`❌ checkPlageFill ${companyId}:`, e.message);
+    }
+    return null;
+  });
+
+// ====================================================================
+// FONCTION 5bis : Rappel « plus qu'une réservation aujourd'hui »
+//
+// Remplace l'ancien bottom sheet local de l'app. Quand le quota
+// journalier d'un client tombe à 1 réservation restante (donc juste
+// après sa MAX_DAILY_RESERVATIONS - 1 -ème réservation du jour), on lui
+// écrit une notification. Le push part ensuite tout seul (FONCTION 4).
+//
+// - Une seule fois par jour : marqueur `dailyQuotaWarnSentOn` sur le
+//   profil, comparé à `lastBookingDate` (date calculée côté app, heure
+//   locale de l'appareil) pour éviter les décalages autour de minuit.
+// - Ignoré pour les inscriptions faites par le staff (`manual_booking`)
+//   et pour les remplacements de créneau (`replacedReservationId`), qui
+//   ne consomment pas le quota.
+// ====================================================================
+exports.notifyDailyQuotaWarning = functions.firestore
+  .document("companies/{companyId}/reservations/{reservationId}")
+  .onCreate(async (snap) => {
+    const data = snap.data();
+    const customerId = data.customerId;
+
+    if (!customerId || customerId === "manual_booking") return null;
+    if (data.replacedReservationId) return null;
+
+    const userRef = db.collection("users").doc(customerId);
+
+    try {
+      await db.runTransaction(async (tx) => {
+        const userSnap = await tx.get(userRef);
+        if (!userSnap.exists) return;
+        const u = userSnap.data();
+
+        const dailyCount = u.dailyBookingCount || 0;
+        const bookingDate = u.lastBookingDate || "";
+
+        // On ne prévient qu'à l'instant précis où il ne reste qu'UNE
+        // réservation pour la journée.
+        if (dailyCount !== MAX_DAILY_RESERVATIONS - 1) return;
+
+        // Déjà prévenu pour cette même journée.
+        if (!bookingDate || u.dailyQuotaWarnSentOn === bookingDate) return;
+
+        const used = MAX_DAILY_RESERVATIONS - 1;
+        const notifRef = db
+          .collection("customers")
+          .doc(customerId)
+          .collection("notifications")
+          .doc(`daily-quota-${bookingDate}`);
+
+        tx.set(notifRef, {
+          title: "⏳ Plus qu'une réservation aujourd'hui",
+          body:
+            `Tu as utilisé ${used} de tes ${MAX_DAILY_RESERVATIONS} ` +
+            "réservations du jour, il t'en reste 1. Ton quota se recharge " +
+            "demain 🔄 — et tu peux toujours t'inscrire directement sur place.",
+          type: "daily_quota_warning",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        tx.set(
+          userRef,
+          { dailyQuotaWarnSentOn: bookingDate },
+          { merge: true },
+        );
+      });
+    } catch (e) {
+      console.error(`❌ notifyDailyQuotaWarning ${customerId}:`, e.message);
     }
     return null;
   });
@@ -978,10 +1121,11 @@ exports.onDeleteCompanyApproved = functions.firestore
 exports.onDeletionRequestCreated = functions.firestore
   .document("deletionRequests/{companyId}")
   .onCreate(async (snap, context) => {
+    const companyId = context.params.companyId;
     const d = snap.data() || {};
     await db.collection("adminAlerts").add({
       type: "deletion_request",
-      companyId: context.params.companyId,
+      companyId,
       companyName: d.companyName || "",
       email: d.email || "",
       phone: d.phone || "",
@@ -991,7 +1135,19 @@ exports.onDeletionRequestCreated = functions.firestore
       status: "unread",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    console.log(`🔔 Alerte admin : demande de départ de ${context.params.companyId}`);
+    console.log(`🔔 Alerte admin : demande de départ de ${companyId}`);
+
+    // Prévenir chaque membre d'équipe : l'établissement quitte Baxa, leur
+    // accès prend fin (l'app les déconnecte via staff.isActive = false posé
+    // côté client dans _submitLeaveRequest).
+    const name = d.companyName || "L'établissement";
+    await notifyAllActiveStaff(companyId, {
+      type: "structure_leaving",
+      title: `👋 ${name} quitte Baxa`,
+      body:
+        "Votre accès à l'espace équipe prend fin. Si l'établissement revient, " +
+        "votre responsable vous enverra un nouveau code d'invitation.",
+    });
     return null;
   });
 
@@ -1143,6 +1299,9 @@ exports.scheduleReservationTimeline = functions
       "confirmed",
       companyName,
       queueName,
+      undefined,
+      slotStart,
+      slotEnd,
     );
     await db
       .collection("customers")
@@ -1154,6 +1313,7 @@ exports.scheduleReservationTimeline = functions
         body: confirmedContent.body,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         type: "reservation_timeline",
+        kind: "confirmed",
         payload: {
           companyId,
           queueId: data.queueId || "",
@@ -1161,6 +1321,8 @@ exports.scheduleReservationTimeline = functions
           reservationId,
           companyName,
           queueName,
+          slotStart: slotStart.toISOString(),
+          slotEnd: slotEnd.toISOString(),
         },
       });
 
@@ -1180,6 +1342,8 @@ exports.scheduleReservationTimeline = functions
       slotId: data.slotId || "",
       companyName,
       queueName,
+      slotStart: slotStart.toISOString(),
+      slotEnd: slotEnd.toISOString(),
     };
 
     const jobs = [
@@ -1275,7 +1439,30 @@ function formatMinutesLabel(minutes) {
   return `${minutes} minute${minutes > 1 ? "s" : ""}`;
 }
 
-function reservationStageContent(kind, companyName, queueName, reminderMinutes) {
+/** "28/02" — volontairement sans année : le titre de la notif doit rester
+ * court (voir reservationStageContent), l'année n'aide en rien à repérer une
+ * capture d'écran réutilisée d'un jour à l'autre. */
+function formatDayMonth(date) {
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  return `${dd}/${mm}`;
+}
+
+/** "12h30 - 12h40" */
+function formatHourRange(start, end) {
+  const hm = (d) =>
+    `${String(d.getHours()).padStart(2, "0")}h${String(d.getMinutes()).padStart(2, "0")}`;
+  return `${hm(start)} - ${hm(end)}`;
+}
+
+function reservationStageContent(
+  kind,
+  companyName,
+  queueName,
+  reminderMinutes,
+  slotStart,
+  slotEnd,
+) {
   const place = reservationVenueLabel(companyName, queueName);
   switch (kind) {
     case "confirmed":
@@ -1291,12 +1478,22 @@ function reservationStageContent(kind, companyName, queueName, reminderMinutes) 
         body: `Chez ${place}, c'est dans ${formatMinutesLabel(reminderMinutes)}`,
       };
     case "validation":
+      // Établissement + file + date directement dans le titre (rendu en gras
+      // nativement par l'OS) : vérifiable par le personnel en un coup d'œil,
+      // sans ouvrir la notif. La date pousse un éventuel réutilisateur d'une
+      // capture d'écran à devoir la refaire chaque jour plutôt qu'une seule
+      // fois — voir la discussion sur la fraude aux notifications.
       return {
-        title: "🟢 Validation",
-        body: "C'est ton tour, présente-toi maintenant ✅",
+        title: `🟢 ${place} · ${formatDayMonth(slotStart)}`,
+        body:
+          `C'est ton tour (${formatHourRange(slotStart, slotEnd)}), ` +
+          "présente-toi maintenant ✅",
       };
     case "passed":
-      return { title: "🟠 Créneau passé", body: "Ton créneau est terminé ⌛" };
+      return {
+        title: `🟠 ${place} · ${formatDayMonth(slotStart)}`,
+        body: `Ton créneau (${formatHourRange(slotStart, slotEnd)}) est terminé ⌛`,
+      };
     default:
       return null;
   }
@@ -1320,9 +1517,21 @@ exports.deliverReservationNotification = functions
       queueName,
       kind,
       minutes,
+      slotStart: slotStartIso,
+      slotEnd: slotEndIso,
     } = req.body || {};
 
-    const content = reservationStageContent(kind, companyName, queueName, minutes);
+    const slotStart = slotStartIso ? new Date(slotStartIso) : null;
+    const slotEnd = slotEndIso ? new Date(slotEndIso) : null;
+
+    const content = reservationStageContent(
+      kind,
+      companyName,
+      queueName,
+      minutes,
+      slotStart,
+      slotEnd,
+    );
     if (!customerId || !companyId || !reservationId || !content) {
       res.status(400).send("Payload invalide");
       return;
@@ -1361,6 +1570,7 @@ exports.deliverReservationNotification = functions
           body: content.body,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           type: "reservation_timeline",
+          kind,
           payload: {
             companyId,
             queueId: queueId || "",
@@ -1368,6 +1578,8 @@ exports.deliverReservationNotification = functions
             reservationId,
             companyName: companyName || "",
             queueName: queueName || "",
+            slotStart: slotStartIso || "",
+            slotEnd: slotEndIso || "",
           },
         });
 
@@ -1537,5 +1749,630 @@ exports.resolveExpiredSuspensions = functions.pubsub
     }
 
     console.log(`✅ ${total} suspension(s) expirée(s) résolue(s)`);
+    return null;
+  });
+
+// ════════════════════════════════════════════════════════════════════
+// NOTIFICATIONS ENTREPRISE
+//
+// Journal unifié : companies/{companyId}/companyNotifications, écrit
+// UNIQUEMENT ici (Admin SDK). L'app le lit (onglet Notifications admin +
+// staff, pastille de non-lus). Le push est livré par sendCompanyPush.
+// ════════════════════════════════════════════════════════════════════
+
+const FR_TZ = "Europe/Paris";
+const NEAR_FULL_PCT = 85;
+const UNDERUSED_PCT = 10;
+
+/** Bornes [début, fin[ du jour courant (heure serveur). */
+function todayBounds(now) {
+  const start = new Date(now || Date.now());
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
+
+function ymd(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** "08:00" → "8h" · "08:30" → "8h30" · "24:00" → "minuit". */
+function fmtHm(hm) {
+  if (!hm) return "";
+  if (hm === "24:00") return "minuit";
+  const [h, m] = String(hm).split(":").map((x) => parseInt(x, 10));
+  if (Number.isNaN(h)) return "";
+  return m ? `${h}h${String(m).padStart(2, "0")}` : `${h}h`;
+}
+
+/** Libellé "8h–12h" à partir d'un doc timeSlot. */
+function rangeLabel(tsData) {
+  const a = fmtHm(tsData && tsData.startTime);
+  const b = fmtHm(tsData && tsData.endTime);
+  return a && b ? `${a}–${b}` : "";
+}
+
+/** Libellé d'horaire à partir d'une Date. */
+function fmtClock(d) {
+  if (!d) return "";
+  const h = d.getHours();
+  const m = d.getMinutes();
+  return m ? `${h}h${String(m).padStart(2, "0")}` : `${h}h`;
+}
+
+function fillPct(reservations, capacity) {
+  if (!capacity) return 0;
+  return Math.round((reservations / capacity) * 100);
+}
+
+/** Écrit une entrée dans le journal. Le push suit via sendCompanyPush. */
+async function writeCompanyNotification(companyId, opts) {
+  const doc = {
+    type: opts.type,
+    title: opts.title,
+    body: opts.body || "",
+    audience: opts.audience || "admin",
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+  if (opts.staffId) doc.staffId = opts.staffId;
+  if (opts.payload) doc.payload = opts.payload;
+  await db
+    .collection("companies")
+    .doc(companyId)
+    .collection("companyNotifications")
+    .add(doc);
+}
+
+const MOIS_FR = [
+  "janvier", "février", "mars", "avril", "mai", "juin",
+  "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+];
+
+/** Date en français court : "15 septembre". */
+function fmtDateFr(d) {
+  if (!d) return "";
+  return `${d.getDate()} ${MOIS_FR[d.getMonth()]}`;
+}
+
+/** Écrit la même notification pour chaque membre d'équipe ACTIF
+ * (audience "staff", une entrée par staffId → un push par personne). */
+async function notifyAllActiveStaff(companyId, opts) {
+  const staffSnap = await db
+    .collection("companies")
+    .doc(companyId)
+    .collection("staff")
+    .where("isActive", "==", true)
+    .get();
+  await Promise.all(
+    staffSnap.docs.map((s) =>
+      writeCompanyNotification(companyId, {
+        ...opts,
+        audience: "staff",
+        staffId: s.id,
+      }),
+    ),
+  );
+  return staffSnap.size;
+}
+
+/** Agrège les créneaux d'une file sur [from, to[, groupés par plage
+ * (timeSlotId). Retourne une Map timeSlotId → {reservations, capacity,
+ * emptySlots, cancellations, remaining, firstStart, lastEnd}. Si `now` est
+ * fourni, `remaining` = réservations des créneaux non encore terminés. */
+async function aggregateSlotsByPlage(companyId, queueId, from, to, now) {
+  const snap = await db
+    .collection("companies")
+    .doc(companyId)
+    .collection("queues")
+    .doc(queueId)
+    .collection("slots")
+    .where("start", ">=", from)
+    .where("start", "<", to)
+    .get();
+
+  const byPlage = new Map();
+  for (const s of snap.docs) {
+    const d = s.data();
+    if (!d.start || !d.end) continue;
+    const key = d.timeSlotId || "_";
+    let g = byPlage.get(key);
+    if (!g) {
+      g = {
+        reservations: 0, capacity: 0, emptySlots: 0, cancellations: 0,
+        remaining: 0, firstStart: null, lastEnd: null,
+      };
+      byPlage.set(key, g);
+    }
+    const reserved = d.reserved || 0;
+    g.reservations += reserved;
+    g.capacity += d.capacity || 0;
+    g.cancellations += d.cancelled || 0;
+    if (reserved === 0) g.emptySlots += 1;
+    const st = d.start.toDate();
+    const en = d.end.toDate();
+    if (!g.firstStart || st < g.firstStart) g.firstStart = st;
+    if (!g.lastEnd || en > g.lastEnd) g.lastEnd = en;
+    if (now && en > now) g.remaining += reserved;
+  }
+  return byPlage;
+}
+
+// ── Livraison push ──────────────────────────────────────────────────
+exports.sendCompanyPush = functions.firestore
+  .document("companies/{companyId}/companyNotifications/{notifId}")
+  .onCreate(async (snap, context) => {
+    const { companyId } = context.params;
+    const data = snap.data();
+
+    // audience "staff" → le membre concerné · sinon l'admin (uid == companyId)
+    const recipientUid =
+      data.audience === "staff" ? data.staffId : companyId;
+    if (!recipientUid) return null;
+
+    const userDoc = await db.collection("users").doc(recipientUid).get();
+    const token = userDoc.exists ? userDoc.data().fcmToken : null;
+    if (!token) return null;
+
+    try {
+      await admin.messaging().send({
+        token,
+        notification: {
+          title: data.title || "Baxa",
+          body: data.body || "",
+        },
+        android: { priority: "high" },
+        apns: { payload: { aps: { sound: "default" } } },
+      });
+      console.log(`✅ Push entreprise → ${companyId} (${data.type})`);
+    } catch (e) {
+      console.error(`❌ sendCompanyPush ${companyId}:`, e.message);
+    }
+    return null;
+  });
+
+// ── Fermeture / réouverture / fermeture programmée → staff ──────────
+// Se branche sur le résumé companies/{id} maintenu par
+// writeCompanySearchSummary. Dédup naturel : une fermeture multi-files
+// réécrit companies/{id} N fois, mais seule la 1ʳᵉ fait basculer le champ.
+exports.onCompanyStateChange = functions.firestore
+  .document("companies/{companyId}")
+  .onUpdate(async (change, context) => {
+    const { companyId } = context.params;
+    const before = change.before.data() || {};
+    const after = change.after.data() || {};
+
+    const wasClosed = before.closedNow === true;
+    const isClosed = after.closedNow === true;
+    const plannedBefore = before.closurePlannedFor
+      ? before.closurePlannedFor.toDate().getTime() : null;
+    const plannedAfter = after.closurePlannedFor
+      ? after.closurePlannedFor.toDate().getTime() : null;
+
+    if (wasClosed === isClosed && plannedBefore === plannedAfter) return null;
+
+    // Pendant un départ de Baxa : la messagerie staff est gérée par
+    // onDeletionRequestCreated (« quitte Baxa ») et la ré-invitation au
+    // retour — on saute les notifs génériques fermé/rouvert/prévue.
+    const dr = await db.collection("deletionRequests").doc(companyId).get();
+    if (dr.exists && dr.data().status !== "completed") return null;
+
+    const name = after.nom || "Votre établissement";
+
+    if (!wasClosed && isClosed) {
+      const reopen = after.reopenAt ? after.reopenAt.toDate() : null;
+      await notifyAllActiveStaff(companyId, {
+        type: "structure_closed",
+        title: "🔒 Réservations fermées",
+        body: reopen
+          ? `${name} ne prend plus de nouvelles réservations jusqu'au ` +
+            `${fmtDateFr(reopen)}. Les clients déjà réservés restent à ` +
+            `honorer — ils sont dans votre agenda.`
+          : `${name} ne prend plus de nouvelles réservations. Les clients ` +
+            `déjà réservés restent à honorer — ils sont dans votre agenda.`,
+      });
+      return null;
+    }
+
+    if (wasClosed && !isClosed) {
+      await notifyAllActiveStaff(companyId, {
+        type: "structure_reopened",
+        title: "✅ Réservations rouvertes",
+        body: `${name} accepte de nouveau les réservations. Tout est reparti.`,
+      });
+      return null;
+    }
+
+    if (plannedAfter !== null && plannedAfter !== plannedBefore) {
+      const start = after.closurePlannedFor.toDate();
+      await notifyAllActiveStaff(companyId, {
+        type: "structure_closure_planned",
+        title: "📅 Fermeture prévue",
+        body:
+          `${name} sera fermé aux réservations à partir du ` +
+          `${fmtDateFr(start)}. Les clients déjà réservés pour cette période ` +
+          `restent à honorer.`,
+      });
+      return null;
+    }
+
+    return null;
+  });
+
+// ── Nouveau membre d'équipe → admin ─────────────────────────────────
+exports.onStaffJoined = functions.firestore
+  .document("companies/{companyId}/staff/{staffUid}")
+  .onCreate(async (snap, context) => {
+    const { companyId, staffUid } = context.params;
+    const d = snap.data() || {};
+    if (d.isActive === false) return null;
+
+    const name =
+      d.displayName || d.email || d.phone || "Un nouveau membre";
+    await writeCompanyNotification(companyId, {
+      type: "staff_joined",
+      title: "👋 Nouveau membre dans l'équipe",
+      body: `${name} a rejoint votre équipe via le code d'invitation.`,
+      audience: "admin",
+      payload: { staffUid, staffName: name },
+    });
+    return null;
+  });
+
+// ── Plage complète / bientôt complète (déclenché à chaque réservation) ─
+async function checkPlageFillAfterReservation(companyId, resa) {
+  const slotId = resa && resa.slotId;
+  const queueId = resa && resa.queueId;
+  if (!slotId || !queueId) return;
+
+  const queueRef = db
+    .collection("companies").doc(companyId)
+    .collection("queues").doc(queueId);
+
+  const slotDoc = await queueRef.collection("slots").doc(slotId).get();
+  if (!slotDoc.exists) return;
+  const slot = slotDoc.data();
+  const timeSlotId = slot.timeSlotId;
+  if (!timeSlotId || !slot.start) return;
+
+  const now = new Date();
+  const { start, end } = todayBounds(now);
+  const slotStart = slot.start.toDate();
+  if (slotStart < start || slotStart >= end) return; // pas aujourd'hui
+
+  const byPlage = await aggregateSlotsByPlage(companyId, queueId, start, end);
+  const g = byPlage.get(timeSlotId);
+  if (!g || !g.capacity) return;
+  const pct = fillPct(g.reservations, g.capacity);
+  if (pct < NEAR_FULL_PCT) return;
+
+  const tsRef = queueRef.collection("timeSlots").doc(timeSlotId);
+  const tsDoc = await tsRef.get();
+  const tsData = tsDoc.exists ? tsDoc.data() : {};
+  const today = ymd(now);
+  const label = rangeLabel(tsData) ||
+    `${fmtClock(g.firstStart)}–${fmtClock(g.lastEnd)}` || "cette plage";
+
+  const queueDoc = await queueRef.get();
+  const queueName =
+    (queueDoc.exists && queueDoc.data().name) || "votre file";
+
+  if (pct >= 100) {
+    if (tsData.fullNotifiedOn === today) return;
+    await writeCompanyNotification(companyId, {
+      type: "plage_full",
+      title: `📈 ${queueName} · plage ${label} complète`,
+      body:
+        "Toutes les places d'aujourd'hui sont réservées. Allongez la plage " +
+        "ou augmentez la capacité d'accueil pour recevoir plus de clients, " +
+        "dans les limites de votre capacité de gestion.",
+      audience: "admin",
+      payload: { queueId, queueName, timeSlotId, range: label },
+    });
+    await tsRef.set(
+      { fullNotifiedOn: today, nearFullNotifiedOn: today },
+      { merge: true },
+    );
+    return;
+  }
+
+  // 85 % ≤ pct < 100 %
+  if (tsData.nearFullNotifiedOn === today || tsData.fullNotifiedOn === today) {
+    return;
+  }
+  const free = g.capacity - g.reservations;
+  await writeCompanyNotification(companyId, {
+    type: "plage_near_full",
+    title: `📈 ${queueName} · plage ${label} bientôt complète`,
+    body:
+      `Il reste ${free} place${free > 1 ? "s" : ""} aujourd'hui. Pensez à ` +
+      "allonger la plage ou augmenter la capacité d'accueil, dans les " +
+      "limites de votre capacité de gestion.",
+    audience: "admin",
+    payload: { queueId, queueName, timeSlotId, range: label },
+  });
+  await tsRef.set({ nearFullNotifiedOn: today }, { merge: true });
+}
+
+// ── Passage ~30 min : récap de fin de plage + coup de coude ─────────
+exports.companyQueuePulse = functions.pubsub
+  .schedule("*/30 * * * *")
+  .timeZone(FR_TZ)
+  .onRun(async () => {
+    const now = new Date();
+    const { start, end } = todayBounds(now);
+    const today = ymd(now);
+
+    const companiesSnap = await db.collection("companies").get();
+    for (const companyDoc of companiesSnap.docs) {
+      const companyId = companyDoc.id;
+      const queuesSnap = await companyDoc.ref.collection("queues").get();
+
+      for (const queueDoc of queuesSnap.docs) {
+        const queueId = queueDoc.id;
+        const qd = queueDoc.data();
+        if (isQueueClosedNow(qd.closureStart, qd.closureEnd, now)) continue;
+        const queueName = qd.name || "votre file";
+
+        const byPlage = await aggregateSlotsByPlage(
+          companyId, queueId, start, end, now,
+        );
+        if (byPlage.size === 0) continue;
+
+        let dayLast = null;
+        let remainingTotal = 0;
+        for (const g of byPlage.values()) {
+          if (g.lastEnd && (!dayLast || g.lastEnd > dayLast)) dayLast = g.lastEnd;
+          remainingTotal += g.remaining;
+        }
+
+        // ── plage_recap : dernière plage du jour terminée ──
+        if (dayLast && now >= dayLast && qd.recapSentOn !== today) {
+          const tsSnap = await queueDoc.ref.collection("timeSlots").get();
+          const tsMap = new Map(tsSnap.docs.map((t) => [t.id, t.data()]));
+          const entries = [...byPlage.entries()].sort(
+            (a, b) =>
+              (a[1].firstStart ? a[1].firstStart.getTime() : 0) -
+              (b[1].firstStart ? b[1].firstStart.getTime() : 0),
+          );
+          // Seules les plages qui ont eu ≥ 1 réservation sont détaillées ;
+          // les autres sont résumées en « + N plages sans réservation ».
+          const activePlages = [];
+          let silentPlages = 0;
+          let totalRes = 0;
+          let totalCap = 0;
+          let totalCancel = 0;
+          let totalEmpty = 0;
+          for (const [tsId, g] of entries) {
+            const label = rangeLabel(tsMap.get(tsId)) ||
+              `${fmtClock(g.firstStart)}–${fmtClock(g.lastEnd)}`;
+            totalRes += g.reservations;
+            totalCap += g.capacity;
+            totalCancel += g.cancellations;
+            totalEmpty += g.emptySlots;
+            if (g.reservations > 0) {
+              activePlages.push({
+                range: label,
+                reservations: g.reservations,
+                fillPct: fillPct(g.reservations, g.capacity),
+                emptySlots: g.emptySlots,
+              });
+            } else {
+              silentPlages += 1;
+            }
+          }
+
+          // Taux de remplissage de la file = places réservées / places
+          // proposées sur toute la journée (pondéré par la capacité, pas la
+          // moyenne des % de plages : une petite plage vide ne doit pas
+          // écraser le chiffre du jour).
+          const queueFill = fillPct(totalRes, totalCap);
+          const verdict = queueFill >= 90
+            ? "record"
+            : queueFill >= 60 ? "bonne" : "calme";
+
+          let body;
+          if (totalRes === 0) {
+            body =
+              "Aucune réservation aujourd'hui. Partagez votre QR code pour " +
+              "attirer vos premiers clients 📣";
+          } else {
+            const parts = [
+              `${totalRes} réservation${totalRes > 1 ? "s" : ""}`,
+            ];
+            if (totalCancel > 0) {
+              parts.push(`${totalCancel} annulation${totalCancel > 1 ? "s" : ""}`);
+            }
+            parts.push(`${queueFill} % rempli`);
+            body = parts.join(" · ");
+          }
+
+          await writeCompanyNotification(companyId, {
+            type: "plage_recap",
+            title: `📊 Bilan du jour · ${queueName}`,
+            body,
+            audience: "admin",
+            payload: {
+              queueId,
+              queueName,
+              reservations: totalRes,
+              cancellations: totalCancel,
+              fillPct: queueFill,
+              emptySlots: totalEmpty,
+              verdict,
+              plages: activePlages,
+              silentPlages,
+            },
+          });
+          await queueDoc.ref.set({ recapSentOn: today }, { merge: true });
+        }
+
+        // ── queue_checkin : milieu d'une plage en cours ──
+        if (qd.checkinSentOn === today || remainingTotal < 3) continue;
+
+        let fire = false;
+        for (const g of byPlage.values()) {
+          if (!g.firstStart || !g.lastEnd) continue;
+          if (now < g.firstStart || now > g.lastEnd) continue;
+          const mid = (g.firstStart.getTime() + g.lastEnd.getTime()) / 2;
+          if (Math.abs(now.getTime() - mid) > 16 * 60 * 1000) continue;
+
+          // Aucune autre notif envoyée depuis le début de cette plage ?
+          const since = await companyDoc.ref
+            .collection("companyNotifications")
+            .where(
+              "createdAt", ">=",
+              admin.firestore.Timestamp.fromDate(g.firstStart),
+            )
+            .limit(1)
+            .get();
+          if (since.empty) fire = true;
+          break;
+        }
+        if (!fire) continue;
+
+        const per = remainingTotal > 1
+          ? "personnes encore à servir"
+          : "personne encore à servir";
+        await writeCompanyNotification(companyId, {
+          type: "queue_checkin",
+          title: `👀 Un coup d'œil sur ${queueName} ?`,
+          body: `Votre file tourne — ${remainingTotal} ${per} aujourd'hui.`,
+          audience: "admin",
+          payload: { queueId, queueName, toServe: remainingTotal },
+        });
+        await queueDoc.ref.set({ checkinSentOn: today }, { merge: true });
+      }
+    }
+    return null;
+  });
+
+// ── Résumé du matin (7h) — seulement si remplissage du jour ≥ 40 % ──
+exports.companyDayDigest = functions.pubsub
+  .schedule("0 7 * * *")
+  .timeZone(FR_TZ)
+  .onRun(async () => {
+    const now = new Date();
+    const { start, end } = todayBounds(now);
+
+    const companiesSnap = await db.collection("companies").get();
+    for (const companyDoc of companiesSnap.docs) {
+      const companyId = companyDoc.id;
+      const queuesSnap = await companyDoc.ref.collection("queues").get();
+
+      for (const queueDoc of queuesSnap.docs) {
+        const queueId = queueDoc.id;
+        const qd = queueDoc.data();
+        if (isQueueClosedNow(qd.closureStart, qd.closureEnd, now)) continue;
+        const queueName = qd.name || "votre file";
+
+        const byPlage = await aggregateSlotsByPlage(
+          companyId, queueId, start, end,
+        );
+        if (byPlage.size === 0) continue;
+
+        let totalRes = 0;
+        let totalCap = 0;
+        let peak = null;
+        let peakId = null;
+        for (const [tsId, g] of byPlage.entries()) {
+          totalRes += g.reservations;
+          totalCap += g.capacity;
+          if (!peak || g.reservations > peak.reservations) {
+            peak = g;
+            peakId = tsId;
+          }
+        }
+        if (!totalCap || fillPct(totalRes, totalCap) < 40) continue;
+
+        const tsSnap = await queueDoc.ref.collection("timeSlots").get();
+        const tsMap = new Map(tsSnap.docs.map((t) => [t.id, t.data()]));
+        const peakLabel = rangeLabel(tsMap.get(peakId)) ||
+          `${fmtClock(peak.firstStart)}–${fmtClock(peak.lastEnd)}`;
+        const nPlages = byPlage.size;
+
+        await writeCompanyNotification(companyId, {
+          type: "day_digest",
+          title: `☀️ Votre journée · ${queueName}`,
+          body:
+            `${totalRes} réservations aujourd'hui` +
+            (nPlages > 1 ? `, réparties sur ${nPlages} plages` : "") +
+            `. Pointe : ${peakLabel} (${peak.reservations}).`,
+          audience: "admin",
+          payload: { queueId, queueName },
+        });
+      }
+    }
+    return null;
+  });
+
+// ── Bilan hebdo (lundi 6h) — plages sous-utilisées sur 14 jours ─────
+exports.companyWeeklyReview = functions.pubsub
+  .schedule("0 6 * * 1")
+  .timeZone(FR_TZ)
+  .onRun(async () => {
+    const now = new Date();
+    const { start: todayStart } = todayBounds(now);
+    const from = new Date(todayStart);
+    from.setDate(from.getDate() - 14);
+    const cooldownBefore = new Date(now.getTime() - 13 * 24 * 3600 * 1000);
+
+    const companiesSnap = await db.collection("companies").get();
+    for (const companyDoc of companiesSnap.docs) {
+      const companyId = companyDoc.id;
+      const queuesSnap = await companyDoc.ref.collection("queues").get();
+
+      for (const queueDoc of queuesSnap.docs) {
+        const queueId = queueDoc.id;
+        const queueName = queueDoc.data().name || "votre file";
+
+        const byPlage = await aggregateSlotsByPlage(
+          companyId, queueId, from, todayStart,
+        );
+        if (byPlage.size === 0) continue;
+
+        const tsSnap = await queueDoc.ref.collection("timeSlots").get();
+        for (const tsDoc of tsSnap.docs) {
+          const tsData = tsDoc.data();
+          if (tsData.deleteAfter) continue;
+          if (
+            tsData.underusedNotifiedAt &&
+            tsData.underusedNotifiedAt.toDate() > cooldownBefore
+          ) {
+            continue;
+          }
+
+          const g = byPlage.get(tsDoc.id);
+          if (!g || !g.capacity) continue;
+          // Plage trop jeune : pas de créneau près du début de la fenêtre.
+          if (
+            !g.firstStart ||
+            g.firstStart.getTime() > from.getTime() + 36 * 3600 * 1000
+          ) {
+            continue;
+          }
+          if (fillPct(g.reservations, g.capacity) >= UNDERUSED_PCT) continue;
+
+          const label = rangeLabel(tsData) || "une plage";
+          await writeCompanyNotification(companyId, {
+            type: "plage_underused",
+            title: `📉 ${queueName} · plage ${label} peu réservée`,
+            body:
+              "Moins de 10 % des places ont été réservées ces 2 dernières " +
+              "semaines. Vous pouvez la raccourcir, la décaler à un meilleur " +
+              "horaire, ou réduire la capacité.",
+            audience: "admin",
+            payload: { queueId, queueName, timeSlotId: tsDoc.id, range: label },
+          });
+          await tsDoc.ref.set(
+            { underusedNotifiedAt: admin.firestore.FieldValue.serverTimestamp() },
+            { merge: true },
+          );
+        }
+      }
+    }
     return null;
   });

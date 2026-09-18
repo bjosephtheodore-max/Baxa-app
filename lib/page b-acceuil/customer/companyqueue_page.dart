@@ -249,52 +249,58 @@ class _CompanyQueuePageState extends State<CompanyQueuePage> {
           tooltip: 'Partager',
           onPressed: _shareCompany,
         ),
-        Stack(
-          children: [
-            IconButton(
-              icon: Icon(Icons.event_note_rounded, color: Colors.grey.shade600),
-              tooltip: 'Mes reservations',
-              onPressed: () async {
-                final result = await Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const MyReservationsPage(),
-                  ),
-                );
-                if (result == true || result == null) {
-                  _loadActiveReservationsCount();
-                }
-              },
-            ),
-            if (_activeReservationsCount > 0)
-              Positioned(
-                right: 8,
-                top: 8,
-                child: Container(
-                  padding: const EdgeInsets.all(4),
-                  decoration: BoxDecoration(
-                    color: Colors.red.shade500,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 2),
-                  ),
-                  constraints: const BoxConstraints(
-                    minWidth: 18,
-                    minHeight: 18,
-                  ),
-                  child: Text(
-                    _activeReservationsCount > 9
-                        ? '9+'
-                        : '$_activeReservationsCount',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
+        // Le badge est posé DANS l'icône (pas autour du bouton) : le
+        // IconButton reste un bouton Material tout simple, avec la même
+        // zone de toucher et le même effet d'appui que celui de partage —
+        // l'ancien `Stack` qui enveloppait le bouton lui-même perturbait
+        // son toucher sur certains appareils.
+        IconButton(
+          icon: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Icon(Icons.event_note_rounded, color: Colors.grey.shade600),
+              if (_activeReservationsCount > 0)
+                Positioned(
+                  right: -8,
+                  top: -8,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade500,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
                     ),
-                    textAlign: TextAlign.center,
+                    constraints: const BoxConstraints(
+                      minWidth: 18,
+                      minHeight: 18,
+                    ),
+                    child: Text(
+                      _activeReservationsCount > 9
+                          ? '9+'
+                          : '$_activeReservationsCount',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
                   ),
                 ),
+            ],
+          ),
+          tooltip: 'Mes reservations',
+          onPressed: () async {
+            final result = await Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => const MyReservationsPage(),
               ),
-          ],
+            );
+            if (result == true || result == null) {
+              _loadActiveReservationsCount();
+            }
+          },
         ),
         const SizedBox(width: 8),
       ],
@@ -518,7 +524,7 @@ class _CompanyQueuePageState extends State<CompanyQueuePage> {
               : () {
                   HapticFeedback.lightImpact();
                   setState(() => _selectedQueueId = queueId);
-                  _showSlotsPage(queueId, queueName);
+                  _showSlotsPage(queueId, queueData);
                 },
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -696,15 +702,16 @@ class _CompanyQueuePageState extends State<CompanyQueuePage> {
     );
   }
 
-  void _showSlotsPage(String queueId, String queueName) {
+  void _showSlotsPage(String queueId, Map<String, dynamic> queueData) {
+    SlotsPage.prefetch(widget.entrepriseId, queueId);
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => SlotsPage(
-          entrepriseId: widget.entrepriseId,
-          entrepriseNom: widget.entrepriseNom,
+        builder: (context) => SlotsPage.fromQueueData(
+          companyId: widget.entrepriseId,
           queueId: queueId,
-          queueName: queueName,
+          queueData: queueData,
+          entrepriseNom: widget.entrepriseNom,
           primaryGreen: _primaryGreen,
           lightGreen: _lightGreen,
           onReservationSuccess: _loadActiveReservationsCount,

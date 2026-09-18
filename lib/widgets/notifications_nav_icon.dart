@@ -22,8 +22,11 @@ class NotificationsNavIcon extends StatefulWidget {
   const NotificationsNavIcon({
     super.key,
     required this.recentNotifications,
-    this.icon = Icons.notifications,
-    this.badgeColor = const Color(0xFFFF6F59),
+    this.unreadWhere,
+    this.selected = false,
+    this.icon = Icons.notifications_outlined,
+    this.selectedIcon = Icons.notifications_rounded,
+    this.badgeColor = const Color(0xFFE53935),
   });
 
   /// Flux des notifications récentes de l'utilisateur courant, trié
@@ -32,7 +35,16 @@ class NotificationsNavIcon extends StatefulWidget {
   /// rebuild) pour éviter de ré-attacher l'écoute inutilement.
   final Query<Map<String, dynamic>> recentNotifications;
 
+  /// Filtre appliqué EN MÉMOIRE avant de compter (ex. côté staff : ne garder
+  /// que les notifs qui lui sont adressées). `null` = tout compter.
+  final bool Function(Map<String, dynamic> data)? unreadWhere;
+
+  /// L'onglet Notifications est-il l'onglet actif ? Pilote le basculement
+  /// icône contour → icône pleine (le parent connaît l'index sélectionné).
+  final bool selected;
+
   final IconData icon;
+  final IconData selectedIcon;
   final Color badgeColor;
 
   /// Repositionne le curseur « vu » à maintenant et efface la pastille de
@@ -45,9 +57,22 @@ class NotificationsNavIcon extends StatefulWidget {
       {'notificationsLastSeenAt': FieldValue.serverTimestamp()},
       SetOptions(merge: true),
     );
+    await setAppBadge(0);
+  }
+
+  // Beaucoup de lanceurs Android (dont Tecno/Transsion) ne gèrent pas les
+  // pastilles numériques : app_badge_plus lève alors une exception à CHAQUE
+  // appel. On teste le support une seule fois et on s'abstient ensuite.
+  static bool? _badgeSupported;
+
+  static Future<void> setAppBadge(int count) async {
+    if (_badgeSupported == false) return;
     try {
-      await AppBadgePlus.updateBadge(0);
-    } catch (_) {}
+      _badgeSupported ??= await AppBadgePlus.isSupported();
+      if (_badgeSupported == true) await AppBadgePlus.updateBadge(count);
+    } catch (_) {
+      _badgeSupported = false;
+    }
   }
 
   @override
@@ -123,11 +148,14 @@ class _NotificationsNavIconState extends State<NotificationsNavIcon> {
 
   void _recount() {
     final cursor = _lastSeen;
+    final where = widget.unreadWhere;
     final count = cursor == null
         ? 0
         : _latest.where((d) {
-            final ts = d.data()['createdAt'];
-            return ts is Timestamp && ts.compareTo(cursor) > 0;
+            final data = d.data();
+            final ts = data['createdAt'];
+            if (ts is! Timestamp || ts.compareTo(cursor) <= 0) return false;
+            return where == null || where(data);
           }).length;
 
     if (mounted && count != _unread) {
@@ -147,12 +175,40 @@ class _NotificationsNavIconState extends State<NotificationsNavIcon> {
 
   @override
   Widget build(BuildContext context) {
-    final icon = Icon(widget.icon);
+    final icon = Icon(widget.selected ? widget.selectedIcon : widget.icon);
     if (_unread == 0) return icon;
-    return Badge(
-      backgroundColor: widget.badgeColor,
-      label: Text(_unread > 9 ? '9+' : '$_unread'),
-      child: icon,
+
+    // Pastille compacte façon YouTube : petite, mordant sur le coin
+    // haut-droit de l'icône (pas décalée à côté), fin liseré blanc.
+    final wide = _unread > 9;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        icon,
+        Positioned(
+          top: -4,
+          right: -4,
+          child: Container(
+            padding: EdgeInsets.symmetric(horizontal: wide ? 3.5 : 0),
+            constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: widget.badgeColor,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: Colors.white, width: 1.6),
+            ),
+            child: Text(
+              wide ? '9+' : '$_unread',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 9.5,
+                fontWeight: FontWeight.w700,
+                height: 1.0,
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

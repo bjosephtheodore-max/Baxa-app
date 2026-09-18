@@ -163,6 +163,8 @@ class _HouseNotifier extends ChangeNotifier {
           stats: q.stats,
           weekdays: q.weekdays,
           timeSlotCount: q.timeSlotCount,
+          closureStart: q.closureStart,
+          closureEnd: q.closureEnd,
         );
       }
     } catch (e) {
@@ -380,13 +382,33 @@ class _HouseNotifier extends ChangeNotifier {
   ) async {
     if (_companyId == null) return 'Aucune entreprise trouvée';
     try {
-      final slotRef = _db
+      final queuePath = _db
           .collection('companies')
           .doc(_companyId)
           .collection('queues')
-          .doc(queue.id)
-          .collection('slots')
-          .doc(slot.id);
+          .doc(queue.id);
+
+      // Garde-fou : une file fermée ou une plage en suppression programmée
+      // n'accepte plus AUCUNE nouvelle réservation, manuelle comprise.
+      final queueDoc = await queuePath.get();
+      final qd = queueDoc.data();
+      if (isQueueClosedNow(
+        (qd?['closureStart'] as Timestamp?)?.toDate(),
+        (qd?['closureEnd'] as Timestamp?)?.toDate(),
+      )) {
+        return 'Cette file est fermée aux réservations.';
+      }
+      if (slot.timeSlotId.isNotEmpty) {
+        final tsDoc = await queuePath
+            .collection('timeSlots')
+            .doc(slot.timeSlotId)
+            .get();
+        if (tsDoc.data()?['deleteAfter'] != null) {
+          return 'Cette plage est en cours de suppression, plus de réservation possible.';
+        }
+      }
+
+      final slotRef = queuePath.collection('slots').doc(slot.id);
 
       final d = slot.start.toLocal();
       final dateKey =
@@ -543,7 +565,7 @@ class _HouseNotifier extends ChangeNotifier {
             : <int>[],
         maxAdvanceDays: (d['maxAdvanceDays'] as num?)?.toInt() ?? 2,
         reservationDeadlineMinutes:
-            (d['reservationDeadlineMinutes'] as num?)?.toInt() ?? 5,
+            (d['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0,
         deleteAfter: (d['deleteAfter'] as Timestamp?)?.toDate(),
       );
     }).toList();
@@ -1375,6 +1397,8 @@ class _HouseNotifier extends ChangeNotifier {
               stats: stats,
               weekdays: weekdays,
               timeSlotCount: timeSlotCount,
+              closureStart: (qData['closureStart'] as Timestamp?)?.toDate(),
+              closureEnd: (qData['closureEnd'] as Timestamp?)?.toDate(),
             );
 
             if (silent) {
@@ -1545,6 +1569,8 @@ class _HouseNotifier extends ChangeNotifier {
       stats: _agenda.computeStats(allSlots, now: DateTime.now()),
       weekdays: old.weekdays,
       timeSlotCount: old.timeSlotCount,
+      closureStart: old.closureStart,
+      closureEnd: old.closureEnd,
     );
     _notify();
   }

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:baxa/page%20b-acceuil/customer/customer_page.dart';
 import 'package:flutter/material.dart';
 import 'package:baxa/services/firebase/auth.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -115,6 +116,10 @@ class _SigninePageState extends State<SigninePage> {
         updates['email'] = user.email;
       }
       await ref.set(updates, SetOptions(merge: true));
+      await FirebaseAnalytics.instance.setUserProperty(
+        name: 'role',
+        value: 'customer',
+      );
     } catch (e) {
       debugPrint('Firestore update failed: $e');
     }
@@ -536,86 +541,112 @@ class _SigninePageState extends State<SigninePage> {
   }
 
   Widget _buildEmailSection(bool isCompletion) {
-    return Container(
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.07),
-            blurRadius: 20,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Form(
-        key: _formKey,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            TextFormField(
-              controller: _emailController,
-              keyboardType: TextInputType.emailAddress,
-              onChanged: (_) => _clearError(),
-              decoration: _inputDeco(
-                label: 'Adresse e-mail',
-                hint: 'exemple@email.com',
-                icon: Icons.email_outlined,
-              ),
-              validator: (v) =>
-                  (v == null || v.isEmpty || !v.contains('@'))
-                  ? 'Entrez un e-mail valide'
-                  : null,
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _passwordController,
-              obscureText: _isObscure,
-              onChanged: (_) => _clearError(),
-              decoration: _inputDeco(
-                label: 'Mot de passe',
-                hint: 'Minimum 6 caractères',
-                icon: Icons.lock_outline,
-              ).copyWith(
-                suffixIcon: IconButton(
-                  icon: Icon(
-                    _isObscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
-                    color: Colors.grey.shade500,
-                  ),
-                  onPressed: () => setState(() => _isObscure = !_isObscure),
-                ),
-              ),
-              validator: (v) => (v == null || v.length < 6)
-                  ? 'Mot de passe >= 6 caractères'
-                  : null,
-            ),
-            const SizedBox(height: 20),
-            SizedBox(
-              height: 52,
-              child: ElevatedButton(
-                onPressed: _isLoadingEmail ? null : _submitEmail,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _green,
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                child: _isLoadingEmail
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                      )
-                    : Text(
-                        isCompletion || !_isLoginMode ? 'Créer mon compte' : 'Se connecter',
-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-                      ),
-              ),
+    final signingUp = isCompletion || !_isLoginMode;
+    // AutofillGroup : rend l'autofill Android déterministe au lieu de le laisser
+    // se battre avec la saisie (ré-injection d'un ancien mot de passe, etc.).
+    // Clé stable : l'apparition du bandeau d'erreur au-dessus ne doit pas faire
+    // réconcilier ce bloc avec un autre `Container` — ce qui réinitialiserait le
+    // formulaire et ferait "sauter" les champs.
+    return AutofillGroup(
+      key: const ValueKey('signin-email-section'),
+      child: Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.07),
+              blurRadius: 20,
+              offset: const Offset(0, 4),
             ),
           ],
+        ),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextFormField(
+                controller: _emailController,
+                keyboardType: TextInputType.emailAddress,
+                autofillHints: const [
+                  AutofillHints.username,
+                  AutofillHints.email,
+                ],
+                onChanged: (_) => _clearError(),
+                decoration: _inputDeco(
+                  label: 'Adresse e-mail',
+                  hint: 'exemple@email.com',
+                  icon: Icons.email_outlined,
+                ),
+                validator: (v) => (v == null || v.isEmpty || !v.contains('@'))
+                    ? 'Entrez un e-mail valide'
+                    : null,
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _passwordController,
+                obscureText: _isObscure,
+                // Toujours désactivés (même quand le mot de passe est révélé) :
+                // évite que le basculement de l'œil ne renégocie le clavier
+                // Android et ne vide / réinitialise le champ.
+                autocorrect: false,
+                enableSuggestions: false,
+                autofillHints: [
+                  signingUp
+                      ? AutofillHints.newPassword
+                      : AutofillHints.password,
+                ],
+                onChanged: (_) => _clearError(),
+                decoration: _inputDeco(
+                  label: 'Mot de passe',
+                  hint: 'Minimum 6 caractères',
+                  icon: Icons.lock_outline,
+                ).copyWith(
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      _isObscure
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                      color: Colors.grey.shade500,
+                    ),
+                    onPressed: () => setState(() => _isObscure = !_isObscure),
+                  ),
+                ),
+                validator: (v) => (v == null || v.length < 6)
+                    ? 'Mot de passe >= 6 caractères'
+                    : null,
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                height: 52,
+                child: ElevatedButton(
+                  onPressed: _isLoadingEmail ? null : _submitEmail,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _green,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: _isLoadingEmail
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
+                        )
+                      : Text(
+                          signingUp ? 'Créer mon compte' : 'Se connecter',
+                          style: const TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w700),
+                        ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -623,6 +654,7 @@ class _SigninePageState extends State<SigninePage> {
 
   Widget _buildPhoneSection() {
     return Container(
+      key: const ValueKey('signin-phone-section'),
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -745,6 +777,7 @@ class _SigninePageState extends State<SigninePage> {
 
   Widget _buildErrorBanner() {
     return Container(
+      key: const ValueKey('signin-error-banner'),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         color: const Color(0xFFFFF1F1),
@@ -841,7 +874,9 @@ class _SigninePageState extends State<SigninePage> {
         TextButton(
           onPressed: () => setState(() {
             _isLoginMode = !_isLoginMode;
-            _formKey.currentState?.reset();
+            // Pas de reset() : l'email et le mot de passe sont les mêmes champs
+            // dans les deux modes — les vider à la bascule est déroutant et
+            // oblige l'utilisateur à tout retaper.
             _clearError();
           }),
           child: Text(

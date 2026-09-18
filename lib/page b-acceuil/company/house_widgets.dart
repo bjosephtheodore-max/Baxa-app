@@ -284,18 +284,6 @@ class _StatsRow extends StatelessWidget {
       children: [
         Expanded(
           child: _StatChip(
-            value: stats.placesRestantes.toString(),
-            label: 'Disponibles',
-            color: stats.placesRestantes == 0 ? Colors.red.shade600 : _green,
-            bgColor: stats.placesRestantes == 0
-                ? Colors.red.shade50
-                : const Color(0xFFECF7F0),
-            icon: Icons.check_circle_outline_rounded,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: _StatChip(
             value: stats.placesReservees.toString(),
             label: 'Réservées',
             color: Colors.blue.shade600,
@@ -315,6 +303,18 @@ class _StatsRow extends StatelessWidget {
                 ? Colors.orange.shade50
                 : Colors.grey.shade100,
             icon: Icons.hourglass_empty_rounded,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _StatChip(
+            value: stats.placesRestantes.toString(),
+            label: 'Disponibles',
+            color: stats.placesRestantes == 0 ? Colors.red.shade600 : _green,
+            bgColor: stats.placesRestantes == 0
+                ? Colors.red.shade50
+                : const Color(0xFFECF7F0),
+            icon: Icons.check_circle_outline_rounded,
           ),
         ),
       ],
@@ -632,7 +632,7 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                           onChanged: widget.onDurationChanged,
                           onRevert: widget.onRevertDuration,
                         ),
-                        const SizedBox(height: 12),
+                        Divider(height: 1, color: Colors.grey.shade200),
                         _ControlRow(
                           label: 'Capacité',
                           icon: Icons.people,
@@ -643,7 +643,7 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                           step: 1,
                           onChanged: widget.onCapacityChanged,
                         ),
-                        const SizedBox(height: 16),
+                        const SizedBox(height: 20),
                       ],
 
                       GestureDetector(
@@ -657,10 +657,14 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                             horizontal: 14,
                           ),
                           decoration: BoxDecoration(
-                            color: widget.queue.isBlocked
-                                ? const Color(0xFFECF7F0)
-                                : Colors.red.shade50,
+                            color: Colors.white,
                             borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: widget.queue.isBlocked
+                                  ? _green
+                                  : Colors.red.shade300,
+                              width: 1.5,
+                            ),
                           ),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -733,12 +737,8 @@ class _ControlRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final canDecrease = value == null || value! > min;
     final canIncrease = value == null || value! < max;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF6FAF7),
-        borderRadius: BorderRadius.circular(10),
-      ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
         children: [
           _buildLeadingIcon(),
@@ -825,7 +825,7 @@ class _ControlRow extends StatelessWidget {
                   color: Colors.orange.shade600,
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: const Color(0xFFF6FAF7),
+                    color: Colors.white,
                     width: 1.5,
                   ),
                 ),
@@ -892,16 +892,19 @@ class _SlotCard extends StatelessWidget {
   });
 
   String _subtitle() {
-    if (isPast && slot.reserved == 0) return 'Créneau passé';
-    if (slot.isBlocked) return 'Bloqué';
+    // Créneaux passés : seule l'étiquette parle (voir _statusBadge).
+    if (isPast) return '';
+    if (slot.isBlocked) return '';
     if (slot.reserved == 0) return 'Disponible';
-    return '${slot.reserved} personne(s) réservée(s)';
+    return '${slot.reserved} résa';
   }
 
-  Widget _statusBadge(bool isBlocked, bool isFull) {
+  // Retourne null quand il n'y a rien à signaler : un créneau libre ou
+  // partiellement réservé n'affiche aucune étiquette, la carte reste calme.
+  Widget? _statusBadge(bool isBlocked, bool isFull) {
     if (isPast) {
       return _solidBadge(
-        slot.reserved > 0 ? '${slot.reserved} réservé(s)' : 'Passé',
+        slot.reserved > 0 ? '${slot.reserved} résa' : 'Passé',
         Colors.grey.shade500,
       );
     }
@@ -909,26 +912,34 @@ class _SlotCard extends StatelessWidget {
       return _solidBadge('Bloqué', Colors.red.shade600);
     }
     if (isFull) {
-      return _solidBadge('Complet', Colors.red.shade400);
+      return _completeBadge();
     }
-    final remaining = slot.capacity - slot.reserved;
-    if (slot.reserved > 0) {
-      return _solidBadge('$remaining pl.', Colors.orange.shade500);
-    }
+    return null;
+  }
+
+  // Créneau plein — bonne nouvelle côté entreprise : vert plein + coche,
+  // seul moment « récompense » de la carte.
+  Widget _completeBadge() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: _green.withValues(alpha: 0.1),
+        color: _green,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _green.withValues(alpha: 0.35)),
       ),
-      child: Text(
-        'Libre',
-        style: TextStyle(
-          color: _green,
-          fontWeight: FontWeight.bold,
-          fontSize: 12,
-        ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.check_rounded, size: 13, color: Colors.white),
+          SizedBox(width: 3),
+          Text(
+            'Complet',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -956,32 +967,58 @@ class _SlotCard extends StatelessWidget {
     final isBlocked = slot.isBlocked;
     final isFull = slot.isFull;
     final isLegacy = slot.isLegacy;
+    final badge = _statusBadge(isBlocked, isFull);
+    final subtitle = _subtitle();
+    // Créneau à venir qui a déjà des réservations : sous-titre « X résa »
+    // dans un vert éteint plutôt que le gris de « Disponible » — juste
+    // assez pour dire « il y a du monde ici », sans taper à l'œil.
+    final subtitleHasBookings = !isPast && !isBlocked && slot.reserved > 0;
 
-    Color border, bg;
+    BoxDecoration deco;
     if (isPast) {
-      border = Colors.grey.shade300;
-      bg = Colors.grey.shade50;
+      deco = BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade300, width: 1.5),
+      );
     } else if (isBlocked) {
-      border = Colors.red.shade400;
-      bg = Colors.red.shade50;
+      deco = BoxDecoration(
+        color: Colors.red.shade50,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.red.shade400, width: 1.5),
+      );
     } else if (isFull) {
-      border = _green;
-      bg = _lightGreen.withValues(alpha: 0.2);
+      // Créneau plein : posé et discret — pas de contour dur, une ombre
+      // douce et un fond à peine teinté. Le vert qui compte est sur l'icône
+      // et la pastille « ✓ Complet ».
+      deco = BoxDecoration(
+        color: const Color(0xFFF4FAF6),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: _green.withValues(alpha: 0.13),
+            blurRadius: 12,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      );
     } else if (isLegacy) {
-      border = Colors.orange.shade400;
-      bg = Colors.orange.shade50;
+      deco = BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.orange.shade400, width: 1.5),
+      );
     } else {
-      border = Colors.grey.shade200;
-      bg = Colors.white;
+      deco = BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200, width: 1.5),
+      );
     }
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: border, width: 1.5),
-      ),
+      decoration: deco,
       child: ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         leading: Container(
@@ -1014,35 +1051,49 @@ class _SlotCard extends StatelessWidget {
               '${timeFormat.format(slot.start)} – ${timeFormat.format(slot.end)}',
               style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17),
             ),
-            _statusBadge(isBlocked, isFull),
+            if (badge != null) badge,
           ],
         ),
-        subtitle: Row(
-          children: [
-            Text(
-              _subtitle(),
-              style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
-            ),
-            if (isLegacy) ...[
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Colors.orange.shade200,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Text(
-                  'Ancien format',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: Colors.orange,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+        subtitle: (subtitle.isEmpty && !isLegacy)
+            ? null
+            : Row(
+                children: [
+                  if (subtitle.isNotEmpty)
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: subtitleHasBookings
+                            ? FontWeight.w500
+                            : FontWeight.w400,
+                        color: subtitleHasBookings
+                            ? const Color(0xFF5E8B72)
+                            : Colors.grey.shade600,
+                      ),
+                    ),
+                  if (isLegacy) ...[
+                    if (subtitle.isNotEmpty) const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade200,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Text(
+                        'Ancien format',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: Colors.orange,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
               ),
-            ],
-          ],
-        ),
         onTap: onTap,
       ),
     );

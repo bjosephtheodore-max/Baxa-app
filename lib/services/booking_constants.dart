@@ -20,6 +20,11 @@ const int kMinGapSameCompanyMinutes = 5;
 /// dans des ENTREPRISES DIFFÉRENTES
 const int kMinGapDifferentCompanyMinutes = 30;
 
+/// Nombre maximum de membres d'équipe ACTIFS (isActive == true) par
+/// entreprise. Un membre retiré (isActive == false) ne compte pas et
+/// libère une place. Contrôlé côté app au moment où un membre rejoint.
+const int kMaxActiveStaff = 5;
+
 /// ============================================================
 /// FERMETURE D'UNE FILE
 /// ============================================================

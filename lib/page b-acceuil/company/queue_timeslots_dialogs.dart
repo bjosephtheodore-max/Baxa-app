@@ -293,7 +293,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
     int selectedCapacity =
         (slotData?['capacityPerSlot'] as num?)?.toInt() ?? 1;
     int selectedDelay =
-        (slotData?['reservationDeadlineMinutes'] as num?)?.toInt() ?? 5;
+        (slotData?['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
     int selectedAdvanceDays =
         (slotData?['maxAdvanceDays'] as num?)?.toInt() ?? 2;
     bool guideSeen = false;
@@ -472,63 +472,58 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       }),
                       const SizedBox(height: 16),
 
-                      // ── 1. DURÉE ──────────────────────────────────────
+                      // ── 1. JOURS D'OUVERTURE ─────────────────────────
                       _buildSheetCard(
-                        icon: Icons.timer_rounded,
-                        title: 'Durée par créneau',
-                        subtitle: 'Temps par client',
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: [5, 10, 15, 20, 25, 30].map((d) {
-                              final isSel = selectedDuration == d;
-                              return Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: GestureDetector(
-                                  onTap: () =>
-                                      setD(() => selectedDuration = d),
-                                  child: AnimatedContainer(
-                                    duration:
-                                        const Duration(milliseconds: 150),
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 18,
-                                      vertical: 10,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: isSel ? _kGreen : Colors.white,
-                                      borderRadius: BorderRadius.circular(10),
-                                      border: Border.all(
-                                        color: isSel
-                                            ? _kGreen
-                                            : Colors.grey.shade300,
-                                        width: 1.5,
-                                      ),
-                                      boxShadow: isSel
-                                          ? [
-                                              BoxShadow(
-                                                color: _kGreen.withValues(
-                                                    alpha: 0.3),
-                                                blurRadius: 8,
-                                                offset: const Offset(0, 2),
-                                              ),
-                                            ]
-                                          : [],
-                                    ),
-                                    child: Text(
-                                      '${d}min',
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w700,
-                                        color: isSel
-                                            ? Colors.white
-                                            : Colors.grey.shade700,
-                                      ),
-                                    ),
+                        icon: Icons.calendar_today_rounded,
+                        title: 'Jours d\'ouverture',
+                        subtitle: 'Jours actifs',
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: List.generate(7, (index) {
+                            final day = index + 1;
+                            const labels = [
+                              'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim',
+                            ];
+                            final isSel = selectedWorkingDays.contains(day);
+                            return GestureDetector(
+                              onTap: () {
+                                setD(() {
+                                  if (isSel) {
+                                    selectedWorkingDays.remove(day);
+                                  } else {
+                                    selectedWorkingDays.add(day);
+                                  }
+                                  selectedWorkingDays.sort();
+                                });
+                              },
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 150),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 16, vertical: 9),
+                                decoration: BoxDecoration(
+                                  color: isSel ? _kGreen : Colors.white,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: isSel
+                                        ? _kGreen
+                                        : Colors.grey.shade300,
+                                    width: 1.5,
                                   ),
                                 ),
-                              );
-                            }).toList(),
-                          ),
+                                child: Text(
+                                  labels[index],
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: isSel
+                                        ? Colors.white
+                                        : Colors.grey.shade700,
+                                  ),
+                                ),
+                              ),
+                            );
+                          }),
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -660,37 +655,8 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                 ),
                               ],
                             ),
-                            // Aperçu en temps réel
-                            if (slotCount > 0) ...[
-                              const SizedBox(height: 10),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 14, vertical: 10),
-                                decoration: BoxDecoration(
-                                  color: _kGreen.withValues(alpha: 0.08),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(Icons.check_circle_rounded,
-                                        size: 15, color: _kGreen),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: Text(
-                                        '$slotCount créneau${slotCount > 1 ? 'x' : ''} · '
-                                        '$dailyCapacity personne${dailyCapacity > 1 ? 's' : ''}/jour'
-                                        '${remainder > 0 ? ' · ⚠️ ${remainder}min non utilisées' : ''}',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: _kGreen,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ] else if (totalMinutes <= 0 && endMin > 0) ...[
+                            // Erreur de saisie (l'aperçu détaillé est en bas)
+                            if (totalMinutes <= 0 && endMin > 0) ...[
                               const SizedBox(height: 10),
                               Container(
                                 padding: const EdgeInsets.symmetric(
@@ -722,119 +688,183 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       ),
                       const SizedBox(height: 12),
 
-                      // ── 3. JOURS D'OUVERTURE ─────────────────────────
+                      // ── 3. DURÉE ─────────────────────────────────────
                       _buildSheetCard(
-                        icon: Icons.calendar_today_rounded,
-                        title: 'Jours d\'ouverture',
-                        subtitle: 'Jours actifs',
-                        child: Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: List.generate(7, (index) {
-                            final day = index + 1;
-                            const labels = [
-                              'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim',
-                            ];
-                            final isSel = selectedWorkingDays.contains(day);
-                            return GestureDetector(
-                              onTap: () {
-                                setD(() {
-                                  if (isSel) {
-                                    selectedWorkingDays.remove(day);
-                                  } else {
-                                    selectedWorkingDays.add(day);
-                                  }
-                                  selectedWorkingDays.sort();
-                                });
-                              },
-                              child: AnimatedContainer(
-                                duration: const Duration(milliseconds: 150),
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 16, vertical: 9),
-                                decoration: BoxDecoration(
-                                  color: isSel ? _kGreen : Colors.white,
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(
-                                    color: isSel
-                                        ? _kGreen
-                                        : Colors.grey.shade300,
-                                    width: 1.5,
+                        icon: Icons.timer_rounded,
+                        title: 'Durée par créneau',
+                        subtitle: 'Temps par client',
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [5, 10, 15, 20, 25, 30].map((d) {
+                              final isSel = selectedDuration == d;
+                              return Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: GestureDetector(
+                                  onTap: () =>
+                                      setD(() => selectedDuration = d),
+                                  child: AnimatedContainer(
+                                    duration:
+                                        const Duration(milliseconds: 150),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 10,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: isSel ? _kGreen : Colors.white,
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: isSel
+                                            ? _kGreen
+                                            : Colors.grey.shade300,
+                                        width: 1.5,
+                                      ),
+                                      boxShadow: isSel
+                                          ? [
+                                              BoxShadow(
+                                                color: _kGreen.withValues(
+                                                    alpha: 0.3),
+                                                blurRadius: 8,
+                                                offset: const Offset(0, 2),
+                                              ),
+                                            ]
+                                          : [],
+                                    ),
+                                    child: Text(
+                                      '${d}min',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                        color: isSel
+                                            ? Colors.white
+                                            : Colors.grey.shade700,
+                                      ),
+                                    ),
                                   ),
                                 ),
-                                child: Text(
-                                  labels[index],
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                    color: isSel
-                                        ? Colors.white
-                                        : Colors.grey.shade700,
-                                  ),
-                                ),
-                              ),
-                            );
-                          }),
+                              );
+                            }).toList(),
+                          ),
                         ),
                       ),
                       const SizedBox(height: 12),
 
-                      // ── 4. PARAMÈTRES NUMÉRIQUES ─────────────────────
-                      _buildSheetCard(
-                        icon: Icons.tune_rounded,
-                        title: 'Paramètres',
-                        subtitle: 'Règles de réservation',
-                        child: Column(
-                          children: [
-                            _buildPickerCard(
-                              title: 'Capacité',
-                              subtitle: 'Personnes par créneau',
-                              child: _NumberPickerDial(
-                                min: 1,
-                                max: 30,
-                                value: selectedCapacity,
-                                suffix: 'pers.',
-                                onChanged: (v) =>
-                                    setD(() => selectedCapacity = v),
-                              ),
+                      // ── Alerte : minutes perdues en fin de plage ────
+                      // Juste sous la Durée : c'est le levier le plus direct,
+                      // et l'utilisateur voit tout de suite que sa config a
+                      // un petit souci. Le message donne les vraies heures
+                      // (dernier créneau, fin de plage) pour que le chiffre
+                      // « X min » ait un repère immédiat.
+                      if (slotCount > 0 && remainder > 0) ...[
+                        Builder(builder: (_) {
+                          final lastEndMin =
+                              startMin + slotCount * selectedDuration;
+                          final lastEndStr = _formatTime(TimeOfDay(
+                            hour: lastEndMin ~/ 60,
+                            minute: lastEndMin % 60,
+                          ));
+                          final plageEndStr = endMin >= 1440
+                              ? '24:00'
+                              : _formatTime(TimeOfDay(
+                                  hour: endMin ~/ 60,
+                                  minute: endMin % 60,
+                                ));
+                          return Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 11),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF3E0),
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                            const SizedBox(height: 10),
-                            Row(
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Expanded(
-                                  child: _buildPickerCard(
-                                    title: 'Délai min.',
-                                    subtitle: 'Avant début du créneau',
-                                    child: _NumberPickerDial(
-                                      min: 0,
-                                      max: 60,
-                                      value: selectedDelay,
-                                      suffix: 'min',
-                                      onChanged: (v) =>
-                                          setD(() => selectedDelay = v),
-                                    ),
-                                  ),
+                                const Icon(
+                                  Icons.warning_amber_rounded,
+                                  size: 16,
+                                  color: Color(0xFFB26B00),
                                 ),
-                                const SizedBox(width: 10),
+                                const SizedBox(width: 8),
                                 Expanded(
-                                  child: _buildPickerCard(
-                                    title: 'Anticipation',
-                                    subtitle: 'Jours à l\'avance max.',
-                                    child: _NumberPickerDial(
-                                      min: 1,
-                                      max: 7,
-                                      value: selectedAdvanceDays,
-                                      suffix: 'j',
-                                      onChanged: (v) =>
-                                          setD(() => selectedAdvanceDays = v),
+                                  child: Text(
+                                    'Avec ce créneau, le dernier finit à '
+                                    '$lastEndStr.\n'
+                                    'Les $remainder min restantes '
+                                    '($lastEndStr → $plageEndStr) sont '
+                                    'insuffisantes — donc sans réservation '
+                                    'possible. Ajustez la durée ou '
+                                    'l\'heure de fin.',
+                                    style: const TextStyle(
+                                      fontSize: 12.5,
+                                      color: Color(0xFFB26B00),
+                                      fontWeight: FontWeight.w600,
+                                      height: 1.35,
                                     ),
                                   ),
                                 ),
                               ],
                             ),
-                          ],
+                          );
+                        }),
+                        const SizedBox(height: 12),
+                      ],
+
+                      // ── 4. CAPACITÉ ─────────────────────────────────
+                      // (Délai min. et Anticipation sont désormais réglés au
+                      // niveau de la file, pas de la plage.)
+                      _buildSheetCard(
+                        icon: Icons.tune_rounded,
+                        title: 'Capacité',
+                        subtitle: 'Personnes accueillies par créneau',
+                        child: _buildPickerCard(
+                          title: 'Capacité',
+                          subtitle: 'Personnes par créneau',
+                          child: _NumberPickerDial(
+                            min: 1,
+                            max: 30,
+                            value: selectedCapacity,
+                            suffix: 'pers.',
+                            onChanged: (v) => setD(() => selectedCapacity = v),
+                          ),
                         ),
                       ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 12),
+
+                      // ── Résumé : ce que cette plage va produire ──────
+                      // Toujours neutre/vert : l'alerte éventuelle est
+                      // remontée sous la Durée.
+                      if (slotCount > 0) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 11),
+                          decoration: BoxDecoration(
+                            color: _kGreen.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.check_circle_rounded,
+                                  size: 16, color: _kGreen),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  '$slotCount créneau${slotCount > 1 ? 'x' : ''} · '
+                                  '$dailyCapacity personne${dailyCapacity > 1 ? 's' : ''}/jour',
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    color: _kGreen,
+                                    fontWeight: FontWeight.w600,
+                                    height: 1.35,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                      ] else
+                        const SizedBox(height: 24),
                     ],
                   ),
                 ),
@@ -899,7 +929,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       final origCapacity =
           (slotData['capacityPerSlot'] as num?)?.toInt() ?? 1;
       final origDelay =
-          (slotData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 5;
+          (slotData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
       final origAdvanceDays =
           (slotData['maxAdvanceDays'] as num?)?.toInt() ?? 2;
       final origDays = slotData['workingDays'] != null
@@ -1059,7 +1089,6 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       'capacityPerSlot': selectedCapacity,
       'workingDays': selectedWorkingDays,
       'reservationDeadlineMinutes': selectedDelay,
-      'maxAdvanceDays': selectedAdvanceDays,
       'updatedAt': FieldValue.serverTimestamp(),
     };
 
@@ -1154,13 +1183,6 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
         resolvedSlotId = slotId;
       }
 
-      await _firestore
-          .collection('companies')
-          .doc(widget.companyId)
-          .collection('queues')
-          .doc(widget.queueId)
-          .update({'maxAdvanceDays': selectedAdvanceDays});
-
       // ── Nettoyage selon le type de changement ──────────────────
       bool cancelNotifyFailed = false;
       if (slotId != null) {
@@ -1195,6 +1217,11 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
           workingDays: selectedWorkingDays,
           maxAdvanceDays: selectedAdvanceDays,
           reservationDeadlineMinutes: selectedDelay,
+          // Création : plage neuve, aucun créneau préexistant → dédup en
+          // cache (instantané) + stats en incrément atomique.
+          // Édition : on vient peut-être de supprimer des créneaux juste
+          // au-dessus → dédup serveur + recalcul complet des stats.
+          mode: slotId == null ? SlotGenMode.create : SlotGenMode.refresh,
         );
       }
 
@@ -1294,7 +1321,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                         ),
                         SizedBox(height: 2),
                         Text(
-                          '6 paramètres à maîtriser',
+                          '4 paramètres à maîtriser',
                           style: TextStyle(
                             color: Colors.white70,
                             fontSize: 12,
@@ -1329,10 +1356,10 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                 child: Column(
                   children: [
                     _helpCard(
-                      Icons.timer_rounded,
-                      'Durée par créneau',
-                      'Temps accordé à chaque client lors de sa venue.',
-                      '30 min = 1 client toutes les 30 min',
+                      Icons.calendar_today_rounded,
+                      'Jours d\'ouverture',
+                      'Jours de la semaine où cette plage est active.',
+                      'Fermé le week-end ? Décochez Sam & Dim',
                     ),
                     _helpCard(
                       Icons.access_time_rounded,
@@ -1341,28 +1368,16 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       '9h–17h → créneaux proposés sur cette tranche',
                     ),
                     _helpCard(
-                      Icons.calendar_today_rounded,
-                      'Jours d\'ouverture',
-                      'Jours de la semaine où cette plage est active.',
-                      'Fermé le week-end ? Décochez Sam & Dim',
+                      Icons.timer_rounded,
+                      'Durée par créneau',
+                      'Temps accordé à chaque client lors de sa venue.',
+                      '30 min = 1 client toutes les 30 min',
                     ),
                     _helpCard(
                       Icons.people_rounded,
                       'Capacité',
                       'Nombre de clients accueillis en simultané sur un même créneau.',
                       '2 pers. = 2 clients au même horaire',
-                    ),
-                    _helpCard(
-                      Icons.hourglass_top_rounded,
-                      'Délai minimum',
-                      'Délai obligatoire entre la réservation et le début du créneau.',
-                      '10 min = plus de résa de dernière minute',
-                    ),
-                    _helpCard(
-                      Icons.date_range_rounded,
-                      'Anticipation max.',
-                      'Horizon maximum auquel un client peut réserver à l\'avance.',
-                      '3 j = clients voient les 3 prochains jours',
                     ),
                     const SizedBox(height: 4),
                   ],

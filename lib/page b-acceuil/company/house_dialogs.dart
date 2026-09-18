@@ -15,7 +15,6 @@ Future<_ModifResult?> _showModifDialog(
 }) async {
   ModificationType type =
       todayDone ? ModificationType.permanente : ModificationType.ponctuelle;
-  bool applyToFuture = false;
   return showDialog<_ModifResult>(
     context: context,
     builder: (ctx) => StatefulBuilder(
@@ -45,32 +44,27 @@ Future<_ModifResult?> _showModifDialog(
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: Colors.orange.shade50,
+                  color: _green.withOpacity(0.06),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.orange.shade200),
+                  border: Border.all(color: _green.withOpacity(0.25)),
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(
-                      Icons.warning_amber_rounded,
-                      color: Colors.orange.shade700,
-                      size: 18,
-                    ),
+                    Icon(Icons.check_circle_rounded, color: _green, size: 18),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         isCapacity
-                            ? 'Des réservations existent. '
-                                'Seules les places libres seront ajustées. '
-                                'Les réservations sont préservées.'
-                            : 'Des réservations existent. '
-                                'Les créneaux réservés garderont '
-                                'leur heure de début. '
-                                'Seuls les créneaux libres seront recalculés.',
-                        style: TextStyle(
+                            ? 'Seules les places libres seront ajustées. '
+                                'Les réservations existantes sont préservées, '
+                                'vos clients ne sont pas impactés.'
+                            : 'Seuls les créneaux libres seront recalculés. '
+                                'Les créneaux déjà réservés gardent leur '
+                                'heure — vos clients ne sont pas impactés.',
+                        style: const TextStyle(
                           fontSize: 12,
-                          color: Colors.orange.shade800,
+                          color: Color(0xFF2E5E3E),
                         ),
                       ),
                     ),
@@ -92,12 +86,7 @@ Future<_ModifResult?> _showModifDialog(
                 groupValue: type,
                 activeColor: _green,
                 contentPadding: EdgeInsets.zero,
-                onChanged: todayDone
-                    ? null
-                    : (v) => setD(() {
-                          type = v!;
-                          applyToFuture = false;
-                        }),
+                onChanged: todayDone ? null : (v) => setD(() => type = v!),
               ),
             ),
             if (todayDone)
@@ -120,30 +109,6 @@ Future<_ModifResult?> _showModifDialog(
               contentPadding: EdgeInsets.zero,
               onChanged: (v) => setD(() => type = v!),
             ),
-            if (type == ModificationType.permanente && isCapacity) ...[
-              const SizedBox(height: 8),
-              Container(
-                decoration: BoxDecoration(
-                  color: Colors.orange.shade50,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.orange.shade200),
-                ),
-                child: CheckboxListTile(
-                  title: const Text(
-                    'Appliquer aux plages futures',
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                  ),
-                  subtitle: const Text(
-                    'Régénère les créneaux futurs libres avec ces nouveaux paramètres',
-                    style: TextStyle(fontSize: 11),
-                  ),
-                  value: applyToFuture,
-                  activeColor: _green,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-                  onChanged: (v) => setD(() => applyToFuture = v!),
-                ),
-              ),
-            ],
           ],
         ),
         actions: [
@@ -152,10 +117,7 @@ Future<_ModifResult?> _showModifDialog(
             child: const Text('Annuler'),
           ),
           ElevatedButton(
-            onPressed: () => Navigator.pop(
-              ctx,
-              _ModifResult(type: type, applyToFuture: applyToFuture),
-            ),
+            onPressed: () => Navigator.pop(ctx, _ModifResult(type: type)),
             style: ElevatedButton.styleFrom(
               backgroundColor: _green,
               shape: RoundedRectangleBorder(

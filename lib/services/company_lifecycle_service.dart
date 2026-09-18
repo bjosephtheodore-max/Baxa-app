@@ -14,14 +14,16 @@ Future<void> cancelCompanyDeletion({
   required FirebaseFirestore firestore,
   required String companyId,
 }) async {
-  await firestore.collection('deletionRequests').doc(companyId).delete();
-
   final queuesSnap = await firestore
       .collection('companies')
       .doc(companyId)
       .collection('queues')
       .get();
 
+  // Effacer les fermetures AVANT de supprimer la demande : la CF
+  // onCompanyStateChange voit alors encore `deletionRequests` au moment
+  // du basculement et saute la notif « rouvert » (le staff est déjà
+  // déconnecté à ce stade).
   if (queuesSnap.docs.isNotEmpty) {
     final batch = firestore.batch();
     for (final q in queuesSnap.docs) {
@@ -32,6 +34,8 @@ Future<void> cancelCompanyDeletion({
     }
     await batch.commit();
   }
+
+  await firestore.collection('deletionRequests').doc(companyId).delete();
 
   for (final q in queuesSnap.docs) {
     try {

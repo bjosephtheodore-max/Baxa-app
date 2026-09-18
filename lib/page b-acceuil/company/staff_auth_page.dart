@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:baxa/page b-acceuil/company/staff_page.dart';
+import 'package:baxa/services/booking_constants.dart';
 
 // ============================================================
 // STAFF AUTH PAGE — Rejoindre une equipe via code d'invitation
@@ -80,7 +81,9 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           .get();
 
       if (results.docs.isEmpty) {
-        _setError('Code invalide. Demandez un nouveau code a votre responsable.');
+        _setError(
+          'Code invalide. Demandez un nouveau code a votre responsable.',
+        );
         return;
       }
 
@@ -89,7 +92,9 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
 
       // Verifier que le code est encore actif (non utilise)
       if (data['active'] != true) {
-        _setError('Ce code a deja ete utilise. Demandez un nouveau code a votre responsable.');
+        _setError(
+          'Ce code a deja ete utilise. Demandez un nouveau code a votre responsable.',
+        );
         return;
       }
       final companyId = data['companyId'] as String;
@@ -101,8 +106,11 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           .where('isActive', isEqualTo: true)
           .get();
 
-      if (staffSnap.docs.length >= 3) {
-        _setError('L\'equipe est complete (3 membres maximum). Contactez votre responsable.');
+      if (staffSnap.docs.length >= kMaxActiveStaff) {
+        _setError(
+          'L\'equipe est complete ($kMaxActiveStaff membres maximum). '
+          'Contactez votre responsable.',
+        );
         return;
       }
 
@@ -191,7 +199,9 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
         idToken: googleAuth.idToken,
       );
 
-      final userCred = await FirebaseAuth.instance.signInWithCredential(credential);
+      final userCred = await FirebaseAuth.instance.signInWithCredential(
+        credential,
+      );
       await _createStaffProfile(userCred);
     } catch (e) {
       _setError('Erreur Google. Reessayez.');
@@ -235,9 +245,13 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
     }
   }
 
-  Future<void> _signInWithPhoneCredential(PhoneAuthCredential credential) async {
+  Future<void> _signInWithPhoneCredential(
+    PhoneAuthCredential credential,
+  ) async {
     try {
-      final userCred = await FirebaseAuth.instance.signInWithCredential(credential);
+      final userCred = await FirebaseAuth.instance.signInWithCredential(
+        credential,
+      );
       await _createStaffProfile(userCred);
     } catch (e) {
       _setError('Erreur lors de la connexion. Reessayez.');
@@ -282,22 +296,9 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
       // Invalider le code (usage unique)
       await _markInviteUsed();
 
-      // Notifier l'admin
-      await FirebaseFirestore.instance
-          .collection('companies')
-          .doc(_companyId)
-          .collection('notificationsAdmin')
-          .add({
-            'type': 'new_staff_member',
-            'title': 'Nouveau membre d\'equipe',
-            'body': 'Un nouveau membre a rejoint votre equipe via le code d\'invitation.',
-            'read': false,
-            // Destinataire de la notif : sans ce champ, la liste ET la pastille
-            // staff (qui filtrent sur staffId) restaient vides. NB : à terme,
-            // un événement "adressé à l'admin" gagnerait un feed distinct.
-            'staffId': uid,
-            'createdAt': FieldValue.serverTimestamp(),
-          });
+      // La notification à l'admin (« Nouveau membre d'équipe ») est désormais
+      // écrite côté serveur par la Cloud Function `onStaffJoined`, déclenchée
+      // par la création du doc companies/{id}/staff/{uid} ci-dessus.
 
       if (!mounted) return;
 
@@ -389,7 +390,9 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
                             decoration: BoxDecoration(
                               color: const Color(0xFFFFF1F1),
                               borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: const Color(0xFFFFCDD2)),
+                              border: Border.all(
+                                color: const Color(0xFFFFCDD2),
+                              ),
                             ),
                             child: Row(
                               children: [
@@ -499,9 +502,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
               fontSize: 18,
               letterSpacing: 2,
             ),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
             filled: true,
             fillColor: Colors.grey.shade50,
           ),
@@ -549,7 +550,11 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
             color: _greenLight,
             borderRadius: BorderRadius.circular(12),
           ),
-          child: const Icon(Icons.phone_android_rounded, color: _green, size: 36),
+          child: const Icon(
+            Icons.phone_android_rounded,
+            color: _green,
+            size: 36,
+          ),
         ),
         const SizedBox(height: 20),
         Text(
@@ -780,9 +785,9 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           onPressed: _isLoading
               ? null
               : () => setState(() {
-                    _step = 1;
-                    _clearError();
-                  }),
+                  _step = 1;
+                  _clearError();
+                }),
           child: Text(
             'Renvoyer le code',
             style: TextStyle(color: _green, fontWeight: FontWeight.w600),
