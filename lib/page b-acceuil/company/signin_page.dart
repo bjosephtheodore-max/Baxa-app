@@ -5,7 +5,21 @@ import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:google_fonts/google_fonts.dart';
+
+// Palette de l'onboarding structure (company_onboarding_page.dart) : la page
+// d'inscription en est la dernière étape et doit en garder l'esthétique.
+const Color _green = Color(0xFF3F7A51);
+const Color _greenSoft = Color(0xFFEEF5F0);
+const Color _greenText = Color(0xFF2F5E3D);
+const Color _dark = Color(0xFF1A2E1F);
+const Color _labelDark = Color(0xFF1E2D23);
+const Color _muted = Color(0xFF4A564E);
+const Color _subtle = Color(0xFF5F6B63);
+const Color _border = Color(0xFFD5DED8);
+const Color _fieldFill = Color(0xFFF6F8F6);
+const Color _iconIdle = Color(0xFF5B6660);
+const Color _errorRed = Color(0xFFD93A3A);
+const Color _errorText = Color(0xFF7B1111);
 
 class SigninPage extends StatefulWidget {
   final String? nomEntreprise;
@@ -42,6 +56,17 @@ class SigninPageState extends State<SigninPage> {
   bool _isLoadingSignup = false;
   bool _isLoginMode = false; // Pour basculer entre connexion et inscription
   String? _errorMessage;
+  // Code FirebaseAuth de la dernière erreur : sert uniquement à l'affichage
+  // (champ e-mail en rouge, raccourci « Se connecter à la place »).
+  String? _errorCode;
+
+  // Arrivée depuis l'onboarding (formulaire + journée type) : on affiche le
+  // rappel de la structure. Ouverte seule (déconnexion,
+  // RedirectionPage), la page n'a pas ces informations.
+  bool get _fromOnboarding => widget.nomEntreprise != null;
+
+  bool get _emailInError =>
+      _errorCode == 'email-already-in-use' || _errorCode == 'invalid-email';
 
   @override
   void dispose() {
@@ -86,12 +111,32 @@ class SigninPageState extends State<SigninPage> {
     }
   }
 
-  void _setError(String message) {
-    if (mounted) setState(() => _errorMessage = message);
+  void _setError(String message, {String? code}) {
+    if (mounted) {
+      setState(() {
+        _errorMessage = message;
+        _errorCode = code;
+      });
+    }
   }
 
   void _clearError() {
-    if (_errorMessage != null && mounted) setState(() => _errorMessage = null);
+    if (_errorMessage != null && mounted) {
+      setState(() {
+        _errorMessage = null;
+        _errorCode = null;
+      });
+    }
+  }
+
+  void _toggleMode() {
+    setState(() {
+      _isLoginMode = !_isLoginMode;
+      // Pas de reset() : l'email et le mot de passe sont les mêmes champs dans
+      // les deux modes — les vider à la bascule oblige à tout retaper.
+      _errorMessage = null;
+      _errorCode = null;
+    });
   }
 
   // Méthode de connexion
@@ -113,7 +158,7 @@ class SigninPageState extends State<SigninPage> {
         MaterialPageRoute(builder: (context) => const CompanyPage()),
       );
     } on FirebaseAuthException catch (e) {
-      _setError(_friendlyError(e));
+      _setError(_friendlyError(e), code: e.code);
     } finally {
       if (mounted) setState(() => _isLoadingLogin = false);
     }
@@ -189,7 +234,7 @@ class SigninPageState extends State<SigninPage> {
         MaterialPageRoute(builder: (context) => const CompanyPage()),
       );
     } on FirebaseAuthException catch (e) {
-      _setError(_friendlyError(e));
+      _setError(_friendlyError(e), code: e.code);
     } on FirebaseException catch (e) {
       debugPrint('Firestore error: ${e.code} ${e.message}');
       _setError('Une erreur est survenue. Réessayez.');
@@ -201,364 +246,688 @@ class SigninPageState extends State<SigninPage> {
     }
   }
 
+  InputDecoration _inputDecoration({
+    required String hint,
+    required IconData icon,
+    bool forcedError = false,
+    Widget? suffix,
+  }) {
+    OutlineInputBorder outline(Color color, double width) => OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: BorderSide(color: color, width: width),
+    );
+
+    return InputDecoration(
+      hintText: hint,
+      hintStyle: const TextStyle(fontSize: 15, color: Color(0xFF88928B)),
+      prefixIcon: Icon(icon, size: 20),
+      prefixIconColor: WidgetStateColor.resolveWith((states) {
+        if (forcedError || states.contains(WidgetState.error)) return _errorRed;
+        if (states.contains(WidgetState.focused)) return _green;
+        return _iconIdle;
+      }),
+      suffixIcon: suffix,
+      suffixIconColor: _iconIdle,
+      filled: true,
+      // Fond légèrement teinté au repos, blanc quand le champ est actif.
+      fillColor: WidgetStateColor.resolveWith(
+        (states) =>
+            forcedError ||
+                states.contains(WidgetState.focused) ||
+                states.contains(WidgetState.error)
+            ? Colors.white
+            : _fieldFill,
+      ),
+      hoverColor: Colors.transparent,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+      border: outline(_border, 1.5),
+      enabledBorder: forcedError
+          ? outline(_errorRed, 2)
+          : outline(_border, 1.5),
+      focusedBorder: outline(forcedError ? _errorRed : _green, 2),
+      errorBorder: outline(_errorRed, 2),
+      focusedErrorBorder: outline(_errorRed, 2),
+      errorStyle: const TextStyle(
+        fontSize: 12.5,
+        fontWeight: FontWeight.w500,
+        color: _errorRed,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final canPop = Navigator.canPop(context);
+    final showOnboardingChrome = !_isLoginMode && _fromOnboarding;
+
+    final structureDetail = [
+      widget.typeEntreprise ?? widget.typeCategorie,
+      widget.ville,
+    ].whereType<String>().where((s) => s.trim().isNotEmpty).join(' · ');
+
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
         statusBarColor: Colors.white,
         statusBarIconBrightness: Brightness.dark,
       ),
       child: Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            controller: _scrollController,
-            padding: const EdgeInsets.symmetric(horizontal: 24),
+        backgroundColor: Colors.white,
+        body: SafeArea(
+          child: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 440),
               child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Logo et titre
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: const Color.fromARGB(255, 75, 139, 94),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(
-                      "Baxa",
-                      style: GoogleFonts.pacifico(
-                        fontSize: 36,
-                        fontWeight: FontWeight.w400,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 32),
-
-                  // Titre de la section avec nom personnalisé si disponible
-                  Text(
-                    _isLoginMode
-                        ? 'Bon retour !'
-                        : (widget.nomEntreprise != null
-                              ? 'Bienvenue ${widget.nomEntreprise} !'
-                              : 'Créer un compte entreprise'),
-                    textAlign: TextAlign.center,
-                    style: GoogleFonts.poppins(
-                      fontSize: 26,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black87,
-                    ),
-                  ),
-
-                  const SizedBox(height: 8),
-
-                  Text(
-                    _isLoginMode
-                        ? 'Connectez-vous pour gérer vos files'
-                        : 'Dernière étape pour rejoindre Baxa',
-                    style: TextStyle(fontSize: 15, color: Colors.grey.shade600),
-                  ),
-
-                  const SizedBox(height: 40),
-
-                  // Carte du formulaire
-                  Container(
-                    padding: const EdgeInsets.all(32),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.08),
-                          blurRadius: 20,
-                          offset: const Offset(0, 4),
+                  // Retour vers « Une journée chez… » — absent quand la page
+                  // est la racine (RedirectionPage après déconnexion).
+                  if (canPop)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 4, 12, 0),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: IconButton(
+                          onPressed: () => Navigator.maybePop(context),
+                          tooltip: 'Retour',
+                          icon: const Icon(
+                            Icons.chevron_left_rounded,
+                            color: _green,
+                            size: 30,
+                          ),
                         ),
-                      ],
-                    ),
-                    child: Form(
-                      key: _formkey,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          // Bannière d'erreur inline
-                          if (_errorMessage != null) ...[
-                            Container(
-                              key: const ValueKey('company-signin-error-banner'),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 12,
+                      ),
+                    )
+                  else
+                    const SizedBox(height: 24),
+
+                  Expanded(
+                    child: SingleChildScrollView(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+                      child: Form(
+                        key: _formkey,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (showOnboardingChrome) ...[
+                              const _StepTag(),
+                              const SizedBox(height: 20),
+                            ],
+                            if (_isLoginMode) ...[
+                              const _AgendaPreview(),
+                              const SizedBox(height: 28),
+                            ],
+
+                            Text(
+                              _isLoginMode
+                                  ? 'Bon retour.'
+                                  : 'Créez votre accès.',
+                              style: const TextStyle(
+                                fontSize: 28,
+                                height: 1.15,
+                                fontWeight: FontWeight.w800,
+                                color: _dark,
+                                letterSpacing: -0.5,
                               ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFFEBEB),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: const Color(0xFFE57373),
-                                  width: 1.2,
-                                ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              _isLoginMode
+                                  ? 'Connectez-vous pour retrouver votre agenda.'
+                                  : 'Un e-mail, un mot de passe, et votre agenda est prêt.',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                height: 1.4,
+                                fontWeight: FontWeight.w500,
+                                color: _subtle,
                               ),
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Icon(
-                                    Icons.error_rounded,
-                                    color: Color(0xFFD32F2F),
+                            ),
+
+                            if (showOnboardingChrome) ...[
+                              const SizedBox(height: 24),
+                              _StructureRecap(
+                                name: widget.nomEntreprise!,
+                                detail: structureDetail,
+                              ),
+                            ],
+
+                            if (_errorMessage != null) ...[
+                              const SizedBox(height: 24),
+                              _ErrorBanner(
+                                message: _errorMessage!,
+                                onSwitchToLogin:
+                                    !_isLoginMode &&
+                                        _errorCode == 'email-already-in-use'
+                                    ? _toggleMode
+                                    : null,
+                              ),
+                            ],
+
+                            SizedBox(height: _errorMessage != null ? 20 : 24),
+
+                            const _FieldLabel('Adresse e-mail'),
+                            const SizedBox(height: 8),
+                            TextFormField(
+                              key: const ValueKey('company-signin-email'),
+                              controller: _emailController,
+                              keyboardType: TextInputType.emailAddress,
+                              autofillHints: const [
+                                AutofillHints.username,
+                                AutofillHints.email,
+                              ],
+                              onTap: _scrollToBottom,
+                              onChanged: (_) => _clearError(),
+                              style: const TextStyle(
+                                fontSize: 15,
+                                color: _dark,
+                              ),
+                              decoration: _inputDecoration(
+                                hint: 'vous@structure.com',
+                                icon: Icons.mail_outline_rounded,
+                                forcedError: _emailInError,
+                              ),
+                              validator: (value) {
+                                if (value == null || value.isEmpty) {
+                                  return "Veuillez entrer votre e-mail";
+                                } else if (!value.contains("@")) {
+                                  return "Veuillez entrer un e-mail valide";
+                                }
+                                return null;
+                              },
+                            ),
+
+                            const SizedBox(height: 16),
+
+                            const _FieldLabel('Mot de passe'),
+                            const SizedBox(height: 8),
+                            TextFormField(
+                              key: const ValueKey('company-signin-password'),
+                              controller: _passwordController,
+                              obscureText: _isObscure,
+                              // Toujours désactivés : évite que le basculement de
+                              // l'œil ne renégocie le clavier Android et ne vide
+                              // le champ.
+                              autocorrect: false,
+                              enableSuggestions: false,
+                              autofillHints: [
+                                _isLoginMode
+                                    ? AutofillHints.password
+                                    : AutofillHints.newPassword,
+                              ],
+                              onTap: _scrollToBottom,
+                              onChanged: (_) => _clearError(),
+                              style: const TextStyle(
+                                fontSize: 15,
+                                color: _dark,
+                              ),
+                              decoration: _inputDecoration(
+                                hint: _isLoginMode
+                                    ? 'Votre mot de passe'
+                                    : 'Choisissez un mot de passe',
+                                icon: Icons.lock_outline_rounded,
+                                suffix: IconButton(
+                                  tooltip: _isObscure
+                                      ? 'Afficher le mot de passe'
+                                      : 'Masquer le mot de passe',
+                                  icon: Icon(
+                                    _isObscure
+                                        ? Icons.visibility_outlined
+                                        : Icons.visibility_off_outlined,
                                     size: 20,
                                   ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Text(
-                                      _errorMessage!,
-                                      style: const TextStyle(
-                                        fontSize: 13,
-                                        color: Color(0xFF7B1111),
-                                        fontWeight: FontWeight.w500,
-                                        height: 1.4,
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                                  onPressed: () =>
+                                      setState(() => _isObscure = !_isObscure),
+                                ),
                               ),
+                              validator: (value) {
+                                if (value == null || value.isEmpty) {
+                                  return "Veuillez entrer un mot de passe";
+                                }
+                                if (value.length < 6) {
+                                  return "Minimum 6 caractères";
+                                }
+                                return null;
+                              },
                             ),
-                            const SizedBox(height: 16),
+
+                            if (!_isLoginMode) ...[
+                              const SizedBox(height: 8),
+                              _PasswordRule(controller: _passwordController),
+                            ],
                           ],
-
-                          // Champ Email
-                          TextFormField(
-                            key: const ValueKey('company-signin-email'),
-                            controller: _emailController,
-                            keyboardType: TextInputType.emailAddress,
-                            autofillHints: const [
-                              AutofillHints.username,
-                              AutofillHints.email,
-                            ],
-                            onTap: _scrollToBottom,
-                            onChanged: (_) => _clearError(),
-                            decoration: InputDecoration(
-                              labelText: 'Adresse e-mail professionnelle',
-                              hintText: 'entreprise@email.com',
-                              prefixIcon: const Icon(Icons.email_outlined),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: Colors.grey.shade300),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: const BorderSide(
-                                  color: Color.fromARGB(255, 75, 139, 94),
-                                  width: 1.5,
-                                ),
-                              ),
-                              filled: true,
-                              fillColor: Colors.grey.shade50,
-                            ),
-                            validator: (value) {
-                              if (value == null || value.isEmpty) {
-                                return "Veuillez entrer votre e-mail";
-                              } else if (!value.contains("@")) {
-                                return "Veuillez entrer un e-mail valide";
-                              }
-                              return null;
-                            },
-                          ),
-
-                          const SizedBox(height: 20),
-
-                          // Champ Mot de passe
-                          TextFormField(
-                            key: const ValueKey('company-signin-password'),
-                            controller: _passwordController,
-                            obscureText: _isObscure,
-                            // Toujours désactivés : évite que le basculement de
-                            // l'œil ne renégocie le clavier Android et ne vide
-                            // le champ.
-                            autocorrect: false,
-                            enableSuggestions: false,
-                            autofillHints: [
-                              _isLoginMode
-                                  ? AutofillHints.password
-                                  : AutofillHints.newPassword,
-                            ],
-                            onTap: _scrollToBottom,
-                            onChanged: (_) => _clearError(),
-                            decoration: InputDecoration(
-                              labelText: 'Mot de passe',
-                              hintText: 'Minimum 6 caractères',
-                              prefixIcon: const Icon(Icons.lock_outline),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: Colors.grey.shade300),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: const BorderSide(
-                                  color: Color.fromARGB(255, 75, 139, 94),
-                                  width: 1.5,
-                                ),
-                              ),
-                              filled: true,
-                              fillColor: Colors.grey.shade50,
-                              suffixIcon: IconButton(
-                                icon: Icon(
-                                  _isObscure
-                                      ? Icons.visibility_outlined
-                                      : Icons.visibility_off_outlined,
-                                ),
-                                onPressed: () =>
-                                    setState(() => _isObscure = !_isObscure),
-                              ),
-                            ),
-                            validator: (value) {
-                              if (value == null || value.isEmpty) {
-                                return "Veuillez entrer un mot de passe";
-                              }
-                              if (value.length < 6) {
-                                return "Minimum 6 caractères";
-                              }
-                              return null;
-                            },
-                          ),
-
-                          const SizedBox(height: 24),
-
-                          // Bouton principal
-                          SizedBox(
-                            height: 54,
-                            child: ElevatedButton(
-                              onPressed: (_isLoadingLogin || _isLoadingSignup)
-                                  ? null
-                                  : (_isLoginMode
-                                        ? _handleLogin
-                                        : _handleSignup),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color.fromARGB(
-                                  255,
-                                  75,
-                                  139,
-                                  94,
-                                ),
-                                foregroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                elevation: 0,
-                              ),
-                              child:
-                                  (_isLoginMode
-                                      ? _isLoadingLogin
-                                      : _isLoadingSignup)
-                                  ? const SizedBox(
-                                      height: 20,
-                                      width: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : Text(
-                                      _isLoginMode
-                                          ? 'Se connecter'
-                                          : 'Créer mon entreprise',
-                                      style: const TextStyle(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
                     ),
                   ),
 
-                  const SizedBox(height: 24),
-
-                  // Basculer entre connexion et inscription
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Flexible(
-                        child: Text(
-                          _isLoginMode
-                              ? 'Première fois sur Baxa ?'
-                              : 'Vous avez déjà un compte ?',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Colors.grey.shade700,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          setState(() {
-                            _isLoginMode = !_isLoginMode;
-                            // Pas de reset() : l'email et le mot de passe sont
-                            // les mêmes champs dans les deux modes — les vider à
-                            // la bascule oblige à tout retaper.
-                            _errorMessage = null;
-                          });
-                        },
-                        child: Text(
-                          _isLoginMode ? 'S\'inscrire' : 'Se connecter',
-                          style: const TextStyle(
-                            color: Color.fromARGB(255, 75, 139, 94),
-                            fontSize: 14,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // Message de sécurité
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.blue.shade50,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.security_outlined,
-                          size: 16,
-                          color: Colors.blue.shade700,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Vos données sont sécurisées et protégées',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.blue.shade700,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
+                  _buildBottomBar(),
                 ],
               ),
             ),
-          ),  // SingleChildScrollView
-        ),  // Center
-      ),     // SafeArea
-    ),     // Scaffold
-    );     // AnnotatedRegion
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomBar() {
+    final isBusy = _isLoadingLogin || _isLoadingSignup;
+    final isLoading = _isLoginMode ? _isLoadingLogin : _isLoadingSignup;
+    // Clavier ouvert : on garde seulement le bouton et la bascule, pour
+    // laisser la place aux champs.
+    final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 8, 24, 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (!keyboardOpen) ...[
+            const Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.lock_outline_rounded, size: 14, color: _muted),
+                SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    'Vos données sont chiffrées et protégées.',
+                    style: TextStyle(fontSize: 12, color: _muted),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+          ],
+          SizedBox(
+            width: double.infinity,
+            height: 56,
+            child: ElevatedButton(
+              onPressed: isBusy
+                  ? null
+                  : (_isLoginMode ? _handleLogin : _handleSignup),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _green,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: _green.withValues(alpha: 0.7),
+                disabledForegroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+              child: isLoading
+                  ? const SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Text(
+                      _isLoginMode ? 'Se connecter' : 'Créer mon compte',
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                child: Text(
+                  _isLoginMode
+                      ? 'Première fois sur Baxa ?'
+                      : 'Déjà un compte ?',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 14, color: _subtle),
+                ),
+              ),
+              TextButton(
+                onPressed: _toggleMode,
+                style: TextButton.styleFrom(foregroundColor: _greenText),
+                child: Text(
+                  _isLoginMode ? 'S\'inscrire' : 'Se connecter',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Pastille « Dernière étape », même forme que les étiquettes de l'onboarding ─
+class _StepTag extends StatelessWidget {
+  const _StepTag();
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: _green,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.check_rounded, size: 15, color: Colors.white),
+            const SizedBox(width: 8),
+            const Text(
+              'Dernière étape',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '· votre accès',
+              style: TextStyle(
+                fontSize: 13,
+                color: Colors.white.withValues(alpha: 0.9),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Rappel de la structure saisie dans le formulaire (lecture seule) ─────────
+class _StructureRecap extends StatelessWidget {
+  final String name;
+  final String detail;
+
+  const _StructureRecap({required this.name, required this.detail});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _greenSoft,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: const Icon(
+              Icons.storefront_outlined,
+              size: 24,
+              color: _green,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: _dark,
+                  ),
+                ),
+                if (detail.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    detail,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13, color: _muted),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Aperçu d'agenda du mode connexion (reprend l'illustration de l'onboarding)
+class _AgendaPreview extends StatelessWidget {
+  const _AgendaPreview();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _greenSoft,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(4, 2, 4, 0),
+            child: Text(
+              'VOTRE JOURNÉE VOUS ATTEND',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: _greenText,
+                letterSpacing: 0.6,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          _AgendaRow(
+            time: '08:00 – 08:15',
+            label: 'Awa D.',
+            labelColor: Colors.blue.shade700,
+          ),
+          const SizedBox(height: 8),
+          _AgendaRow(
+            time: '08:15 – 08:30',
+            label: 'M. Sarr',
+            labelColor: Colors.blue.shade700,
+          ),
+          const SizedBox(height: 8),
+          const Opacity(
+            opacity: 0.6,
+            child: _AgendaRow(
+              time: '08:30 – 08:45',
+              label: 'Disponible',
+              labelColor: _greenText,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AgendaRow extends StatelessWidget {
+  final String time;
+  final String label;
+  final Color labelColor;
+
+  const _AgendaRow({
+    required this.time,
+    required this.label,
+    required this.labelColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              time,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: _dark,
+              ),
+            ),
+          ),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: labelColor,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Bannière d'erreur inline ─────────────────────────────────────────────────
+class _ErrorBanner extends StatelessWidget {
+  final String message;
+  // Non nul seulement pour « compte déjà existant » : bascule en connexion.
+  final VoidCallback? onSwitchToLogin;
+
+  const _ErrorBanner({required this.message, this.onSwitchToLogin});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey('company-signin-error-banner'),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFDEEEE),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.error_outline_rounded,
+            color: Color(0xFFC62828),
+            size: 20,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  message,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    height: 1.4,
+                    color: _errorText,
+                  ),
+                ),
+                if (onSwitchToLogin != null)
+                  TextButton(
+                    onPressed: onSwitchToLogin,
+                    style: TextButton.styleFrom(
+                      foregroundColor: _errorText,
+                      padding: const EdgeInsets.only(top: 6),
+                      minimumSize: const Size(0, 36),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      alignment: Alignment.centerLeft,
+                    ),
+                    child: const Text(
+                      'Se connecter à la place',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        decoration: TextDecoration.underline,
+                        decorationColor: _errorText,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FieldLabel extends StatelessWidget {
+  final String text;
+  const _FieldLabel(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: const TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+        color: _labelDark,
+      ),
+    );
+  }
+}
+
+// ── Règle du mot de passe, cochée dès qu'elle est respectée (affichage seul :
+// la validation reste celle du TextFormField) ──────────────────────────────
+class _PasswordRule extends StatelessWidget {
+  final TextEditingController controller;
+  const _PasswordRule({required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: controller,
+      builder: (_, value, _) {
+        final ok = value.text.length >= 6;
+        final color = ok ? _greenText : _subtle;
+        return Row(
+          children: [
+            Icon(
+              ok
+                  ? Icons.check_circle_outline_rounded
+                  : Icons.radio_button_unchecked_rounded,
+              size: 16,
+              color: ok ? _green : _subtle,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '6 caractères minimum',
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w500,
+                color: color,
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 }

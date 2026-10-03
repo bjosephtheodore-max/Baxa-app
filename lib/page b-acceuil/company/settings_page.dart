@@ -17,7 +17,15 @@ part 'queue_timeslots_logic.dart';
 // CONSTANTES PARTAGÉES
 // ============================================================
 const Color _kGreen = Color.fromARGB(255, 75, 139, 94);
-const Color _kLightGreen = Color.fromARGB(255, 178, 211, 194);
+
+// Palette de l'onboarding structure (company_onboarding_page.dart), reprise
+// par les feuilles de création de file et de plage.
+const Color _kSheetGreen = Color(0xFF3F7A51);
+const Color _kSheetGreenSoft = Color(0xFFEEF5F0);
+const Color _kSheetGreenText = Color(0xFF2F5E3D);
+const Color _kSheetDark = Color(0xFF1A2E1F);
+const Color _kSheetMuted = Color(0xFF4A564E);
+const Color _kSheetBorder = Color(0xFFD5DED8);
 
 // ============================================================
 // Suppression d'une file : efface ses sous-collections (Firestore ne
@@ -510,66 +518,26 @@ class _SettingsPageState extends State<SettingsPage> {
                   width: 36,
                   height: 4,
                   decoration: BoxDecoration(
-                    color: Colors.grey.shade300,
+                    color: _kSheetBorder,
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-                // ── En-tête ────────────────────────────────────────
-                Container(
-                  margin: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: _kGreen,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(7),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(9),
-                        ),
-                        child: const Icon(
-                          Icons.people_alt_rounded,
-                          color: Colors.white,
-                          size: 18,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          isEdit
-                              ? 'Modifier la file'
-                              : 'Nouvelle file d\'attente',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 15,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                // Pas d'en-tête : on vient d'appuyer sur « Nouvelle file »
+                // (ou de modifier une file), le contexte est déjà clair.
                 // ── Corps défilable ────────────────────────────────
                 Flexible(
                   child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
+                    padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
                     child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         // Nom
                         Text(
-                          'NOM DE LA FILE',
-                          style: TextStyle(
-                            fontSize: 10.5,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 0.8,
-                            color: Colors.grey.shade500,
+                          isEdit ? 'Nom de la file' : 'Nom de la nouvelle file',
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: _kSheetDark,
                           ),
                         ),
                         const SizedBox(height: 8),
@@ -582,106 +550,79 @@ class _SettingsPageState extends State<SettingsPage> {
                               setD(() => nameError = null);
                             }
                           },
-                          decoration: InputDecoration(
-                            hintText: 'Ex : Consultation, Caisse principale…',
+                          style: const TextStyle(
+                            fontSize: 15,
+                            color: _kSheetDark,
+                          ),
+                          decoration: _sheetInputDecoration(
+                            hint: 'Ex : Consultation, Caisse principale…',
+                            icon: Icons.label_outline_rounded,
                             errorText: nameError,
-                            hintStyle:
-                                TextStyle(color: Colors.grey.shade400),
-                            prefixIcon: const Icon(
-                              Icons.label_outline_rounded,
-                              color: _kGreen,
-                            ),
-                            filled: true,
-                            fillColor: Colors.grey.shade50,
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide:
-                                  BorderSide(color: Colors.grey.shade200),
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide:
-                                  BorderSide(color: Colors.grey.shade200),
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide: const BorderSide(
-                                color: _kGreen,
-                                width: 1.5,
-                              ),
-                            ),
                           ),
                         ),
                         const SizedBox(height: 18),
 
-                        // Chip d'aide — juste au-dessus de la carte qu'il
-                        // explique.
-                        GestureDetector(
-                          onTap: () {
-                            FocusScope.of(ctx).unfocus();
-                            _showQueueParamsHelp();
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: Colors.grey.shade100,
-                              borderRadius: BorderRadius.circular(20),
-                              border:
-                                  Border.all(color: Colors.grey.shade300),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.info_outline,
-                                    size: 15, color: _kGreen),
-                                const SizedBox(width: 6),
-                                Text(
-                                  'Comment ça marche ?',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.grey.shade700,
-                                  ),
+                        // Intitulé des réglages + lien d'aide
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'Réglages de réservation',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: _kSheetDark,
                                 ),
-                                const SizedBox(width: 4),
-                                Icon(Icons.arrow_forward_ios_rounded,
-                                    size: 10, color: Colors.grey.shade500),
-                              ],
+                              ),
                             ),
-                          ),
+                            TextButton.icon(
+                              onPressed: () {
+                                FocusScope.of(ctx).unfocus();
+                                _showQueueParamsHelp();
+                              },
+                              style: TextButton.styleFrom(
+                                foregroundColor: _kSheetGreenText,
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 4),
+                                textStyle: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              icon: const Icon(
+                                Icons.info_outline_rounded,
+                                size: 16,
+                              ),
+                              label: const Text('Comment ça marche ?'),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 4),
 
                         // ── Fenêtre de réservation (repliable) ───────
                         Container(
+                          padding: const EdgeInsets.all(6),
                           decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(16),
-                            border:
-                                Border.all(color: Colors.grey.shade200),
+                            color: _kSheetGreenSoft,
+                            borderRadius: BorderRadius.circular(18),
                           ),
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               InkWell(
-                                borderRadius: BorderRadius.circular(16),
+                                borderRadius: BorderRadius.circular(14),
                                 onTap: () {
                                   FocusScope.of(ctx).unfocus();
                                   setD(() =>
                                       paramsExpanded = !paramsExpanded);
                                 },
                                 child: Padding(
-                                  padding: const EdgeInsets.all(14),
+                                  padding: const EdgeInsets.all(10),
                                   child: Row(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
                                     children: [
-                                      const Icon(
-                                          Icons.event_available_rounded,
-                                          size: 16,
-                                          color: _kGreen),
-                                      const SizedBox(width: 8),
+                                      const _SheetIconTile(
+                                          Icons.event_available_rounded),
+                                      const SizedBox(width: 12),
                                       Expanded(
                                         child: Column(
                                           crossAxisAlignment:
@@ -691,56 +632,45 @@ class _SettingsPageState extends State<SettingsPage> {
                                               'Fenêtre de réservation',
                                               style: TextStyle(
                                                 fontWeight: FontWeight.w700,
-                                                fontSize: 13,
-                                                color: Color(0xFF1A1C2E),
+                                                fontSize: 15,
+                                                color: _kSheetDark,
                                               ),
                                             ),
-                                            const SizedBox(height: 3),
+                                            const SizedBox(height: 2),
                                             Text(
                                               windowSentence(),
-                                              style: TextStyle(
-                                                fontSize: 11.5,
+                                              style: const TextStyle(
+                                                fontSize: 12.5,
                                                 height: 1.35,
-                                                color: Colors.grey.shade600,
+                                                color: _kSheetMuted,
                                               ),
                                             ),
                                           ],
                                         ),
                                       ),
                                       const SizedBox(width: 8),
-                                      Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Text(
-                                            paramsExpanded
-                                                ? 'Réduire'
-                                                : 'Modifier',
-                                            style: const TextStyle(
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.w600,
-                                              color: _kGreen,
-                                            ),
-                                          ),
-                                          Icon(
-                                            paramsExpanded
-                                                ? Icons.expand_less_rounded
-                                                : Icons.expand_more_rounded,
-                                            size: 18,
-                                            color: _kGreen,
-                                          ),
-                                        ],
+                                      Text(
+                                        paramsExpanded ? 'Réduire' : 'Modifier',
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w700,
+                                          color: _kSheetGreenText,
+                                        ),
                                       ),
                                     ],
                                   ),
                                 ),
                               ),
-                              if (paramsExpanded) ...[
-                                Divider(
-                                    height: 1,
-                                    color: Colors.grey.shade200),
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                      14, 6, 14, 12),
+                              if (paramsExpanded)
+                                Container(
+                                  margin:
+                                      const EdgeInsets.fromLTRB(4, 0, 4, 4),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 14),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
                                   child: Column(
                                     children: [
                                       _windowStepperRow(
@@ -753,9 +683,10 @@ class _SettingsPageState extends State<SettingsPage> {
                                         onChanged: (v) =>
                                             setD(() => advance = v),
                                       ),
-                                      Divider(
-                                          height: 1,
-                                          color: Colors.grey.shade200),
+                                      const Divider(
+                                        height: 1,
+                                        color: Color(0xFFE6ECE8),
+                                      ),
                                       _windowStepperRow(
                                         label: 'Délai avant le créneau',
                                         values: _kDeadlineValues,
@@ -769,50 +700,44 @@ class _SettingsPageState extends State<SettingsPage> {
                                     ],
                                   ),
                                 ),
-                              ],
                             ],
                           ),
                         ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 10),
 
                         // ── Réservations simultanées ─────────────────
                         Container(
-                          padding: const EdgeInsets.all(14),
+                          padding: const EdgeInsets.all(16),
                           decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(16),
-                            border:
-                                Border.all(color: Colors.grey.shade200),
+                            color: _kSheetGreenSoft,
+                            borderRadius: BorderRadius.circular(18),
                           ),
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Icon(Icons.event_repeat_rounded,
-                                  size: 16, color: _kGreen),
-                              const SizedBox(width: 8),
-                              Expanded(
+                              const _SheetIconTile(Icons.event_repeat_rounded),
+                              const SizedBox(width: 12),
+                              const Expanded(
                                 child: Column(
                                   crossAxisAlignment:
                                       CrossAxisAlignment.start,
                                   children: [
-                                    const Text(
-                                      'Réservations simultanées',
+                                    Text(
+                                      'Plusieurs réservations',
                                       style: TextStyle(
                                         fontWeight: FontWeight.w700,
-                                        fontSize: 13,
-                                        color: Color(0xFF1A1C2E),
+                                        fontSize: 15,
+                                        color: _kSheetDark,
                                       ),
                                     ),
-                                    const SizedBox(height: 3),
+                                    SizedBox(height: 3),
                                     Text(
-                                      'Vos clients doivent attendre que leur '
-                                      'réservation soit passée pour en refaire '
-                                      'une. Activez pour qu\'ils en cumulent '
-                                      'plusieurs (ex. midi et soir).',
+                                      'Permet à un client de réserver midi '
+                                      'et soir, par exemple.',
                                       style: TextStyle(
-                                        fontSize: 11.5,
-                                        height: 1.35,
-                                        color: Colors.grey.shade600,
+                                        fontSize: 12.5,
+                                        height: 1.45,
+                                        color: _kSheetMuted,
                                       ),
                                     ),
                                   ],
@@ -821,7 +746,8 @@ class _SettingsPageState extends State<SettingsPage> {
                               const SizedBox(width: 8),
                               Switch(
                                 value: allowMultiplePerPlage,
-                                activeThumbColor: _kGreen,
+                                activeThumbColor: Colors.white,
+                                activeTrackColor: _kSheetGreen,
                                 onChanged: (v) =>
                                     setD(() => allowMultiplePerPlage = v),
                               ),
@@ -833,18 +759,13 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ),
                 // ── Bouton épinglé ────────────────────────────────
-                Container(
-                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    border: Border(
-                        top: BorderSide(color: Colors.grey.shade200)),
-                  ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
                   child: SafeArea(
                     top: false,
                     child: SizedBox(
                       width: double.infinity,
-                      height: 52,
+                      height: 56,
                       child: ElevatedButton(
                         onPressed: () {
                           if (nameCtrl.text.trim().isEmpty) {
@@ -855,18 +776,18 @@ class _SettingsPageState extends State<SettingsPage> {
                           Navigator.pop(ctx, true);
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: _kGreen,
+                          backgroundColor: _kSheetGreen,
+                          foregroundColor: Colors.white,
                           elevation: 0,
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
+                            borderRadius: BorderRadius.circular(16),
                           ),
                         ),
                         child: Text(
                           isEdit ? 'Modifier la file' : 'Créer la file',
                           style: const TextStyle(
-                            color: Colors.white,
                             fontWeight: FontWeight.w700,
-                            fontSize: 15,
+                            fontSize: 17,
                           ),
                         ),
                       ),
@@ -912,24 +833,24 @@ class _SettingsPageState extends State<SettingsPage> {
       return GestureDetector(
         onTap: enabled ? onTap : null,
         child: Container(
-          width: 34,
-          height: 34,
+          width: 40,
+          height: 40,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: enabled ? _kGreen.withValues(alpha: 0.10) : Colors.grey.shade100,
-            borderRadius: BorderRadius.circular(9),
+            color: enabled ? _kSheetGreenSoft : const Color(0xFFF1F4F2),
+            borderRadius: BorderRadius.circular(12),
           ),
           child: Icon(
             icon,
-            size: 18,
-            color: enabled ? _kGreen : Colors.grey.shade300,
+            size: 20,
+            color: enabled ? _kSheetGreen : Colors.grey.shade300,
           ),
         ),
       );
     }
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
+      padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(
         children: [
           Expanded(
@@ -939,12 +860,12 @@ class _SettingsPageState extends State<SettingsPage> {
                 Text(
                   label,
                   style: const TextStyle(
-                    fontSize: 12.5,
+                    fontSize: 13.5,
                     fontWeight: FontWeight.w700,
-                    color: Color(0xFF1A1C2E),
+                    color: _kSheetDark,
                   ),
                 ),
-                const SizedBox(height: 3),
+                const SizedBox(height: 2),
                 GestureDetector(
                   onTap: atRecommended ? null : () => onChanged(recommended),
                   child: Text(
@@ -952,9 +873,9 @@ class _SettingsPageState extends State<SettingsPage> {
                         ? '★ conseillé'
                         : 'conseillé : ${format(recommended)}',
                     style: TextStyle(
-                      fontSize: 10.5,
+                      fontSize: 11.5,
                       fontWeight: FontWeight.w600,
-                      color: atRecommended ? _kGreen : Colors.grey.shade500,
+                      color: atRecommended ? _kSheetGreenText : const Color(0xFF6B756F),
                     ),
                   ),
                 ),
@@ -965,14 +886,14 @@ class _SettingsPageState extends State<SettingsPage> {
           stepBtn(Icons.remove_rounded, canDown,
               () => onChanged(values[i - 1])),
           Container(
-            width: 74,
+            width: 70,
             alignment: Alignment.center,
             child: Text(
               format(value),
               style: const TextStyle(
-                fontSize: 14,
+                fontSize: 15,
                 fontWeight: FontWeight.w800,
-                color: _kGreen,
+                color: _kSheetDark,
               ),
             ),
           ),
@@ -1602,9 +1523,7 @@ class _SettingsPageState extends State<SettingsPage> {
               total += slotsCount * capacity;
             }
           }
-          // Toutes les plages comptent, y compris celles en suppression
-          // programmée : « À configurer » = aucune plage du tout.
-          final result = (plages: snapshot.docs.length, total: total);
+          final result = (total: total);
           _lastCapacity[queueId] = result;
           return result;
         });
@@ -1707,7 +1626,7 @@ class _SettingsPageState extends State<SettingsPage> {
 }
 
 // Nombre de plages de la file + capacité totale (clients/jour) qu'elles offrent.
-typedef _QueueCapacity = ({int plages, int total});
+typedef _QueueCapacity = ({int total});
 
 // ============================================================
 // CARTE FILE D'ATTENTE — avec animation "push" au press
@@ -1891,29 +1810,8 @@ class _AnimatedQueueCardState extends State<_AnimatedQueueCard> {
                                       }
                                       return const SizedBox.shrink();
                                     }
-                                    // Aucune plage du tout : la file existe
-                                    // mais personne ne peut y réserver.
-                                    if (data.plages == 0) {
-                                      return Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 8,
-                                          vertical: 5,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: Colors.orange.shade50,
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                        ),
-                                        child: Text(
-                                          'À configurer',
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w700,
-                                            color: Colors.orange.shade700,
-                                          ),
-                                        ),
-                                      );
-                                    }
+                                    // Aucune plage (ou capacité nulle) : pas
+                                    // de badge, la phrase garde sa place.
                                     final total = data.total;
                                     if (total == 0) {
                                       return const SizedBox.shrink();
@@ -2089,85 +1987,163 @@ class _DayCapacity {
 }
 
 // ============================================================
-// WIDGET DÉFILANT POUR SÉLECTION NUMÉRIQUE
+// BRIQUES VISUELLES DES FEUILLES FILE / PLAGE
 // ============================================================
-class _NumberPickerDial extends StatefulWidget {
-  final int min;
-  final int max;
-  final int value;
-  final String suffix;
-  final ValueChanged<int> onChanged;
 
-  const _NumberPickerDial({
-    required this.min,
-    required this.max,
+// Champ de saisie au style de l'onboarding : fond légèrement teinté au repos,
+// blanc et contour vert quand il est actif.
+InputDecoration _sheetInputDecoration({
+  required String hint,
+  required IconData icon,
+  String? errorText,
+}) {
+  OutlineInputBorder outline(Color color, double width) => OutlineInputBorder(
+    borderRadius: BorderRadius.circular(14),
+    borderSide: BorderSide(color: color, width: width),
+  );
+
+  return InputDecoration(
+    hintText: hint,
+    hintStyle: const TextStyle(fontSize: 15, color: Color(0xFF88928B)),
+    errorText: errorText,
+    prefixIcon: Icon(icon, size: 20),
+    prefixIconColor: WidgetStateColor.resolveWith((states) {
+      if (states.contains(WidgetState.error)) return Colors.red.shade700;
+      if (states.contains(WidgetState.focused)) return _kSheetGreen;
+      return const Color(0xFF5B6660);
+    }),
+    filled: true,
+    fillColor: WidgetStateColor.resolveWith(
+      (states) =>
+          states.contains(WidgetState.focused) ||
+              states.contains(WidgetState.error)
+          ? Colors.white
+          : const Color(0xFFF6F8F6),
+    ),
+    hoverColor: Colors.transparent,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+    border: outline(_kSheetBorder, 1.5),
+    enabledBorder: outline(_kSheetBorder, 1.5),
+    focusedBorder: outline(_kSheetGreen, 2),
+    errorBorder: outline(Colors.red.shade700, 2),
+    focusedErrorBorder: outline(Colors.red.shade700, 2),
+  );
+}
+
+// Icône d'une carte de réglage : pastille blanche sur la carte vert doux.
+class _SheetIconTile extends StatelessWidget {
+  final IconData icon;
+  const _SheetIconTile(this.icon);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 40,
+      height: 40,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Icon(icon, size: 20, color: _kSheetGreen),
+    );
+  }
+}
+
+// Rangée de choix qui défile horizontalement (durée, capacité). À l'ouverture,
+// elle se cale sur la valeur sélectionnée pour qu'elle soit visible.
+class _ChoiceStrip extends StatefulWidget {
+  final List<int> values;
+  final int value;
+  final String Function(int) label;
+  final ValueChanged<int> onChanged;
+  final double minChipWidth;
+
+  const _ChoiceStrip({
+    required this.values,
     required this.value,
-    required this.suffix,
+    required this.label,
     required this.onChanged,
+    this.minChipWidth = 44,
   });
 
   @override
-  State<_NumberPickerDial> createState() => _NumberPickerDialState();
+  State<_ChoiceStrip> createState() => _ChoiceStripState();
 }
 
-class _NumberPickerDialState extends State<_NumberPickerDial> {
-  late FixedExtentScrollController _ctrl;
+class _ChoiceStripState extends State<_ChoiceStrip> {
+  final GlobalKey _selectedKey = GlobalKey();
 
   @override
   void initState() {
     super.initState();
-    _ctrl = FixedExtentScrollController(
-      initialItem: (widget.value - widget.min).clamp(
-        0,
-        widget.max - widget.min,
-      ),
-    );
-  }
-
-  @override
-  void didUpdateWidget(_NumberPickerDial oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.value != widget.value) {
-      _ctrl.animateToItem(
-        (widget.value - widget.min).clamp(0, widget.max - widget.min),
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeInOut,
-      );
-    }
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _selectedKey.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(ctx, alignment: 0.5);
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 110,
-      child: ListWheelScrollView.useDelegate(
-        controller: _ctrl,
-        itemExtent: 36,
-        physics: const FixedExtentScrollPhysics(),
-        perspective: 0.003,
-        onSelectedItemChanged: (i) => widget.onChanged(i + widget.min),
-        childDelegate: ListWheelChildBuilderDelegate(
-          childCount: widget.max - widget.min + 1,
-          builder: (context, index) {
-            final val = index + widget.min;
-            final isSelected = val == widget.value;
-            return Center(
-              child: Text(
-                '$val ${widget.suffix}',
-                style: TextStyle(
-                  fontSize: isSelected ? 18 : 13,
-                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w400,
-                  color: isSelected ? _kGreen : Colors.grey.shade400,
-                ),
+    // Fondu sur les bords : on devine qu'il y a d'autres valeurs à côté.
+    return ShaderMask(
+      shaderCallback: (rect) => const LinearGradient(
+        colors: [
+          Colors.transparent,
+          Colors.black,
+          Colors.black,
+          Colors.transparent,
+        ],
+        stops: [0, 0.04, 0.94, 1],
+      ).createShader(rect),
+      blendMode: BlendMode.dstIn,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+        child: Row(
+          children: [
+            for (final v in widget.values)
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: _choiceChip(v),
               ),
-            );
-          },
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _choiceChip(int v) {
+    final isSel = v == widget.value;
+    return Semantics(
+      button: true,
+      selected: isSel,
+      child: GestureDetector(
+        key: isSel ? _selectedKey : null,
+        onTap: () => widget.onChanged(v),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          height: 44,
+          constraints: BoxConstraints(minWidth: widget.minChipWidth),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: isSel ? _kSheetGreen : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isSel ? _kSheetGreen : _kSheetBorder,
+              width: 1.5,
+            ),
+          ),
+          child: Text(
+            widget.label(v),
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: isSel ? Colors.white : _kSheetMuted,
+            ),
+          ),
         ),
       ),
     );

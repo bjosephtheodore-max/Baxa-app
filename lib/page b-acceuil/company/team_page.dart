@@ -263,7 +263,9 @@ class _TeamPageState extends State<TeamPage> {
               const SizedBox(height: 16),
               TextField(
                 controller: controller,
-                autofocus: true,
+                // Clavier seulement pour un premier nom : un membre déjà
+                // nommé, on rouvre plutôt pour « Retirer de l'équipe ».
+                autofocus: currentName.isEmpty,
                 textCapitalization: TextCapitalization.words,
                 decoration: InputDecoration(
                   hintText: 'Nom du membre',

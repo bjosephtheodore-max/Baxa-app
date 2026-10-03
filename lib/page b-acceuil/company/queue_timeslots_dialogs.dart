@@ -334,7 +334,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                     width: 40,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
+                      color: _kSheetBorder,
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
@@ -349,12 +349,12 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       Container(
                         padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
-                          color: _kGreen.withValues(alpha: 0.12),
+                          color: const Color(0xFFE4EFE7),
                           borderRadius: BorderRadius.circular(14),
                         ),
                         child: const Icon(
                           Icons.schedule_rounded,
-                          color: _kGreen,
+                          color: _kSheetGreen,
                           size: 24,
                         ),
                       ),
@@ -370,7 +370,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                               style: const TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.w800,
-                                color: Color(0xFF1A1C2E),
+                                color: _kSheetDark,
                                 letterSpacing: -0.3,
                               ),
                             ),
@@ -379,9 +379,9 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                               slotId == null
                                   ? 'Définissez vos horaires de service'
                                   : widget.queueName,
-                              style: TextStyle(
+                              style: const TextStyle(
                                 fontSize: 12,
-                                color: Colors.grey.shade500,
+                                color: Color(0xFF6B756F),
                               ),
                             ),
                           ],
@@ -390,15 +390,15 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       GestureDetector(
                         onTap: () => Navigator.pop(ctx, false),
                         child: Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade200,
+                          padding: const EdgeInsets.all(9),
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFE9EEEA),
                             shape: BoxShape.circle,
                           ),
                           child: const Icon(
                             Icons.close,
                             size: 18,
-                            color: Colors.black54,
+                            color: _kSheetMuted,
                           ),
                         ),
                       ),
@@ -428,20 +428,20 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                             ),
                             decoration: BoxDecoration(
                               color: pulsing
-                                  ? _kLightGreen
-                                  : Colors.grey.shade100,
+                                  ? _kSheetGreenSoft
+                                  : Colors.white,
                               borderRadius: BorderRadius.circular(20),
                               border: Border.all(
                                 color: pulsing
-                                    ? _kGreen.withValues(alpha: 0.5)
-                                    : Colors.grey.shade300,
+                                    ? _kSheetGreen.withValues(alpha: 0.5)
+                                    : _kSheetBorder,
                               ),
                             ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Icon(Icons.info_outline,
-                                    size: 15, color: _kGreen),
+                                const Icon(Icons.info_outline,
+                                    size: 15, color: _kSheetGreen),
                                 const SizedBox(width: 6),
                                 Text(
                                   'Guide des paramètres',
@@ -449,16 +449,16 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                     fontSize: 12,
                                     fontWeight: FontWeight.w600,
                                     color: pulsing
-                                        ? _kGreen
-                                        : Colors.grey.shade700,
+                                        ? _kSheetGreenText
+                                        : _kSheetMuted,
                                   ),
                                 ),
                                 const SizedBox(width: 4),
                                 Icon(Icons.arrow_forward_ios_rounded,
                                     size: 10,
                                     color: pulsing
-                                        ? _kGreen
-                                        : Colors.grey.shade500),
+                                        ? _kSheetGreenText
+                                        : const Color(0xFF8A938D)),
                               ],
                             ),
                           ),
@@ -476,49 +476,69 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       _buildSheetCard(
                         icon: Icons.calendar_today_rounded,
                         title: 'Jours d\'ouverture',
-                        subtitle: 'Jours actifs',
-                        child: Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
+                        subtitle: selectedWorkingDays.length > 1
+                            ? '${selectedWorkingDays.length} jours actifs'
+                            : '${selectedWorkingDays.length} jour actif',
+                        // 7 cases de même largeur, initiale du jour.
+                        child: Row(
                           children: List.generate(7, (index) {
                             final day = index + 1;
-                            const labels = [
-                              'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim',
+                            const letters = [
+                              'L', 'M', 'M', 'J', 'V', 'S', 'D',
+                            ];
+                            const names = [
+                              'Lundi', 'Mardi', 'Mercredi', 'Jeudi',
+                              'Vendredi', 'Samedi', 'Dimanche',
                             ];
                             final isSel = selectedWorkingDays.contains(day);
-                            return GestureDetector(
-                              onTap: () {
-                                setD(() {
-                                  if (isSel) {
-                                    selectedWorkingDays.remove(day);
-                                  } else {
-                                    selectedWorkingDays.add(day);
-                                  }
-                                  selectedWorkingDays.sort();
-                                });
-                              },
-                              child: AnimatedContainer(
-                                duration: const Duration(milliseconds: 150),
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 16, vertical: 9),
-                                decoration: BoxDecoration(
-                                  color: isSel ? _kGreen : Colors.white,
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(
-                                    color: isSel
-                                        ? _kGreen
-                                        : Colors.grey.shade300,
-                                    width: 1.5,
-                                  ),
-                                ),
-                                child: Text(
-                                  labels[index],
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                    color: isSel
-                                        ? Colors.white
-                                        : Colors.grey.shade700,
+                            return Expanded(
+                              child: Padding(
+                                padding: EdgeInsets.only(
+                                    left: index == 0 ? 0 : 6),
+                                child: Semantics(
+                                  label: names[index],
+                                  button: true,
+                                  selected: isSel,
+                                  child: GestureDetector(
+                                    onTap: () {
+                                      setD(() {
+                                        if (isSel) {
+                                          selectedWorkingDays.remove(day);
+                                        } else {
+                                          selectedWorkingDays.add(day);
+                                        }
+                                        selectedWorkingDays.sort();
+                                      });
+                                    },
+                                    child: AnimatedContainer(
+                                      duration:
+                                          const Duration(milliseconds: 150),
+                                      height: 44,
+                                      alignment: Alignment.center,
+                                      decoration: BoxDecoration(
+                                        color: isSel
+                                            ? _kSheetGreen
+                                            : Colors.white,
+                                        borderRadius:
+                                            BorderRadius.circular(12),
+                                        border: Border.all(
+                                          color: isSel
+                                              ? _kSheetGreen
+                                              : _kSheetBorder,
+                                          width: 1.5,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        letters[index],
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w700,
+                                          color: isSel
+                                              ? Colors.white
+                                              : const Color(0xFF5F6B63),
+                                        ),
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ),
@@ -553,13 +573,11 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                         vertical: 14,
                                       ),
                                       decoration: BoxDecoration(
-                                        color:
-                                            _kGreen.withValues(alpha: 0.08),
+                                        color: _kSheetGreenSoft,
                                         borderRadius:
                                             BorderRadius.circular(12),
                                         border: Border.all(
-                                          color:
-                                              _kGreen.withValues(alpha: 0.3),
+                                          color: const Color(0xFFB9D3C1),
                                         ),
                                       ),
                                       child: Column(
@@ -570,8 +588,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                             'DÉBUT',
                                             style: TextStyle(
                                               fontSize: 10,
-                                              color: _kGreen.withValues(
-                                                  alpha: 0.7),
+                                              color: _kSheetGreenText,
                                               fontWeight: FontWeight.w700,
                                               letterSpacing: 0.8,
                                             ),
@@ -582,7 +599,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                             style: const TextStyle(
                                               fontSize: 22,
                                               fontWeight: FontWeight.w800,
-                                              color: _kGreen,
+                                              color: _kSheetGreen,
                                               letterSpacing: -0.5,
                                             ),
                                           ),
@@ -596,7 +613,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                       horizontal: 10),
                                   child: Icon(
                                     Icons.arrow_forward_rounded,
-                                    color: Colors.grey.shade400,
+                                    color: const Color(0xFFA8B1AB),
                                     size: 20,
                                   ),
                                 ),
@@ -616,11 +633,11 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                         vertical: 14,
                                       ),
                                       decoration: BoxDecoration(
-                                        color: Colors.grey.shade100,
+                                        color: const Color(0xFFF4F6F5),
                                         borderRadius:
                                             BorderRadius.circular(12),
                                         border: Border.all(
-                                            color: Colors.grey.shade300),
+                                            color: const Color(0xFFDCE2DE)),
                                       ),
                                       child: Column(
                                         crossAxisAlignment:
@@ -630,7 +647,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                             'FIN',
                                             style: TextStyle(
                                               fontSize: 10,
-                                              color: Colors.grey.shade500,
+                                              color: const Color(0xFF6B756F),
                                               fontWeight: FontWeight.w700,
                                               letterSpacing: 0.8,
                                             ),
@@ -644,7 +661,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                             style: const TextStyle(
                                               fontSize: 22,
                                               fontWeight: FontWeight.w800,
-                                              color: Color(0xFF1A1C2E),
+                                              color: _kSheetDark,
                                               letterSpacing: -0.5,
                                             ),
                                           ),
@@ -693,58 +710,13 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                         icon: Icons.timer_rounded,
                         title: 'Durée par créneau',
                         subtitle: 'Temps par client',
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: [5, 10, 15, 20, 25, 30].map((d) {
-                              final isSel = selectedDuration == d;
-                              return Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: GestureDetector(
-                                  onTap: () =>
-                                      setD(() => selectedDuration = d),
-                                  child: AnimatedContainer(
-                                    duration:
-                                        const Duration(milliseconds: 150),
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 18,
-                                      vertical: 10,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: isSel ? _kGreen : Colors.white,
-                                      borderRadius: BorderRadius.circular(10),
-                                      border: Border.all(
-                                        color: isSel
-                                            ? _kGreen
-                                            : Colors.grey.shade300,
-                                        width: 1.5,
-                                      ),
-                                      boxShadow: isSel
-                                          ? [
-                                              BoxShadow(
-                                                color: _kGreen.withValues(
-                                                    alpha: 0.3),
-                                                blurRadius: 8,
-                                                offset: const Offset(0, 2),
-                                              ),
-                                            ]
-                                          : [],
-                                    ),
-                                    child: Text(
-                                      '${d}min',
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w700,
-                                        color: isSel
-                                            ? Colors.white
-                                            : Colors.grey.shade700,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          ),
+                        fullBleed: true,
+                        child: _ChoiceStrip(
+                          values: const [5, 10, 15, 20, 25, 30],
+                          value: selectedDuration,
+                          label: (d) => '$d min',
+                          minChipWidth: 58,
+                          onChanged: (d) => setD(() => selectedDuration = d),
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -813,19 +785,15 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       // (Délai min. et Anticipation sont désormais réglés au
                       // niveau de la file, pas de la plage.)
                       _buildSheetCard(
-                        icon: Icons.tune_rounded,
+                        icon: Icons.groups_rounded,
                         title: 'Capacité',
-                        subtitle: 'Personnes accueillies par créneau',
-                        child: _buildPickerCard(
-                          title: 'Capacité',
-                          subtitle: 'Personnes par créneau',
-                          child: _NumberPickerDial(
-                            min: 1,
-                            max: 30,
-                            value: selectedCapacity,
-                            suffix: 'pers.',
-                            onChanged: (v) => setD(() => selectedCapacity = v),
-                          ),
+                        subtitle: 'Personnes par créneau',
+                        fullBleed: true,
+                        child: _ChoiceStrip(
+                          values: List.generate(30, (i) => i + 1),
+                          value: selectedCapacity,
+                          label: (v) => '$v',
+                          onChanged: (v) => setD(() => selectedCapacity = v),
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -838,14 +806,14 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 14, vertical: 11),
                           decoration: BoxDecoration(
-                            color: _kGreen.withValues(alpha: 0.08),
+                            color: _kSheetGreenSoft,
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const Icon(Icons.check_circle_rounded,
-                                  size: 16, color: _kGreen),
+                                  size: 16, color: _kSheetGreen),
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
@@ -853,7 +821,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                   '$dailyCapacity personne${dailyCapacity > 1 ? 's' : ''}/jour',
                                   style: const TextStyle(
                                     fontSize: 12.5,
-                                    color: _kGreen,
+                                    color: _kSheetGreenText,
                                     fontWeight: FontWeight.w600,
                                     height: 1.35,
                                   ),
@@ -874,19 +842,19 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                   padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
                   decoration: BoxDecoration(
                     color: const Color(0xFFF6F8FA),
-                    border: Border(
-                      top: BorderSide(color: Colors.grey.shade200),
+                    border: const Border(
+                      top: BorderSide(color: Color(0xFFE6ECE8)),
                     ),
                   ),
                   child: SafeArea(
                     top: false,
                     child: SizedBox(
                       width: double.infinity,
-                      height: 54,
+                      height: 56,
                       child: ElevatedButton(
                         onPressed: () => Navigator.pop(ctx, true),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: _kGreen,
+                          backgroundColor: _kSheetGreen,
                           elevation: 0,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
@@ -896,8 +864,8 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                           slotId == null ? 'Créer la plage' : 'Enregistrer',
                           style: const TextStyle(
                             color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 17,
                           ),
                         ),
                       ),
@@ -1297,105 +1265,71 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
     showDialog<void>(
       context: ctx,
       builder: (helpCtx) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
         insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
-        clipBehavior: Clip.hardEdge,
         child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // ── En-tête vert ───────────────────────────────────────
-            Container(
-              padding: const EdgeInsets.fromLTRB(20, 20, 16, 20),
-              color: _kGreen,
-              child: Row(
+            // ── En-tête (sans bandeau : même ton que l'onboarding) ──
+            const Padding(
+              padding: EdgeInsets.fromLTRB(22, 24, 22, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Icon(
-                      Icons.lightbulb_rounded,
-                      color: Colors.white,
-                      size: 20,
+                  Text(
+                    'Guide des paramètres',
+                    style: TextStyle(
+                      fontSize: 22,
+                      height: 1.2,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.4,
+                      color: _kSheetDark,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Guide des paramètres',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: -0.2,
-                          ),
-                        ),
-                        SizedBox(height: 2),
-                        Text(
-                          '4 paramètres à maîtriser',
-                          style: TextStyle(
-                            color: Colors.white70,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  GestureDetector(
-                    onTap: () => Navigator.pop(helpCtx),
-                    child: Container(
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.2),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.close,
-                        size: 16,
-                        color: Colors.white,
-                      ),
-                    ),
+                  SizedBox(height: 6),
+                  Text(
+                    'Les 4 réglages d\'une plage horaire.',
+                    style: TextStyle(fontSize: 14, color: Color(0xFF5F6B63)),
                   ),
                 ],
               ),
             ),
 
-            // ── Liste des paramètres ───────────────────────────────
-            Flexible(
+            // ── Étapes numérotées (comme « Comment ça marche ») ───
+            const Flexible(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
+                padding: EdgeInsets.fromLTRB(22, 20, 22, 0),
                 child: Column(
                   children: [
-                    _helpCard(
-                      Icons.calendar_today_rounded,
-                      'Jours d\'ouverture',
-                      'Jours de la semaine où cette plage est active.',
-                      'Fermé le week-end ? Décochez Sam & Dim',
+                    _HelpStep(
+                      number: 1,
+                      title: 'Jours d\'ouverture',
+                      body: 'Les jours où cette plage est active.',
+                      example: 'Fermé le week-end ? Décochez S et D.',
                     ),
-                    _helpCard(
-                      Icons.access_time_rounded,
-                      'Plage horaire',
-                      'Fenêtre d\'accueil pendant laquelle vos créneaux sont ouverts.',
-                      '9h–17h → créneaux proposés sur cette tranche',
+                    _HelpStep(
+                      number: 2,
+                      title: 'Plage horaire',
+                      body:
+                          'L\'heure d\'ouverture et de fermeture de vos créneaux.',
+                      example: '9h → 17h : créneaux proposés sur cette tranche.',
                     ),
-                    _helpCard(
-                      Icons.timer_rounded,
-                      'Durée par créneau',
-                      'Temps accordé à chaque client lors de sa venue.',
-                      '30 min = 1 client toutes les 30 min',
+                    _HelpStep(
+                      number: 3,
+                      title: 'Durée par créneau',
+                      body: 'Le temps accordé à chaque client.',
+                      example: '30 min = un nouveau créneau toutes les 30 min.',
                     ),
-                    _helpCard(
-                      Icons.people_rounded,
-                      'Capacité',
-                      'Nombre de clients accueillis en simultané sur un même créneau.',
-                      '2 pers. = 2 clients au même horaire',
+                    _HelpStep(
+                      number: 4,
+                      title: 'Capacité',
+                      body: 'Le nombre de clients reçus sur un même créneau.',
+                      example: '2 pers. = 2 clients au même horaire.',
+                      isLast: true,
                     ),
-                    const SizedBox(height: 4),
                   ],
                 ),
               ),
@@ -1403,26 +1337,22 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
 
             // ── Bouton ────────────────────────────────────────────
             Padding(
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 16),
+              padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
               child: SizedBox(
-                width: double.infinity,
-                height: 48,
+                height: 56,
                 child: ElevatedButton(
                   onPressed: () => Navigator.pop(helpCtx),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _kGreen,
+                    backgroundColor: _kSheetGreen,
+                    foregroundColor: Colors.white,
                     elevation: 0,
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: BorderRadius.circular(16),
                     ),
                   ),
                   child: const Text(
                     'Compris !',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 15,
-                    ),
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 17),
                   ),
                 ),
               ),
@@ -1432,75 +1362,105 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       ),
     );
   }
+}
 
-  Widget _helpCard(
-      IconData icon, String title, String desc, String example) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.grey.shade100),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
+// Une étape du guide : pastille numérotée reliée à la suivante par un trait,
+// titre, explication et exemple concret.
+class _HelpStep extends StatelessWidget {
+  final int number;
+  final String title;
+  final String body;
+  final String example;
+  final bool isLast;
+
+  const _HelpStep({
+    required this.number,
+    required this.title,
+    required this.body,
+    required this.example,
+    this.isLast = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IntrinsicHeight(
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
-            padding: const EdgeInsets.all(9),
-            decoration: BoxDecoration(
-              color: _kGreen.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(icon, size: 18, color: _kGreen),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
+          Column(
+            children: [
+              Container(
+                width: 30,
+                height: 30,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(
+                  color: _kSheetGreen,
+                  shape: BoxShape.circle,
+                ),
+                child: Text(
+                  '$number',
                   style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
                     fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                    color: Color(0xFF1A1C2E),
                   ),
                 ),
-                const SizedBox(height: 3),
-                Text(
-                  desc,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                    height: 1.4,
+              ),
+              if (!isLast)
+                Expanded(
+                  child: Container(
+                    width: 2,
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    color: const Color(0xFFD8EADD),
                   ),
                 ),
-                const SizedBox(height: 7),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _kGreen.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    example,
+            ],
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(top: 4, bottom: isLast ? 0 : 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
                     style: const TextStyle(
-                      fontSize: 11,
-                      color: _kGreen,
-                      fontWeight: FontWeight.w600,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: _kSheetDark,
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 2),
+                  Text(
+                    body,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      height: 1.45,
+                      color: _kSheetMuted,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: _kSheetGreenSoft,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      example,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: _kSheetGreenText,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],

@@ -629,9 +629,19 @@ class _HousePageState extends State<HousePage>
                   ),
                 ),
               ),
-              icon: const Icon(Icons.add, size: 16),
+              icon: const Icon(Icons.add_rounded, size: 22),
               label: const Text('Ajouter une plage'),
-              style: TextButton.styleFrom(foregroundColor: _green),
+              style: TextButton.styleFrom(
+                foregroundColor: _green,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 18,
+                  vertical: 12,
+                ),
+                textStyle: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
             ),
           ],
         ],

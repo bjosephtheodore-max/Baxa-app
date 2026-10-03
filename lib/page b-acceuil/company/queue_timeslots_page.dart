@@ -1139,47 +1139,17 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
     );
   }
 
-  Widget _buildPickerCard({
-    required String title,
-    required String subtitle,
-    required Widget child,
-  }) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(10, 12, 10, 8),
-      decoration: BoxDecoration(
-        border: Border.all(color: Colors.grey.shade200),
-        borderRadius: BorderRadius.circular(12),
-        color: Colors.grey.shade50,
-      ),
-      child: Column(
-        children: [
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-              color: Colors.black87,
-            ),
-          ),
-          Text(
-            subtitle,
-            style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
-          ),
-          const SizedBox(height: 4),
-          child,
-        ],
-      ),
-    );
-  }
-
+  // [fullBleed] : le contenu va d'un bord à l'autre de la carte (rangées qui
+  // défilent horizontalement), seul l'en-tête garde la marge intérieure.
   Widget _buildSheetCard({
     required IconData icon,
     required String title,
     required String subtitle,
     required Widget child,
+    bool fullBleed = false,
   }) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: EdgeInsets.symmetric(vertical: 16, horizontal: fullBleed ? 0 : 16),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
@@ -1194,34 +1164,40 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(icon, size: 15, color: _kGreen),
-              const SizedBox(width: 7),
-              // Expanded absorbe tout l'espace libre : le titre reste collé
-              // à gauche et le sous-titre reste collé à droite, exactement
-              // comme avec Spacer() — mais le titre s'ellipse au lieu de
-              // déborder si l'espace vient à manquer (grande police système).
-              Expanded(
-                child: Text(
-                  title,
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: fullBleed ? 16 : 0),
+            child: Row(
+              children: [
+                Icon(icon, size: 15, color: _kSheetGreen),
+                const SizedBox(width: 7),
+                // Expanded absorbe tout l'espace libre : le titre reste collé
+                // à gauche et le sous-titre reste collé à droite, exactement
+                // comme avec Spacer() — mais le titre s'ellipse au lieu de
+                // déborder si l'espace vient à manquer (grande police système).
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                      color: _kSheetDark,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  subtitle,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                    color: Color(0xFF1A1C2E),
+                    fontSize: 11,
+                    color: Color(0xFF8A938D),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                subtitle,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
-              ),
-            ],
+              ],
+            ),
           ),
           const SizedBox(height: 14),
           child,
