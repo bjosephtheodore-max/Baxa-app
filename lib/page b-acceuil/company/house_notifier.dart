@@ -35,6 +35,20 @@ class _PendingRevert {
 // Séparation nette : données ici, UI dans house_page.dart
 // ════════════════════════════════════════════════════════════════════════════
 class _HouseNotifier extends ChangeNotifier {
+  // Entreprise du staff, transmise par StaffPage (qui la connaît déjà) :
+  // l'accueil n'a alors plus à deviner le rôle. null = contexte admin.
+  _HouseNotifier({String? staffCompanyId})
+    : _staffCompanyId = staffCompanyId,
+      _isStaff = staffCompanyId != null;
+
+  final String? _staffCompanyId;
+
+  // Personne connectée (admin : uid == companyId) et, pour un membre du
+  // staff, son nom tel que l'admin l'a renseigné (lu dans le suivi de
+  // statut, sans requête de plus).
+  String? get _myUid => FirebaseAuth.instance.currentUser?.uid;
+  String _myStaffName = '';
+
   // ── Services ──────────────────────────────────────────────────────────────
   final _db = FirebaseFirestore.instance;
   final _agenda = AgendaService();
@@ -49,7 +63,7 @@ class _HouseNotifier extends ChangeNotifier {
   bool _hasQueues = false;
   bool _loadFailed = false;
   bool _isRefreshing = false;
-  bool _isStaff = false;
+  bool _isStaff;
   bool _disposed = false;
   bool _initialized = false;
   bool _revoked = false;
@@ -83,9 +97,20 @@ class _HouseNotifier extends ChangeNotifier {
   // Créneaux à venir (aujourd'hui dès "maintenant", ou jour futur en entier) :
   // tenus à jour en direct via Firestore, un flux par file affichée.
   static const int _liveSlotsCap = 300;
+
+  // Durée maximale d'un créneau (bornes du réglage de durée : 5 à 120 min,
+  // voir _onDurationChanged dans house_page.dart). Sert à garder en direct
+  // tout créneau encore en cours.
+  static const Duration _maxSlotDuration = Duration(minutes: 120);
+
+  static DateTime _latest(DateTime a, DateTime b) => a.isAfter(b) ? a : b;
   final Map<String, StreamSubscription<QuerySnapshot>> _liveSlotSubs = {};
   final Map<String, List<AgendaSlot>> _pastSlotsCache = {};
   final Map<String, List<AgendaSlot>> _liveSlotsCache = {};
+  // Nombre de plages (borné à 2) par file, tenu à jour en direct : l'accueil
+  // reste vivant (IndexedStack) pendant qu'on crée la 1re plage dans Réglages,
+  // il doit quitter l'état « Aucune plage horaire » sans rechargement.
+  final Map<String, StreamSubscription<QuerySnapshot>> _tsCountSubs = {};
 
   // ── Getters (lecture publique) ────────────────────────────────────────────
   String? get companyId => _companyId;
@@ -438,14 +463,68 @@ class _HouseNotifier extends ChangeNotifier {
               'status': 'confirmed',
               'createdAt': FieldValue.serverTimestamp(),
               'source': 'company_manual',
+              // Auteur de l'inscription : décide qui peut la supprimer
+              // (l'admin toujours, un membre seulement les siennes) et
+              // alimente « Ajouté par … ». Contrôlé aussi par les règles.
+              if (_myUid != null) 'createdBy': _myUid,
+              'createdByRole': _isStaff ? 'staff' : 'admin',
+              if (_isStaff && _myStaffName.isNotEmpty)
+                'createdByName': _myStaffName,
             }),
         slotRef.update({'reserved': FieldValue.increment(1)}),
         dailyRef.update({'reserved': FieldValue.increment(1)}),
       ]);
+      _recordManualAdd();
       return null;
     } catch (e) {
       return 'Erreur: $e';
     }
+  }
+
+  // ── Inscriptions manuelles : droits et libellés ───────────────────────────
+
+  /// L'admin supprime toute inscription manuelle ; un membre du staff
+  /// seulement celles qu'il a faites lui-même. Même logique que
+  /// firestore.rules (match /reservations, allow delete).
+  bool canDeleteManual(CustomerEntry c) {
+    if (!c.isCompanyManual) return false;
+    if (!_isStaff) return true;
+    return c.createdBy != null && c.createdBy == _myUid;
+  }
+
+  /// « Ajouté par … » sous le nom du client, ou null si l'auteur est
+  /// inconnu (inscriptions antérieures à ce suivi).
+  String? addedByLabel(CustomerEntry c) {
+    if (!c.isCompanyManual || c.createdBy == null) return null;
+    if (c.createdBy == _myUid) return 'Ajouté par vous';
+    if (c.createdByRole == 'admin') return 'Ajouté par le responsable';
+    final name = c.createdByName?.trim() ?? '';
+    return 'Ajouté par ${name.isNotEmpty ? name : 'un membre de l\'équipe'}';
+  }
+
+  // ── Exemple « Ex : Jean Dupont » : 5 premières inscriptions seulement ─────
+  // Compteur propre à chaque compte, gardé sur le téléphone (simple aide à
+  // la saisie : il repart à zéro après une réinstallation, sans gravité).
+  static const int _nameHintMaxUses = 5;
+  int _manualAddCount = 0;
+
+  bool get showNameHint => _manualAddCount < _nameHintMaxUses;
+
+  String get _manualAddCountKey => 'manual_add_count_${_myUid ?? ''}';
+
+  Future<void> _loadManualAddCount() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _manualAddCount = prefs.getInt(_manualAddCountKey) ?? 0;
+    } catch (_) {}
+  }
+
+  void _recordManualAdd() {
+    if (_manualAddCount >= _nameHintMaxUses) return;
+    _manualAddCount++;
+    SharedPreferences.getInstance()
+        .then((p) => p.setInt(_manualAddCountKey, _manualAddCount))
+        .ignore();
   }
 
   // ── Suppression d'un client ajouté manuellement ───────────────────────────
@@ -771,7 +850,6 @@ class _HouseNotifier extends ChangeNotifier {
               'status': 'open',
               'isLegacy': false,
               'timeSlotId': tsInfo.id,
-              'maxReservationsPerPerson': tsInfo.maxReservationsPerPerson,
               'reservationDeadlineMinutes': tsInfo.reservationDeadlineMinutes,
             });
             createdCount++;
@@ -1040,6 +1118,8 @@ class _HouseNotifier extends ChangeNotifier {
         .snapshots()
         .listen(
           (doc) {
+            _myStaffName =
+                (doc.data()?['displayName'] as String?)?.trim() ?? '';
             final isActive = doc.data()?['isActive'] as bool? ?? false;
             if (!isActive) {
               _handleRevocation();
@@ -1061,8 +1141,73 @@ class _HouseNotifier extends ChangeNotifier {
     _staffStatusSub?.cancel();
     _sub?.cancel();
     _cancelLiveSlotSubs();
-    await FirebaseAuth.instance.signOut();
+    await Auth().logout();
     _notify();
+  }
+
+  // ── Rôle : staff (transmis par StaffPage) ou admin (uid == companyId) ─────
+  // Ne conclut JAMAIS « admin » sur une erreur : un staff pris pour un admin
+  // verrait une entreprise vide (et l'icône d'équipe). En cas d'échec,
+  // l'écran « Réessayer » s'affiche et rien n'est mémorisé.
+  Future<bool> _resolveRole(String uid) async {
+    final staffCompanyId = _staffCompanyId;
+    if (staffCompanyId != null) {
+      _companyId = staffCompanyId;
+      _isStaff = true;
+      return true;
+    }
+
+    // Cache local (évite 1 round-trip) : uniquement un admin déjà confirmé
+    // sur CE compte — la clé est son propre uid, donc un autre compte
+    // connecté sur le même téléphone ne peut jamais en hériter.
+    final prefs = await SharedPreferences.getInstance();
+    final cachedId = prefs.getString(_kCompanyId);
+    final cachedStaff = prefs.getBool(_kIsStaff) ?? false;
+    if (cachedId != null && !cachedStaff && cachedId == uid) {
+      _companyId = cachedId;
+      _isStaff = false;
+      return true;
+    }
+
+    DocumentSnapshot<Map<String, dynamic>>? userDoc;
+    for (var attempt = 0; attempt < 3 && userDoc == null; attempt++) {
+      if (attempt > 0) await Future.delayed(const Duration(seconds: 1));
+      try {
+        userDoc = await _db.collection('users').doc(uid).get();
+      } catch (e) {
+        debugPrint('🔴 HouseNotifier: lecture du rôle échouée: $e');
+      }
+    }
+    if (userDoc == null) {
+      _loadFailed = true;
+      _isLoading = false;
+      _notify();
+      return false;
+    }
+
+    final data = userDoc.data();
+    if (data?['role'] == 'staff' && data?['companyId'] != null) {
+      _companyId = data!['companyId'] as String;
+      _isStaff = true;
+    } else {
+      _companyId = uid;
+      _isStaff = false;
+      prefs.setString(_kCompanyId, uid).ignore();
+      prefs.setBool(_kIsStaff, false).ignore();
+    }
+    return true;
+  }
+
+  // Bouton « Réessayer » : si le rôle n'a pas pu être lu, tout est relancé.
+  void retry() {
+    if (_companyId == null) {
+      _loadFailed = false;
+      _isLoading = true;
+      _notify();
+      _loadCompanyData();
+    } else {
+      _refreshAgenda(silent: true);
+    }
   }
 
   // ── Chargement initial ────────────────────────────────────────────────────
@@ -1077,42 +1222,8 @@ class _HouseNotifier extends ChangeNotifier {
     final uid = user.uid;
     debugPrint('🟢 HouseNotifier: init pour uid=$uid');
 
-    // ── Gain 2 : companyId depuis le cache local (évite 1 round-trip) ────────
-    final prefs = await SharedPreferences.getInstance();
-    final cachedId = prefs.getString(_kCompanyId);
-    final cachedStaff = prefs.getBool(_kIsStaff) ?? false;
-
-    if (cachedId != null && !cachedStaff && cachedId == uid) {
-      // Cache valide uniquement si l'UID correspond à l'utilisateur courant
-      _companyId = cachedId;
-      _isStaff = false;
-    } else {
-      // Staff ou première ouverture : vérification Firestore obligatoire
-      try {
-        final userDoc = await _db.collection('users').doc(uid).get();
-        if (userDoc.exists) {
-          final data = userDoc.data()!;
-          if (data['role'] == 'staff' && data['companyId'] != null) {
-            _companyId = data['companyId'] as String;
-            _isStaff = true;
-          } else {
-            _companyId = uid;
-            _isStaff = false;
-          }
-        } else {
-          _companyId = uid;
-          _isStaff = false;
-        }
-      } catch (_) {
-        _companyId = uid;
-        _isStaff = false;
-      }
-      // Persister uniquement pour les admins (staff change d'entreprise possible)
-      if (!_isStaff) {
-        prefs.setString(_kCompanyId, _companyId!).ignore();
-        prefs.setBool(_kIsStaff, false).ignore();
-      }
-    }
+    if (!await _resolveRole(uid)) return;
+    await _loadManualAddCount();
 
     // ── Staff : vérifier tout de suite (et en continu) qu'il n'a pas été
     //    retiré de l'équipe. Le premier événement du flux couvre le cas
@@ -1269,31 +1380,11 @@ class _HouseNotifier extends ChangeNotifier {
                 : <int>[];
             final queueName = qData['name'] ?? 'File sans nom';
 
-            // TimeSlot count — requête bornée à 2 docs (peu coûteuse), refaite
-            // à chaque rafraîchissement. Un cache mémoire ici serait faux dès
-            // qu'une plage est créée/supprimée depuis l'onglet Settings, gardé
+            // TimeSlot count — flux borné à 2 docs (peu coûteux). En direct
+            // plutôt qu'une lecture ponctuelle : une plage peut être créée ou
+            // supprimée depuis l'onglet Settings pendant que l'accueil reste
             // vivant en parallèle via l'IndexedStack de company_page.dart.
-            final tsQuery = _db
-                .collection('companies')
-                .doc(_companyId)
-                .collection('queues')
-                .doc(qDoc.id)
-                .collection('timeSlots')
-                .limit(2);
-            final Future<int> tsCountFuture = () async {
-              try {
-                final snap = await tsQuery.get();
-                return snap.docs.length;
-              } on FirebaseException catch (e) {
-                if (e.code == 'unavailable') {
-                  final snap = await tsQuery.get(
-                    const GetOptions(source: Source.cache),
-                  );
-                  return snap.docs.length;
-                }
-                rethrow;
-              }
-            }();
+            final Future<int> tsCountFuture = _subscribeTimeSlotCount(qDoc.id);
 
             final List<AgendaSlot> allSlots;
             final QueueStats stats;
@@ -1356,18 +1447,26 @@ class _HouseNotifier extends ChangeNotifier {
               // ── Aujourd'hui ou date future : portion à venir tenue à jour
               //    en direct par un flux Firestore (plus de pagination ici,
               //    donc plus de reset de scroll possible) ──────────────────
-              final pastFuture = isToday
+              // Aujourd'hui, la limite entre « lu une fois » et « en direct »
+              // est reculée de la durée max d'un créneau : un créneau EN
+              // COURS au chargement reste ainsi suivi en direct (inscription,
+              // suppression, annulation client s'y affichent aussitôt). Seuls
+              // des créneaux forcément terminés sont lus une seule fois.
+              final liveFrom = isToday
+                  ? _latest(now.subtract(_maxSlotDuration), selectedDay)
+                  : selectedDay;
+              final pastFuture = isToday && liveFrom.isAfter(selectedDay)
                   ? _loadSlotPage(
                       qDoc.id,
                       startAfter: null,
-                      endBefore: now,
+                      endBefore: liveFrom,
                       limit: 200,
                     )
                   : null;
               final liveFuture = _subscribeLiveSlots(
                 qDoc.id,
                 selectedDay: selectedDay,
-                startFrom: isToday ? now : selectedDay,
+                startFrom: liveFrom,
               );
 
               _pastSlotsCache[qDoc.id] = pastFuture != null
@@ -1575,11 +1674,65 @@ class _HouseNotifier extends ChangeNotifier {
     _notify();
   }
 
+  // ── Flux temps réel sur le nombre de plages d'une file ────────────────────
+  // Résout avec le premier instantané (chargement initial), puis met à jour
+  // `timeSlotCount` de la file affichée à chaque création/suppression.
+  Future<int> _subscribeTimeSlotCount(String queueId) {
+    _tsCountSubs.remove(queueId)?.cancel();
+
+    final query = _db
+        .collection('companies')
+        .doc(_companyId)
+        .collection('queues')
+        .doc(queueId)
+        .collection('timeSlots')
+        .limit(2);
+
+    final completer = Completer<int>();
+    _tsCountSubs[queueId] = query.snapshots().listen(
+      (snap) {
+        final count = snap.docs.length;
+        if (!completer.isCompleted) {
+          completer.complete(count);
+          return;
+        }
+        // Un rechargement complet relira lui-même le compteur.
+        if (_isRefreshing) return;
+        final idx = _queues.indexWhere((q) => q?.id == queueId);
+        if (idx == -1) return;
+        final old = _queues[idx]!;
+        if (old.timeSlotCount == count) return;
+        _queues[idx] = _QueueAgenda(
+          id: old.id,
+          name: old.name,
+          slots: old.slots,
+          isBlocked: old.isBlocked,
+          blockReason: old.blockReason,
+          stats: old.stats,
+          weekdays: old.weekdays,
+          timeSlotCount: count,
+          closureStart: old.closureStart,
+          closureEnd: old.closureEnd,
+        );
+        _notify();
+      },
+      onError: (Object e) {
+        debugPrint('🔴 HouseNotifier: erreur flux plages $queueId: $e');
+        if (!completer.isCompleted) completer.completeError(e);
+      },
+    );
+    return completer.future;
+  }
+
   void _cancelLiveSlotSubs() {
     for (final sub in _liveSlotSubs.values) {
       sub.cancel();
     }
     _liveSlotSubs.clear();
+    for (final sub in _tsCountSubs.values) {
+      sub.cancel();
+    }
+    _tsCountSubs.clear();
     _pastSlotsCache.clear();
     _liveSlotsCache.clear();
   }
@@ -1595,6 +1748,9 @@ class _HouseNotifier extends ChangeNotifier {
     _sub?.cancel();
     _staffStatusSub?.cancel();
     for (final sub in _liveSlotSubs.values) {
+      sub.cancel();
+    }
+    for (final sub in _tsCountSubs.values) {
       sub.cancel();
     }
     for (final r in _pendingReverts.values) {

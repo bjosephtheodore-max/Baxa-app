@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:baxa/services/firebase/auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 import 'package:baxa/widgets/qr_code_section.dart';
@@ -12,7 +13,8 @@ import 'package:baxa/widgets/account_status_card.dart';
 //  • « Mon QR Code » et « Informations du compte » hérités de la
 //    structure, non modifiables (l'e-mail n'est pas affiché) ;
 //  • « Statut du compte » identique (carte partagée) ;
-//  • une déconnexion propre au membre (ne touche pas l'admin).
+//  • « Se déconnecter » : ferme la session, le membre reste dans l'équipe ;
+//  • « Quitter l'équipe » : départ définitif (nouveau code pour revenir).
 // ============================================================
 class StaffSettingsPage extends StatefulWidget {
   final String companyId;
@@ -35,6 +37,7 @@ class _StaffSettingsPageState extends State<StaffSettingsPage> {
 
   Map<String, dynamic>? _companyData;
   bool _isLoading = true;
+  bool _isLeaving = false;
 
   @override
   void initState() {
@@ -154,7 +157,7 @@ class _StaffSettingsPageState extends State<StaffSettingsPage> {
                       SizedBox(
                         width: double.infinity,
                         child: OutlinedButton.icon(
-                          onPressed: _confirmLogout,
+                          onPressed: _isLeaving ? null : _confirmLogout,
                           icon: const Icon(Icons.logout_rounded, size: 18),
                           label: const Text('Se déconnecter'),
                           style: OutlinedButton.styleFrom(
@@ -164,6 +167,31 @@ class _StaffSettingsPageState extends State<StaffSettingsPage> {
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(12),
                             ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: TextButton.icon(
+                          onPressed: _isLeaving ? null : _confirmLeaveTeam,
+                          icon: _isLeaving
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.red,
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.person_remove_outlined,
+                                  size: 18,
+                                ),
+                          label: const Text('Quitter l\'équipe'),
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.red.shade600,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
                           ),
                         ),
                       ),
@@ -184,8 +212,9 @@ class _StaffSettingsPageState extends State<StaffSettingsPage> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: const Text('Se déconnecter'),
         content: Text(
-          'Vous vous déconnectez de $name. Vous pourrez vous reconnecter '
-          'avec un nouveau code fourni par le gérant.',
+          'Vous restez membre de l\'équipe de $name. Pour revenir, '
+          'choisissez « Déjà membre ? Se reconnecter » avec le même numéro '
+          'ou compte Google — aucun nouveau code n\'est nécessaire.',
         ),
         actions: [
           TextButton(
@@ -204,12 +233,66 @@ class _StaffSettingsPageState extends State<StaffSettingsPage> {
       ),
     );
     if (confirm != true) return;
-    await FirebaseAuth.instance.signOut();
+    await _signOutToChoosePage();
+  }
+
+  Future<void> _signOutToChoosePage() async {
+    await Auth().logout();
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (_) => const ChoosePage()),
       (route) => false,
     );
+  }
+
+  // Départ définitif : le membre disparaît de l'équipe (Cloud Function
+  // leaveTeam, qui prévient aussi l'admin). Pour revenir : nouveau code.
+  Future<void> _confirmLeaveTeam() async {
+    final name = _companyData?['nom'] as String? ?? widget.companyName;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: const Text('Quitter l\'équipe'),
+        content: Text(
+          'Vous ne ferez plus partie de l\'équipe de $name. Pour revenir, '
+          'il vous faudra un nouveau code d\'invitation du gérant.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Quitter'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    setState(() => _isLeaving = true);
+    try {
+      await FirebaseFunctions.instance.httpsCallable('leaveTeam').call();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isLeaving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Impossible de quitter l\'équipe. Réessayez.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+    // Le suivi de statut (HouseNotifier) peut déjà avoir déconnecté et
+    // renvoyé vers l'accueil ; sinon on le fait ici.
+    await _signOutToChoosePage();
   }
 
   // ── Blocs visuels (miroir de company_settings_page) ──────────────

@@ -1,6 +1,7 @@
 import 'package:baxa/page%20b-acceuil/company/company_page.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -169,6 +170,17 @@ class SigninPageState extends State<SigninPage> {
             .collection("companies")
             .doc(uid)
             .set(entrepriseData, SetOptions(merge: true));
+
+        // On envoie toujours `typeCategorie` (jamais `type`) : c'est le
+        // champ qui reste toujours propre ('Autre' quand l'entreprise a
+        // saisi un texte libre), pour ne jamais faire exploser cette
+        // dimension Analytics avec du texte libre non normalisé.
+        if (widget.typeCategorie != null) {
+          await FirebaseAnalytics.instance.setUserProperty(
+            name: 'company_category',
+            value: widget.typeCategorie!,
+          );
+        }
       }
 
       if (!mounted) return;

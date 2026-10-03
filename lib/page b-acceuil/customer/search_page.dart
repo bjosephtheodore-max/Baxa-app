@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:baxa/page%20b-acceuil/customer/companyqueue_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/slots_page.dart';
@@ -490,6 +491,12 @@ class _SearchPageState extends State<SearchPage> {
 
   // ── Scanner QR ────────────────────────────────────────────────────────────
   Future<void> _openQrScanner() async {
+    unawaited(
+      FirebaseAnalytics.instance.logEvent(
+        name: 'ui_interaction',
+        parameters: {'widget_name': 'qr_scan_icon'},
+      ),
+    );
     await Navigator.push(
       context,
       MaterialPageRoute(

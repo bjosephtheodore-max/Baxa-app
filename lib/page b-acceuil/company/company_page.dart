@@ -21,6 +21,7 @@ class CompanyPage extends StatefulWidget {
 class CompanyPageState extends State<CompanyPage> {
   int pageIndex = 0;
   bool _roleChecked = false;
+  bool _roleCheckFailed = false;
 
   late final String _companyId =
       FirebaseAuth.instance.currentUser?.uid ?? '_';
@@ -119,8 +120,16 @@ class CompanyPageState extends State<CompanyPage> {
       );
       if (mounted) setState(() => _roleChecked = true);
     } catch (e) {
-      if (mounted) setState(() => _roleChecked = true);
+      // Rôle illisible (réseau…) : ne surtout pas afficher l'espace admin
+      // par défaut — un membre du staff s'y retrouverait. On propose de
+      // réessayer.
+      if (mounted) setState(() => _roleCheckFailed = true);
     }
+  }
+
+  void _retryRoleCheck() {
+    setState(() => _roleCheckFailed = false);
+    _checkRole();
   }
 
   double _getTextScaleFactor(BuildContext context) {
@@ -133,6 +142,47 @@ class CompanyPageState extends State<CompanyPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (_roleCheckFailed) {
+      return Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.wifi_off_rounded,
+                  size: 48,
+                  color: Colors.grey.shade400,
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Impossible de charger votre compte.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Vérifiez votre connexion internet puis réessayez.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: _retryRoleCheck,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4B8B5E),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Réessayer'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     if (!_roleChecked) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }

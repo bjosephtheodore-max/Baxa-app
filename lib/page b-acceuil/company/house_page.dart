@@ -4,11 +4,15 @@ import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/agenda_service.dart';
 import 'package:baxa/services/booking_constants.dart';
+import 'package:baxa/services/firebase/auth.dart';
 import 'package:baxa/page b-acceuil/company/team_page.dart';
+import 'package:baxa/page b-acceuil/company/settings_page.dart'
+    show QueueTimeSlotsPage;
 import 'package:baxa/main.dart' show routeObserver;
 import 'package:baxa/services/onboarding_service.dart';
 import 'package:baxa/widgets/onboarding_widgets.dart';
@@ -27,7 +31,11 @@ const Color _lightGreen = Color.fromARGB(255, 178, 211, 194);
 // HOUSE PAGE — AGENDA INTERACTIF DE L'ENTREPRISE
 // ============================================================
 class HousePage extends StatefulWidget {
-  const HousePage({super.key});
+  // Renseigné par StaffPage : l'accueil s'ouvre directement en mode staff
+  // sur cette entreprise. Absent = accueil de l'admin (uid == companyId).
+  final String? staffCompanyId;
+
+  const HousePage({super.key, this.staffCompanyId});
   @override
   State<HousePage> createState() => _HousePageState();
 }
@@ -98,7 +106,7 @@ class _HousePageState extends State<HousePage>
   @override
   void initState() {
     super.initState();
-    _n = _HouseNotifier();
+    _n = _HouseNotifier(staffCompanyId: widget.staffCompanyId);
     _n.initialize();
   }
 
@@ -183,7 +191,9 @@ class _HousePageState extends State<HousePage>
   Widget build(BuildContext context) {
     super.build(context);
     return ListenableBuilder(
-      listenable: _n,
+      // OnboardingService aussi : la carte Bienvenue reste affichée tant que
+      // le parcours guidé est en cours, même si une file existe déjà.
+      listenable: Listenable.merge([_n, OnboardingService()]),
       builder: (context, _) {
         // Staff retiré de l'équipe (détecté à l'ouverture ou en direct) :
         // déconnexion déjà faite côté notifier, il ne reste qu'à renvoyer
@@ -206,7 +216,14 @@ class _HousePageState extends State<HousePage>
     );
   }
 
+  // Carte Bienvenue : aucune file, ou parcours guidé en cours (une file peut
+  // déjà exister sans plage — reprise après avoir quitté l'app). Le parcours
+  // ne concerne que l'admin, jamais un compte staff.
+  bool get _showWelcome =>
+      !_n.hasQueues || (!_n.isStaff && OnboardingService().isActive);
+
   Widget _buildScaffold() {
+    final showWelcome = _showWelcome;
     return Scaffold(
       // Tout en blanc (comme WhatsApp) : l'AppBar, la barre de date et la
       // barre du bas sont déjà blanches — plus de "marche" verdâtre entre
@@ -218,7 +235,7 @@ class _HousePageState extends State<HousePage>
           ? const Center(child: CircularProgressIndicator(color: _green))
           : _n.loadFailed
           ? _buildRetryState()
-          : !_n.hasQueues
+          : showWelcome
           ? _buildEmptyState()
           : NotificationListener<ScrollNotification>(
               onNotification: _handleDateBarScroll,
@@ -259,7 +276,7 @@ class _HousePageState extends State<HousePage>
                 ),
               ),
             ),
-      floatingActionButton: _n.hasQueues
+      floatingActionButton: !showWelcome
           ? AnimatedSlide(
               duration: const Duration(milliseconds: 220),
               curve: Curves.easeOutCubic,
@@ -514,9 +531,9 @@ class _HousePageState extends State<HousePage>
     );
   }
 
-  Widget _buildRetryState() => _RetryState(onRetry: _n.refreshSilent);
+  Widget _buildRetryState() => _RetryState(onRetry: _n.retry);
 
-  Widget _buildEmptyState() => const _EmptyState();
+  Widget _buildEmptyState() => _EmptyState(hasQueue: _n.hasQueues);
 
   // ── Vue complète d'une file ───────────────────────────────
   // Construit la liste de widgets (cartes + séparateurs) pour un groupe de créneaux.
@@ -572,6 +589,54 @@ class _HousePageState extends State<HousePage>
       }
     }
     return widgets;
+  }
+
+  // ── File sans plage horaire ───────────────────────────────
+  // Distinct de « Aucun créneau pour cette date » : ici il manque la
+  // configuration elle-même. Le staff voit le message, sans le bouton.
+  Widget _buildNoPlageState(_QueueAgenda queue) {
+    final companyId = _n.companyId;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 48, horizontal: 16),
+      child: Column(
+        children: [
+          Icon(Icons.schedule_rounded, size: 40, color: Colors.grey.shade400),
+          const SizedBox(height: 12),
+          Text(
+            'Aucune plage horaire',
+            style: GoogleFonts.poppins(
+              color: Colors.grey.shade600,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Vos clients ne peuvent pas encore réserver dans cette file.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+          ),
+          if (!_n.isStaff && companyId != null) ...[
+            const SizedBox(height: 16),
+            TextButton.icon(
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => QueueTimeSlotsPage(
+                    companyId: companyId,
+                    queueId: queue.id,
+                    queueName: queue.name,
+                    autoOpenSlotDialog: true,
+                  ),
+                ),
+              ),
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('Ajouter une plage'),
+              style: TextButton.styleFrom(foregroundColor: _green),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   Widget _buildQueueView(_QueueAgenda queue) {
@@ -652,7 +717,12 @@ class _HousePageState extends State<HousePage>
           ],
           const SizedBox(height: 12),
 
-          if (slotsForQueue.isEmpty)
+          // File sans AUCUNE plage (même en suppression programmée) : passe
+          // avant tous les autres états vides. Dès qu'une plage existe, la
+          // logique habituelle ci-dessous reprend sans changement.
+          if (slotsForQueue.isEmpty && queue.timeSlotCount == 0)
+            _buildNoPlageState(queue)
+          else if (slotsForQueue.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 48),
               child: Column(
@@ -905,6 +975,9 @@ class _HousePageState extends State<HousePage>
             _createManualAppointmentForSlot(name, queue, slot),
         onDeleteClient: (customer) =>
             _deleteManualClientForSlot(customer, queue, slot),
+        canDeleteClient: _n.canDeleteManual,
+        addedByLabel: _n.addedByLabel,
+        showNameHint: _n.showNameHint,
       ),
     );
   }
@@ -948,6 +1021,12 @@ class _HousePageState extends State<HousePage>
 
   // ── Ajout rapide (FAB) — carousel des créneaux disponibles ──
   Future<void> _showQuickAddDialog() async {
+    unawaited(
+      FirebaseAnalytics.instance.logEvent(
+        name: 'ui_interaction',
+        parameters: {'widget_name': 'fab_ajouter_client'},
+      ),
+    );
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final selectedDay = DateTime(
@@ -1095,6 +1174,7 @@ class _HousePageState extends State<HousePage>
         timeFormat: _timeFormat,
         onConfirm: (name, slot) =>
             _createManualAppointmentForSlot(name, queue, slot),
+        showNameHint: _n.showNameHint,
       ),
     );
   }
@@ -1233,6 +1313,7 @@ class _HousePageState extends State<HousePage>
                   timeSlotId: timeSlotId,
                   reason: reason,
                 );
+                if (error == null) _logQuickEdit('block');
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
@@ -1254,6 +1335,7 @@ class _HousePageState extends State<HousePage>
 
   Future<void> _onUnblock(_QueueAgenda queue) async {
     final result = await _n.unblockPlage(queue.id);
+    if (result.success) _logQuickEdit('unblock');
     if (mounted) _snackBar(result);
   }
 
@@ -1262,7 +1344,8 @@ class _HousePageState extends State<HousePage>
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
     try {
       final tsInfo = await _selectTimeSlot(queue);
-      if (tsInfo == null) return;
+      // La page a pu être quittée pendant le choix de la plage.
+      if (tsInfo == null || !mounted) return;
 
       final newDuration = (tsInfo.duration + delta).clamp(5, 120);
       if (newDuration == tsInfo.duration) return;
@@ -1304,6 +1387,9 @@ class _HousePageState extends State<HousePage>
         newDuration: newDuration,
         type: res.type,
       );
+      if (result.success) {
+        _logQuickEdit(delta > 0 ? 'duration_increase' : 'duration_decrease');
+      }
       if (mounted) {
         _snackBar(result);
         _n.refreshSilent();
@@ -1335,6 +1421,7 @@ class _HousePageState extends State<HousePage>
   // ── Révocation durée (undo 5 min) ──────────────────────────
   Future<void> _onRevertDuration(String timeSlotId) async {
     final result = await _n.revertDurationChange(timeSlotId);
+    if (result.success) _logQuickEdit('revert');
     if (mounted) {
       _snackBar(result);
       if (result.success) _n.refreshSilent();
@@ -1353,7 +1440,8 @@ class _HousePageState extends State<HousePage>
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
     try {
       final tsInfo = await _selectTimeSlot(queue);
-      if (tsInfo == null) return;
+      // La page a pu être quittée pendant le choix de la plage.
+      if (tsInfo == null || !mounted) return;
 
       final newCapacity = (tsInfo.capacity + delta).clamp(1, 50);
       if (newCapacity == tsInfo.capacity) return;
@@ -1394,6 +1482,9 @@ class _HousePageState extends State<HousePage>
         type: res.type,
         timeSlotId: tsInfo.id,
       );
+      if (result.success) {
+        _logQuickEdit(delta > 0 ? 'capacity_increase' : 'capacity_decrease');
+      }
       if (mounted) {
         _snackBar(result);
         _n.refreshSilent();
@@ -1449,6 +1540,16 @@ class _HousePageState extends State<HousePage>
     );
   }
 
+  // ── Analytics : modifs rapides & widgets ────────────────────
+  void _logQuickEdit(String action) {
+    unawaited(
+      FirebaseAnalytics.instance.logEvent(
+        name: 'timeslot_quick_edit',
+        parameters: {'action': action},
+      ),
+    );
+  }
+
   void _snackBar(ModificationResult res) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1481,6 +1582,14 @@ class _SlotDetailDialog extends StatefulWidget {
   final Future<void> Function(String name)? onAddClient;
   final Future<bool> Function(CustomerEntry customer)? onDeleteClient;
 
+  /// Droit de supprimer cette inscription (admin : toutes ; staff : les
+  /// siennes) et libellé « Ajouté par … » — fournis par le notifier.
+  final bool Function(CustomerEntry customer) canDeleteClient;
+  final String? Function(CustomerEntry customer) addedByLabel;
+
+  /// Affiche l'exemple « Ex : Jean Dupont » (5 premières inscriptions).
+  final bool showNameHint;
+
   const _SlotDetailDialog({
     required this.slot,
     required this.queue,
@@ -1491,6 +1600,9 @@ class _SlotDetailDialog extends StatefulWidget {
     this.isPast = false,
     this.onAddClient,
     this.onDeleteClient,
+    required this.canDeleteClient,
+    required this.addedByLabel,
+    this.showNameHint = true,
   });
 
   @override
@@ -1698,6 +1810,7 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                   final circleText = c.isCompanyManual
                       ? Colors.blue.shade400
                       : _green;
+                  final addedBy = widget.addedByLabel(c);
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 8),
                     child: Row(
@@ -1720,16 +1833,38 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                           ),
                         ),
                         const SizedBox(width: 10),
+                        // Nom (2 lignes max) puis « Ajouté par … » (1 ligne)
+                        // : tous deux tronqués par « … », quelle que soit leur
+                        // longueur, sans jamais déplacer la poubelle.
                         Expanded(
-                          child: Text(
-                            c.name,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                            ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                c.name,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              if (addedBy != null)
+                                Text(
+                                  addedBy,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: Colors.grey.shade500,
+                                  ),
+                                ),
+                            ],
                           ),
                         ),
-                        if (c.isCompanyManual && widget.onDeleteClient != null)
+                        if (widget.onDeleteClient != null &&
+                            widget.canDeleteClient(c))
                           IconButton(
                             icon: Icon(
                               Icons.delete_outline_rounded,
@@ -1771,7 +1906,7 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                 },
                 decoration: InputDecoration(
                   labelText: 'Nom du client',
-                  hintText: 'Ex : Jean Dupont',
+                  hintText: widget.showNameHint ? 'Ex : Jean Dupont' : null,
                   prefixIcon: const Icon(Icons.person_outline_rounded),
                   errorText: _nameError,
                   border: OutlineInputBorder(
@@ -1983,7 +2118,6 @@ class _TimeSlotInfo {
   final int duration;
   final List<int> workingDays;
   final int maxAdvanceDays;
-  final int maxReservationsPerPerson;
   final int reservationDeadlineMinutes;
 
   /// Non-null si une suppression programmée est en cours sur cette plage :
@@ -1999,7 +2133,6 @@ class _TimeSlotInfo {
     this.duration = 15,
     this.workingDays = const [],
     this.maxAdvanceDays = 3,
-    this.maxReservationsPerPerson = 1,
     this.reservationDeadlineMinutes = 10,
     this.deleteAfter,
   });

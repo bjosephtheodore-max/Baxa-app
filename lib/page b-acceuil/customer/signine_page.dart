@@ -12,6 +12,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:baxa/services/locale_service.dart';
 import 'package:baxa/services/location_service.dart';
+import 'package:baxa/widgets/profession_picker_sheet.dart';
 
 // ── Modes d'authentification téléphone ────────────────────────────────────────
 enum _PhoneStep { enterNumber, enterOtp }
@@ -258,6 +259,10 @@ class _SigninePageState extends State<SigninePage> {
         updates['nom'] = parts.length > 1 ? parts.sublist(1).join(' ') : '';
       }
       await ref.set(updates, SetOptions(merge: true));
+      await FirebaseAnalytics.instance.setUserProperty(
+        name: 'role',
+        value: 'customer',
+      );
 
       try {
         await FirebaseMessaging.instance.requestPermission();
@@ -362,7 +367,10 @@ class _SigninePageState extends State<SigninePage> {
 
   // ── Navigation on success ─────────────────────────────────────
 
-  void _onSuccess() {
+  Future<void> _onSuccess() async {
+    await _showProfessionSheet();
+    if (!mounted) return;
+
     // If this page is on top of the stack, pop back
     if (Navigator.canPop(context)) {
       Navigator.pop(context, true);
@@ -372,6 +380,31 @@ class _SigninePageState extends State<SigninePage> {
         context,
         MaterialPageRoute(builder: (_) => const CustomerPage()),
       );
+    }
+  }
+
+  // ── Profession (une seule fois, juste après l'inscription) ─────
+  // Affichée en bottom sheet AVANT le pop/pushReplacement ci-dessus, pour ne
+  // jamais casser le flow "favori en attente" de search_dialogs.dart, qui
+  // attend que cette page se pop pour reprendre la main.
+  Future<void> _showProfessionSheet() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || !mounted) return;
+    final selected = await showProfessionPickerSheet(context);
+    if (selected == null || !mounted) return; // "Passer" ou fermée
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .set({'profession': selected}, SetOptions(merge: true));
+      unawaited(
+        FirebaseAnalytics.instance.setUserProperty(
+          name: 'profession',
+          value: selected,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Erreur enregistrement profession: $e');
     }
   }
 

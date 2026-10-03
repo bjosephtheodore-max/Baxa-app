@@ -1,4 +1,4 @@
-import 'package:baxa/page%20b-acceuil/company/prereception_page.dart';
+import 'package:baxa/page%20b-acceuil/company/company_onboarding_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/prereceptione_page.dart';
 import 'package:baxa/page b-acceuil/company/staff_auth_page.dart';
 import 'package:flutter/material.dart';
@@ -164,12 +164,9 @@ class _ChoosePageState extends State<ChoosePage>
                             title: 'Je suis une Structure',
                             subtitle: 'Gérer mes files d\'attente',
                             color: const Color(0xFF4B8B5E),
-                            onTap: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => const PrereceptionPage(),
-                              ),
-                            ),
+                            // Présentation au premier passage, puis
+                            // formulaire directement (voir CompanyOnboarding).
+                            onTap: () => CompanyOnboarding.open(context),
                           ),
                         ),
                       ),

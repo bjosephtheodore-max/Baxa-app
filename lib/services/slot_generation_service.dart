@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_performance/firebase_performance.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 // ════════════════════════════════════════════════════════════════════
 // Génération immédiate des créneaux — côté app, sans attendre la Cloud
@@ -75,6 +76,37 @@ Future<int> generateSlotsImmediately({
     await trace.stop();
   }
 }
+
+/// Cœur de la génération, sans la trace Performance Monitoring (qui exige
+/// Firebase initialisé) — exposé pour les tests uniquement.
+@visibleForTesting
+Future<int> generateSlotsCore({
+  required FirebaseFirestore firestore,
+  required String companyId,
+  required String queueId,
+  required String timeSlotId,
+  required String startTimeStr,
+  required String endTimeStr,
+  required int duration,
+  required int capacity,
+  required List<int> workingDays,
+  required int reservationDeadlineMinutes,
+  DateTime? startFrom,
+  SlotGenMode mode = SlotGenMode.refresh,
+}) => _generateSlotsImmediatelyImpl(
+  firestore: firestore,
+  companyId: companyId,
+  queueId: queueId,
+  timeSlotId: timeSlotId,
+  startTimeStr: startTimeStr,
+  endTimeStr: endTimeStr,
+  duration: duration,
+  capacity: capacity,
+  workingDays: workingDays,
+  reservationDeadlineMinutes: reservationDeadlineMinutes,
+  startFrom: startFrom,
+  mode: mode,
+);
 
 Future<int> _generateSlotsImmediatelyImpl({
   required FirebaseFirestore firestore,

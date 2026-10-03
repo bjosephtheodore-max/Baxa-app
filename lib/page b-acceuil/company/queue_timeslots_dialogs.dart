@@ -1244,6 +1244,22 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       final isEdit = slotId != null;
       final wasOnboarding = !isEdit && OnboardingService().step == 5;
 
+      if (!isEdit) {
+        unawaited(
+          FirebaseAnalytics.instance.logEvent(
+            name: 'time_slot_created',
+            parameters: {
+              'company_id': widget.companyId,
+              'queue_id': widget.queueId,
+              // Vrai uniquement pour la toute première plage créée par
+              // l'entreprise depuis son inscription (repère l'onboarding
+              // étape 5 → 6) — pas juste la première de cette file.
+              'is_first_time_slot': wasOnboarding,
+            },
+          ),
+        );
+      }
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(

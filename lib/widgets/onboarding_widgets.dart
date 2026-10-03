@@ -55,14 +55,19 @@ class _PulsingDotState extends State<PulsingDot>
 }
 
 // ── Auréole verte pulsante autour d'un widget (FAB, bouton, carte) ────────────
+// [active] à false éteint l'auréole SANS retirer le widget de l'arbre : on peut
+// donc l'envelopper en permanence autour d'un enfant qui porte un état (ex. un
+// StreamBuilder) sans que l'activer/désactiver ne détruise et recrée cet enfant.
 class PulsingGlow extends StatefulWidget {
   final Widget child;
   final BorderRadius borderRadius;
+  final bool active;
 
   const PulsingGlow({
     super.key,
     required this.child,
     this.borderRadius = const BorderRadius.all(Radius.circular(30)),
+    this.active = true,
   });
 
   @override
@@ -80,8 +85,20 @@ class _PulsingGlowState extends State<PulsingGlow>
     _ctrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
+    );
+    if (widget.active) _ctrl.repeat(reverse: true);
     _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
+  }
+
+  @override
+  void didUpdateWidget(PulsingGlow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active == oldWidget.active) return;
+    if (widget.active) {
+      _ctrl.repeat(reverse: true);
+    } else {
+      _ctrl.stop();
+    }
   }
 
   @override
@@ -97,13 +114,15 @@ class _PulsingGlowState extends State<PulsingGlow>
       builder: (_, child) => DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: widget.borderRadius,
-          boxShadow: [
-            BoxShadow(
-              color: _kGreen.withValues(alpha: 0.45 + _anim.value * 0.55),
-              blurRadius: 20 + _anim.value * 24,
-              spreadRadius: 5 + _anim.value * 12,
-            ),
-          ],
+          boxShadow: widget.active
+              ? [
+                  BoxShadow(
+                    color: _kGreen.withValues(alpha: 0.45 + _anim.value * 0.55),
+                    blurRadius: 20 + _anim.value * 24,
+                    spreadRadius: 5 + _anim.value * 12,
+                  ),
+                ]
+              : const [],
         ),
         child: child,
       ),

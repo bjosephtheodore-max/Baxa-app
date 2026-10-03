@@ -7,6 +7,50 @@
   "client": [
     {
       "client_info": {
+        "mobilesdk_app_id": "1:62903909022:android:d04b4aab6ba32dae44598f",
+        "android_client_info": {
+          "package_name": "com.baxa.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "62903909022-6c4k4ee4ls5osfehotvtq9s46jnl7e41.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.baxa.app",
+            "certificate_hash": "d90adf63cdb7484e5154eec6443ad4e8931d00cc"
+          }
+        },
+        {
+          "client_id": "62903909022-k39l1j5k8h7a6bkc04bdg13k1d3hm422.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB1AIHDUGdjKnj7yhfpFbc_h6vScp_6kJU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "62903909022-k39l1j5k8h7a6bkc04bdg13k1d3hm422.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "62903909022-f625efcm9fhinotgd89gjmk8gmjv9oe4.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.domain.baxa"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
         "mobilesdk_app_id": "1:62903909022:android:eccbc1d9a071d8b044598f",
         "android_client_info": {
           "package_name": "com.domain.baxa"

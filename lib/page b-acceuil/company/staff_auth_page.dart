@@ -1,14 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:baxa/page b-acceuil/company/staff_page.dart';
 import 'package:baxa/services/booking_constants.dart';
+import 'package:baxa/services/firebase/auth.dart';
 
 // ============================================================
-// STAFF AUTH PAGE — Rejoindre une equipe via code d'invitation
-// Etape 0 : code  |  Etape 1 : tel ou Google  |  Etape 2 : OTP
+// STAFF AUTH PAGE — deux parcours :
+//  • Rejoindre une équipe : code → tél ou Google → OTP
+//  • Déjà membre (simple déconnexion) : tél ou Google → OTP, sans code
+// L'adhésion elle-même est faite côté serveur (joinTeamWithCode) : les
+// règles Firestore interdisent au client de créer son document staff.
 // ============================================================
 class StaffAuthPage extends StatefulWidget {
   const StaffAuthPage({super.key});
@@ -23,6 +29,9 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
 
   int _step = 0;
 
+  // true = parcours « Déjà membre ? Se reconnecter » (pas de code).
+  bool _reconnect = false;
+
   final _codeController = TextEditingController();
   final _phoneController = TextEditingController();
   final _otpController = TextEditingController();
@@ -31,9 +40,8 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
   bool _isGoogleLoading = false;
   String? _errorMessage;
   String? _verificationId;
-  String? _companyId;
+  String? _inviteCode;
   String? _companyName;
-  DocumentReference? _inviteDocRef;
 
   @override
   void dispose() {
@@ -51,18 +59,56 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
     if (_errorMessage != null && mounted) setState(() => _errorMessage = null);
   }
 
-  // Marquer le code comme utilise (usage unique)
-  Future<void> _markInviteUsed() async {
-    if (_inviteDocRef == null) return;
-    try {
-      await _inviteDocRef!.update({'active': false});
-    } catch (e) {
-      debugPrint('Erreur markInviteUsed: $e');
+  HttpsCallable _callable(String name) =>
+      FirebaseFunctions.instance.httpsCallable(name);
+
+  // Message lisible pour une erreur renvoyée par les fonctions d'équipe.
+  String _teamErrorMessage(FirebaseFunctionsException e) {
+    switch (e.code) {
+      case 'not-found':
+        return 'Code invalide. Demandez un nouveau code a votre responsable.';
+      case 'failed-precondition':
+        if (e.message?.contains('entreprise') == true) {
+          return 'Ce compte est un compte entreprise, il ne peut pas '
+              'rejoindre une equipe.';
+        }
+        return 'Ce code a deja ete utilise. Demandez un nouveau code a '
+            'votre responsable.';
+      case 'resource-exhausted':
+        return 'L\'equipe est complete ($kMaxActiveStaff membres maximum). '
+            'Contactez votre responsable.';
+      default:
+        return 'Erreur de connexion. Veuillez réessayer.';
     }
   }
 
+  // Ferme la session ouverte pour rien (adhésion refusée, pas membre...)
+  // pour ne pas laisser un compte connecté sans rôle sur l'appareil.
+  Future<void> _abortSession() => Auth().logout();
+
+  // Passer au parcours « Déjà membre » / revenir au code d'invitation.
+  void _startReconnect() {
+    setState(() {
+      _reconnect = true;
+      _step = 1;
+      _errorMessage = null;
+    });
+  }
+
+  void _goBack() {
+    setState(() {
+      _errorMessage = null;
+      if (_reconnect && _step == 1) {
+        _reconnect = false;
+        _step = 0;
+      } else {
+        _step--;
+      }
+    });
+  }
+
   // ==============================================================
-  // ETAPE 0 — Verifier le code d'invitation
+  // ETAPE 0 — Verifier le code d'invitation (côté serveur)
   // ==============================================================
   Future<void> _verifyInviteCode() async {
     _clearError();
@@ -74,54 +120,18 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
 
     setState(() => _isLoading = true);
     try {
-      final results = await FirebaseFirestore.instance
-          .collectionGroup('invitations')
-          .where('code', isEqualTo: code)
-          .limit(1)
-          .get();
-
-      if (results.docs.isEmpty) {
-        _setError(
-          'Code invalide. Demandez un nouveau code a votre responsable.',
-        );
-        return;
-      }
-
-      final doc = results.docs.first;
-      final data = doc.data();
-
-      // Verifier que le code est encore actif (non utilise)
-      if (data['active'] != true) {
-        _setError(
-          'Ce code a deja ete utilise. Demandez un nouveau code a votre responsable.',
-        );
-        return;
-      }
-      final companyId = data['companyId'] as String;
-
-      final staffSnap = await FirebaseFirestore.instance
-          .collection('companies')
-          .doc(companyId)
-          .collection('staff')
-          .where('isActive', isEqualTo: true)
-          .get();
-
-      if (staffSnap.docs.length >= kMaxActiveStaff) {
-        _setError(
-          'L\'equipe est complete ($kMaxActiveStaff membres maximum). '
-          'Contactez votre responsable.',
-        );
-        return;
-      }
-
+      final res = await _callable('checkInviteCode').call({'code': code});
+      final data = Map<String, dynamic>.from(res.data as Map);
       if (mounted) {
         setState(() {
-          _companyId = companyId;
-          _companyName = data['companyName'] as String? ?? 'l\'entreprise';
-          _inviteDocRef = doc.reference;
+          _inviteCode = code;
+          final name = data['companyName'] as String? ?? '';
+          _companyName = name.isNotEmpty ? name : 'l\'entreprise';
           _step = 1;
         });
       }
+    } on FirebaseFunctionsException catch (e) {
+      _setError(_teamErrorMessage(e));
     } catch (e) {
       _setError('Erreur de connexion. Veuillez réessayer.');
     } finally {
@@ -202,7 +212,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
       final userCred = await FirebaseAuth.instance.signInWithCredential(
         credential,
       );
-      await _createStaffProfile(userCred);
+      await _afterSignIn(userCred);
     } catch (e) {
       _setError('Erreur Google. Reessayez.');
     } finally {
@@ -232,6 +242,19 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
         smsCode: code,
       );
       await _signInWithPhoneCredential(credential);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  // Appelé par la saisie manuelle de l'OTP ET par la validation
+  // automatique Android : ne laisse jamais remonter d'exception.
+  Future<void> _signInWithPhoneCredential(
+    PhoneAuthCredential credential,
+  ) async {
+    UserCredential userCred;
+    try {
+      userCred = await FirebaseAuth.instance.signInWithCredential(credential);
     } on FirebaseAuthException catch (e) {
       if (e.code == 'invalid-verification-code') {
         _setError('Code incorrect. Verifiez le SMS et reessayez.');
@@ -240,81 +263,105 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
       } else {
         _setError('Erreur de verification. Reessayez.');
       }
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
-  }
-
-  Future<void> _signInWithPhoneCredential(
-    PhoneAuthCredential credential,
-  ) async {
-    try {
-      final userCred = await FirebaseAuth.instance.signInWithCredential(
-        credential,
-      );
-      await _createStaffProfile(userCred);
+      return;
     } catch (e) {
       _setError('Erreur lors de la connexion. Reessayez.');
+      return;
+    }
+    await _afterSignIn(userCred);
+  }
+
+  // Une fois connecté : rejoindre avec le code, ou retrouver son équipe.
+  Future<void> _afterSignIn(UserCredential userCred) async {
+    if (userCred.user == null) return;
+    if (_reconnect) {
+      await _resumeMembership(userCred.user!.uid);
+    } else {
+      await _joinWithCode();
     }
   }
 
   // ==============================================================
-  // CREER LE PROFIL STAFF + MARQUER LE CODE COMME UTILISE
+  // REJOINDRE : adhésion faite par le serveur (code + limite vérifiés)
   // ==============================================================
-  Future<void> _createStaffProfile(UserCredential userCred) async {
-    final uid = userCred.user?.uid;
-    if (uid == null || _companyId == null) return;
-
+  Future<void> _joinWithCode() async {
+    if (_inviteCode == null) return;
     try {
-      // Sauvegarder le role dans users/{uid} D'ABORD : c'est ce document que
-      // les règles Firebase (isStaff) vérifient pour autoriser les écritures
-      // suivantes sur companies/{companyId}. Le créer après aurait laissé
-      // les écritures ci-dessous sans autorisation au moment où elles se jouent.
-      await FirebaseFirestore.instance.collection('users').doc(uid).set({
-        'role': 'staff',
-        'companyId': _companyId,
-        'companyName': _companyName ?? '',
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-
-      await FirebaseFirestore.instance
-          .collection('companies')
-          .doc(_companyId)
-          .collection('staff')
-          .doc(uid)
-          .set({
-            'uid': uid,
-            'phone': userCred.user?.phoneNumber ?? '',
-            'email': userCred.user?.email ?? '',
-            'displayName': userCred.user?.displayName ?? '',
-            'companyId': _companyId,
-            'role': 'staff',
-            'isActive': true,
-            'joinedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
-
-      // Invalider le code (usage unique)
-      await _markInviteUsed();
-
-      // La notification à l'admin (« Nouveau membre d'équipe ») est désormais
-      // écrite côté serveur par la Cloud Function `onStaffJoined`, déclenchée
-      // par la création du doc companies/{id}/staff/{uid} ci-dessus.
-
-      if (!mounted) return;
-
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(
-          builder: (_) => StaffPage(
-            companyId: _companyId!,
-            companyName: _companyName ?? '',
-          ),
-        ),
-        (route) => false,
+      final res = await _callable(
+        'joinTeamWithCode',
+      ).call({'code': _inviteCode});
+      final data = Map<String, dynamic>.from(res.data as Map);
+      await _openStaffSpace(
+        companyId: data['companyId'] as String,
+        companyName: data['companyName'] as String? ?? _companyName ?? '',
       );
+    } on FirebaseFunctionsException catch (e) {
+      await _abortSession();
+      _setError(_teamErrorMessage(e));
     } catch (e) {
+      await _abortSession();
       _setError('Erreur lors de la creation du profil. Reessayez.');
     }
+  }
+
+  // ==============================================================
+  // SE RECONNECTER : le compte doit être membre ACTIF d'une équipe
+  // ==============================================================
+  Future<void> _resumeMembership(String uid) async {
+    try {
+      final db = FirebaseFirestore.instance;
+      final userDoc = await db.collection('users').doc(uid).get();
+      final data = userDoc.data() ?? const {};
+      final companyId = data['companyId'] as String?;
+
+      var isActiveMember = false;
+      if (data['role'] == 'staff' && companyId != null) {
+        final staffDoc = await db
+            .collection('companies')
+            .doc(companyId)
+            .collection('staff')
+            .doc(uid)
+            .get();
+        isActiveMember = staffDoc.data()?['isActive'] == true;
+      }
+
+      if (!isActiveMember) {
+        await _abortSession();
+        _setError(
+          'Ce compte ne fait partie d\'aucune equipe. Verifiez que vous '
+          'utilisez le meme numero ou compte Google qu\'a votre premiere '
+          'connexion, sinon demandez un code a votre responsable.',
+        );
+        return;
+      }
+
+      await _openStaffSpace(
+        companyId: companyId!,
+        companyName: data['companyName'] as String? ?? '',
+      );
+    } catch (e) {
+      await _abortSession();
+      _setError('Erreur de connexion. Veuillez réessayer.');
+    }
+  }
+
+  Future<void> _openStaffSpace({
+    required String companyId,
+    required String companyName,
+  }) async {
+    await FirebaseAnalytics.instance.setUserProperty(
+      name: 'role',
+      value: 'staff',
+    );
+    if (!mounted) return;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            StaffPage(companyId: companyId, companyName: companyName),
+      ),
+      (route) => false,
+    );
   }
 
   // ==============================================================
@@ -331,18 +378,15 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           icon: const Icon(Icons.arrow_back, color: Colors.black87),
           onPressed: () {
             if (_step > 0) {
-              setState(() {
-                _step--;
-                _clearError();
-              });
+              _goBack();
             } else {
               Navigator.pop(context);
             }
           },
         ),
-        title: const Text(
-          'Rejoindre une equipe',
-          style: TextStyle(
+        title: Text(
+          _reconnect ? 'Se reconnecter' : 'Rejoindre une equipe',
+          style: const TextStyle(
             color: _green,
             fontWeight: FontWeight.w700,
             fontSize: 18,
@@ -431,11 +475,14 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
 
   // ── Indicateur d'etapes ──────────────────────────────────
   Widget _buildStepIndicator() {
+    // Le parcours « Déjà membre » saute l'étape du code : 2 étapes.
+    final count = _reconnect ? 2 : 3;
+    final current = _reconnect ? _step - 1 : _step;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(3, (i) {
-        final isActive = i == _step;
-        final isDone = i < _step;
+      children: List.generate(count, (i) {
+        final isActive = i == current;
+        final isDone = i < current;
         return Row(
           children: [
             AnimatedContainer(
@@ -447,7 +494,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
                 borderRadius: BorderRadius.circular(5),
               ),
             ),
-            if (i < 2) const SizedBox(width: 6),
+            if (i < count - 1) const SizedBox(width: 6),
           ],
         );
       }),
@@ -488,7 +535,8 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           controller: _codeController,
           textCapitalization: TextCapitalization.characters,
           textAlign: TextAlign.center,
-          autofocus: true,
+          // Pas d'ouverture automatique du clavier : il masquerait le lien
+          // « Déjà membre ? Se reconnecter » dès l'arrivée sur l'écran.
           onChanged: (_) => _clearError(),
           style: GoogleFonts.poppins(
             fontSize: 22,
@@ -535,6 +583,26 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
                   ),
           ),
         ),
+        const SizedBox(height: 20),
+        Divider(color: Colors.grey.shade200, height: 1),
+        const SizedBox(height: 12),
+        // Membre simplement déconnecté : pas besoin d'un nouveau code.
+        TextButton(
+          onPressed: _isLoading ? null : _startReconnect,
+          child: RichText(
+            textAlign: TextAlign.center,
+            text: TextSpan(
+              style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+              children: const [
+                TextSpan(text: 'Deja membre ? '),
+                TextSpan(
+                  text: 'Se reconnecter',
+                  style: TextStyle(color: _green, fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -558,7 +626,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
         ),
         const SizedBox(height: 20),
         Text(
-          'Votre compte',
+          _reconnect ? 'Bon retour !' : 'Votre compte',
           style: GoogleFonts.poppins(
             fontSize: 20,
             fontWeight: FontWeight.w700,
@@ -567,28 +635,36 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 8),
-        RichText(
-          textAlign: TextAlign.center,
-          text: TextSpan(
+        if (_reconnect)
+          Text(
+            'Utilisez le meme numero ou le meme compte Google qu\'a votre '
+            'premiere connexion.',
+            textAlign: TextAlign.center,
             style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
-            children: [
-              const TextSpan(text: 'Vous rejoignez l\'equipe de '),
-              TextSpan(
-                text: _companyName ?? 'l\'entreprise',
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: _green,
+          )
+        else
+          RichText(
+            textAlign: TextAlign.center,
+            text: TextSpan(
+              style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+              children: [
+                const TextSpan(text: 'Vous rejoignez l\'equipe de '),
+                TextSpan(
+                  text: _companyName ?? 'l\'entreprise',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: _green,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
         const SizedBox(height: 28),
         // Champ telephone
         TextField(
           controller: _phoneController,
           keyboardType: TextInputType.phone,
-          autofocus: true,
+          // Pas d'ouverture automatique : le bouton Google doit rester visible.
           onChanged: (_) => _clearError(),
           decoration: InputDecoration(
             labelText: 'Numero de telephone',

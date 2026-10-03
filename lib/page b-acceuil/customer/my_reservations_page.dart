@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/page%20b-acceuil/customer/search_page.dart';
+import 'package:baxa/services/reservation_rules_service.dart';
 
 class MyReservationsPage extends StatefulWidget {
   const MyReservationsPage({super.key});
@@ -37,6 +38,9 @@ class _MyReservationsPageState extends State<MyReservationsPage> {
     super.initState();
     _userId = FirebaseAuth.instance.currentUser?.uid;
     if (_userId != null) _loadData();
+    // Réveil anticipé de la fonction de réservation : une annulation depuis
+    // cette page répond alors sans démarrage à froid.
+    ReservationRulesService().warmUp();
   }
 
   // Chargement ponctuel (plutôt qu'une écoute .snapshots() permanente) :
@@ -835,60 +839,20 @@ class _MyReservationsPageState extends State<MyReservationsPage> {
     );
 
     if (confirmed == true && mounted) {
-      await _cancelReservation(
-        reservationRef,
-        companyId,
-        queueId,
-        slotId,
-        slotStart,
-      );
+      await _cancelReservation(reservationRef, companyId);
     }
   }
 
   Future<void> _cancelReservation(
     DocumentReference reservationRef,
     String companyId,
-    String queueId,
-    String slotId,
-    DateTime slotStart,
   ) async {
-    final dateStr =
-        '${slotStart.year}-'
-        '${slotStart.month.toString().padLeft(2, '0')}-'
-        '${slotStart.day.toString().padLeft(2, '0')}';
-
-    final dailyStatsRef = _firestore
-        .collection('companies')
-        .doc(companyId)
-        .collection('queues')
-        .doc(queueId)
-        .collection('dailyStats')
-        .doc(dateStr);
-
     try {
-      await _firestore.runTransaction((transaction) async {
-        final slotRef = _firestore
-            .collection('companies')
-            .doc(companyId)
-            .collection('queues')
-            .doc(queueId)
-            .collection('slots')
-            .doc(slotId);
-
-        transaction.update(slotRef, {
-          'reserved': FieldValue.increment(-1),
-          'cancelled': FieldValue.increment(1),
-        });
-        transaction.update(reservationRef, {
-          'status': 'cancelled',
-          'cancelledAt': FieldValue.serverTimestamp(),
-        });
-        transaction.set(dailyStatsRef, {
-          'reserved': FieldValue.increment(-1),
-          'available': FieldValue.increment(1),
-          'cancelled': FieldValue.increment(1),
-        }, SetOptions(merge: true));
-      });
+      // Annulation par le serveur (point unique, voir ReservationRulesService).
+      await ReservationRulesService().cancelReservation(
+        companyId: companyId,
+        reservationId: reservationRef.id,
+      );
 
       if (!mounted) return;
       // Retrait immédiat de la liste — la page ne se recharge (un seul .get)

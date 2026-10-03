@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:baxa/services/notifications/notification_service.dart';
+import 'package:baxa/services/reservation_rules_service.dart';
 
 /// Gestionnaire des annulations de réservations depuis les notifications
 class CancellationHandler {
@@ -37,7 +39,7 @@ class CancellationHandler {
       }
     } else if (action == 'keep_reservation') {
       // L'utilisateur garde sa réservation, ne rien faire
-      print('Réservation conservée');
+      debugPrint('Réservation conservée');
     }
   }
 
@@ -83,69 +85,14 @@ class CancellationHandler {
     }
 
     try {
-      // Référence à la réservation
-      final reservationRef = _firestore.doc(reservationPath);
-
-      await _firestore.runTransaction((transaction) async {
-        // 1. Vérifier que la réservation existe et appartient à l'utilisateur
-        final reservationSnap = await transaction.get(reservationRef);
-        if (!reservationSnap.exists) {
-          throw Exception('Réservation introuvable');
-        }
-
-        final reservationData = reservationSnap.data() as Map<String, dynamic>;
-        if (reservationData['customerId'] != user.uid) {
-          throw Exception('Réservation non autorisée');
-        }
-
-        // Vérifier que la réservation n'est pas déjà annulée
-        if (reservationData['status'] == 'cancelled') {
-          throw Exception('Réservation déjà annulée');
-        }
-
-        // 2. Référence au slot
-        final slotRef = _firestore
-            .collection('companies')
-            .doc(companyId)
-            .collection('queues')
-            .doc(queueId)
-            .collection('slots')
-            .doc(slotId);
-
-        // 3. Décrémenter reserved et incrémenter cancelled dans le slot
-        transaction.update(slotRef, {
-          'reserved': FieldValue.increment(-1),
-          'cancelled': FieldValue.increment(1),
-        });
-
-        // 4. Marquer la réservation comme annulée
-        transaction.update(reservationRef, {
-          'status': 'cancelled',
-          'cancelledAt': FieldValue.serverTimestamp(),
-          'cancellationSource': 'notification',
-        });
-
-        // 5. Mettre à jour dailyStats atomiquement
-        final slotStartTs = reservationData['slotStart'] as Timestamp?;
-        if (slotStartTs != null) {
-          final slotStart = slotStartTs.toDate().toLocal();
-          final dateStr = '${slotStart.year}-'
-              '${slotStart.month.toString().padLeft(2, '0')}-'
-              '${slotStart.day.toString().padLeft(2, '0')}';
-          final dailyStatsRef = _firestore
-              .collection('companies')
-              .doc(companyId)
-              .collection('queues')
-              .doc(queueId)
-              .collection('dailyStats')
-              .doc(dateStr);
-          transaction.set(dailyStatsRef, {
-            'reserved': FieldValue.increment(-1),
-            'available': FieldValue.increment(1),
-            'cancelled': FieldValue.increment(1),
-          }, SetOptions(merge: true));
-        }
-      });
+      // Annulation par le serveur (point unique, voir ReservationRulesService) :
+      // il vérifie que la réservation appartient au client et est encore
+      // active, puis libère la place.
+      await ReservationRulesService().cancelReservation(
+        companyId: companyId,
+        reservationId: _firestore.doc(reservationPath).id,
+        fromNotification: true,
+      );
 
       // 5. Annuler toutes les notifications programmées pour cette réservation
       await NotificationService().cancelReservationNotifications();
@@ -163,7 +110,9 @@ class CancellationHandler {
     } catch (e) {
       return CancellationResult(
         success: false,
-        message: 'Erreur lors de l\'annulation: $e',
+        message: e is BookingException
+            ? e.message
+            : 'Erreur lors de l\'annulation: $e',
       );
     }
   }
@@ -184,7 +133,7 @@ class CancellationHandler {
             'payload': null,
           });
     } catch (e) {
-      print('Erreur sauvegarde notification: $e');
+      debugPrint('Erreur sauvegarde notification: $e');
     }
   }
 
@@ -219,7 +168,7 @@ class CancellationHandler {
 
       return null;
     } catch (e) {
-      print('Erreur recherche réservation: $e');
+      debugPrint('Erreur recherche réservation: $e');
       return null;
     }
   }

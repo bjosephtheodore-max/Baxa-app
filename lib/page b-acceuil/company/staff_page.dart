@@ -25,8 +25,13 @@ class StaffPage extends StatefulWidget {
   State<StaffPage> createState() => _StaffPageState();
 }
 
-class _StaffPageState extends State<StaffPage> {
+class _StaffPageState extends State<StaffPage> with WidgetsBindingObserver {
   int _pageIndex = 0;
+
+  // Dernière activité affichée à l'admin dans « Mon équipe » : écrite à
+  // l'ouverture et au retour au premier plan, au plus une fois / 15 min.
+  static const _lastSeenThrottle = Duration(minutes: 15);
+  DateTime? _lastSeenWrittenAt;
 
   late final String _uid = FirebaseAuth.instance.currentUser?.uid ?? '_';
 
@@ -43,9 +48,39 @@ class _StaffPageState extends State<StaffPage> {
   bool _staffNotif(Map<String, dynamic> d) =>
       d['audience'] == 'staff' && d['staffId'] == _uid;
 
+  Future<void> _touchLastSeen() async {
+    final now = DateTime.now();
+    final last = _lastSeenWrittenAt;
+    if (last != null && now.difference(last) < _lastSeenThrottle) return;
+    _lastSeenWrittenAt = now;
+    try {
+      await FirebaseFirestore.instance
+          .collection('companies')
+          .doc(widget.companyId)
+          .collection('staff')
+          .doc(_uid)
+          .update({'lastSeenAt': FieldValue.serverTimestamp()});
+    } catch (_) {
+      // Purement informatif : un échec (hors ligne, membre retiré) est muet.
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _touchLastSeen();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _touchLastSeen();
     CompanyMessagingService.instance.start(
       onOpenNotifications: () {
         if (!mounted) return;
@@ -58,7 +93,7 @@ class _StaffPageState extends State<StaffPage> {
   @override
   Widget build(BuildContext context) {
     final pages = [
-      const HousePage(),
+      HousePage(staffCompanyId: widget.companyId),
       StaffSettingsPage(
         companyId: widget.companyId,
         companyName: widget.companyName,

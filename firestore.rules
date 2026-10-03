@@ -28,17 +28,29 @@ service cloud.firestore {
       return isAdmin(companyId) || isStaff(companyId);
     }
 
+    // Sous-collections d'entreprise qui ont leurs PROPRES règles ci-dessous :
+    // exclues du bloc générique (en bas de match /companies), sinon ses
+    // droits s'ajouteraient aux leurs (les règles Firestore s'additionnent).
+    // Toute nouvelle sous-collection dotée de règles dédiées doit être
+    // ajoutée ici.
+    function hasDedicatedRules(sub) {
+      return sub in ['queues', 'reservations', 'invitations', 'staff',
+        'notificationsHistory', 'companyNotifications'];
+    }
+
     match /companies/{companyId} {
       allow read: if true;
       allow write: if isAdmin(companyId);
+      // Le staff peut aussi mettre à jour la fiche entreprise (auparavant
+      // accordé implicitement par l'ancien bloc générique {document=**}).
+      allow create, update: if hasAccess(companyId);
 
-      // Slots : les customers peuvent incrémenter reserved/cancelled lors d'une réservation
+      // Créneaux : lecture publique. Les compteurs (reserved/cancelled) ne
+      // bougent côté client QUE via la Cloud Function `booking` (Admin SDK) :
+      // aucun accès en écriture pour le client.
       match /queues/{queueId}/slots/{slotId} {
         allow read: if true;
         allow write: if hasAccess(companyId);
-        allow update: if signedIn() &&
-          request.resource.data.diff(resource.data).affectedKeys()
-            .hasOnly(['reserved', 'cancelled']);
       }
 
       // File d'attente elle-même : suppression désormais explicite (plus couverte par le wildcard générique)
@@ -53,55 +65,68 @@ service cloud.firestore {
         allow write: if hasAccess(companyId);
       }
 
-      // Stats journalières : le customer peut seulement toucher les compteurs
-      // (réservation/annulation), l'entreprise a la main complète.
+      // Stats journalières : lecture publique (places libres par jour,
+      // affichées sur la page créneaux du client). Écriture : l'entreprise,
+      // et côté client uniquement via la Cloud Function `booking`.
       match /queues/{queueId}/dailyStats/{dateStr} {
-        allow read: if hasAccess(companyId);
-        allow write: if hasAccess(companyId) || (
-          signedIn() &&
-          request.resource.data.diff(resource.data).affectedKeys()
-            .hasOnly(['reserved', 'available', 'cancelled'])
-        );
-      }
-
-      // Réservations : le client gère les siennes (création + annulation via
-      // update de status), l'entreprise gère tout — mais ne peut SUPPRIMER
-      // que ce qu'elle a ajouté elle-même (source == 'company_manual').
-      // La lecture est autorisée plus bas via {path=**}/reservations
-      // (nécessaire pour les collectionGroup queries côté client).
-      match /reservations/{reservationId} {
-        allow create: if signedIn() && (
-          hasAccess(companyId) ||
-          request.resource.data.get('customerId', '') == request.auth.uid
-        );
-        allow update: if signedIn() && (
-          hasAccess(companyId) ||
-          resource.data.customerId == request.auth.uid
-        );
-        allow delete: if hasAccess(companyId) &&
-          resource.data.get('source', '') == 'company_manual';
-      }
-
-      // Invitations : la lecture publique est autorisée plus bas via
-      // {path=**}/invitations (nécessaire pour le collectionGroup query
-      // fait AVANT connexion, quand un nouveau membre vérifie son code).
-      match /invitations/{inviteId} {
-        allow create, delete: if hasAccess(companyId);
-        allow update: if hasAccess(companyId) || (
-          signedIn() &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active'])
-        );
-      }
-
-      // Membres du staff : un nouveau membre doit pouvoir créer SON PROPRE
-      // document en rejoignant (il n'est pas encore "staff" à ce moment précis,
-      // donc hasAccess() ne peut pas encore être vrai pour lui) — d'où un accès
-      // dédié restreint à son propre uid. Modifier/retirer un membre (isActive)
-      // reste réservé à l'admin, jamais au staff lui-même.
-      match /staff/{uid} {
         allow read: if true;
-        allow create: if signedIn() && request.auth.uid == uid;
-        allow update, delete: if isAdmin(companyId);
+        allow write: if hasAccess(companyId);
+      }
+
+      // Réservations (contiennent nom et e-mail du client).
+      // Lecture : l'entreprise (admin + staff actif) et le client concerné
+      // UNIQUEMENT. Les requêtes client doivent donc filtrer sur
+      // customerId == son uid (c'est le cas partout dans l'app).
+      // Écriture côté client : UNIQUEMENT via la Cloud Function `booking`
+      // (réserver / remplacer / annuler), qui vérifie quota, places et
+      // règles avant d'écrire. L'entreprise gère tout — mais ne peut
+      // SUPPRIMER que ce qu'elle a ajouté elle-même (source == 'company_manual').
+      // Inscriptions manuelles : `createdBy` (uid de l'auteur) décide qui
+      // peut les supprimer — l'admin toutes, un membre du staff seulement
+      // les siennes. Les inscriptions sans auteur (antérieures à ce suivi)
+      // sont réservées à l'admin. L'auteur est fixé à la création (on ne
+      // peut pas s'attribuer l'inscription d'un autre) et ne change plus.
+      match /reservations/{reservationId} {
+        allow read: if hasAccess(companyId) || (
+          signedIn() && resource.data.get('customerId', '') == request.auth.uid
+        );
+        allow create: if hasAccess(companyId)
+          && request.resource.data.get('createdBy', request.auth.uid)
+            == request.auth.uid
+          && (request.resource.data.get('createdByRole', '') != 'admin'
+            || isAdmin(companyId));
+        allow update: if hasAccess(companyId)
+          && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['createdBy', 'createdByRole', 'createdByName']);
+        allow delete: if hasAccess(companyId)
+          && resource.data.get('source', '') == 'company_manual'
+          && (isAdmin(companyId)
+            || resource.data.get('createdBy', '') == request.auth.uid);
+      }
+
+      // Invitations : gérées par l'entreprise. La vérification d'un code et
+      // sa consommation se font côté serveur (Cloud Functions checkInviteCode
+      // / joinTeamWithCode) — plus aucune écriture ouverte aux inconnus.
+      match /invitations/{inviteId} {
+        allow read, create, update, delete: if hasAccess(companyId);
+      }
+
+      // Membres du staff : l'adhésion (création / réactivation) passe
+      // UNIQUEMENT par la Cloud Function joinTeamWithCode, qui vérifie le
+      // code et la limite de membres — un client ne peut donc plus se
+      // déclarer membre tout seul. Retirer un membre reste réservé à l'admin ;
+      // le membre actif peut seulement mettre à jour sa dernière activité.
+      // Lecture : l'équipe (admin + membres actifs), et chaque membre sa
+      // propre fiche — même retiré, c'est ainsi que l'app détecte le retrait.
+      match /staff/{uid} {
+        allow read: if hasAccess(companyId)
+          || (signedIn() && request.auth.uid == uid);
+        allow update: if isAdmin(companyId) || (
+          signedIn() && request.auth.uid == uid
+          && resource.data.get('isActive', false) == true
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSeenAt'])
+        );
+        allow delete: if isAdmin(companyId);
       }
 
       // Historique de notifications : usage interne entreprise, jamais public
@@ -119,24 +144,29 @@ service cloud.firestore {
         allow create, update: if false;
       }
 
-      // Tout le reste du sous-arbre (prereception, notificationsAdmin,
-      // config diverse...) : lecture publique, écriture réservée à
-      // l'entreprise. Suppression volontairement RETIRÉE d'ici — elle doit
-      // être déclarée explicitement par collection (voir blocs ci-dessus).
-      match /{document=**} {
-        allow read: if true;
-        allow create, update: if hasAccess(companyId);
+      // Tout AUTRE sous-arbre (futures données) : PRIVÉ PAR DÉFAUT —
+      // lecture et écriture réservées à l'entreprise (admin + staff actif).
+      // Ce qui doit être public est déclaré explicitement plus haut (files,
+      // plages, créneaux, places par jour). Suppression volontairement
+      // absente : elle doit être déclarée collection par collection.
+      // Les sous-collections dotées de règles dédiées en sont exclues (voir
+      // hasDedicatedRules), pour que seules leurs propres règles comptent.
+      // (Nom de sous-collection testé via {sub} et non via le chemin
+      // complet : c'est la seule forme que Firestore sait évaluer sur une
+      // requête de LISTE.)
+      match /{sub}/{rest=**} {
+        allow read, create, update: if hasAccess(companyId)
+          && !hasDedicatedRules(sub);
       }
     }
 
-    // Lecture transversale nécessaire pour les collectionGroup queries (recherche
-    // à travers toutes les entreprises sans connaître le chemin à l'avance).
+    // Lecture transversale pour les collectionGroup queries du CLIENT (ses
+    // réservations dans toutes les entreprises : accueil, « Mes
+    // réservations »…) : uniquement SES réservations — la requête doit
+    // filtrer sur customerId == son uid, sinon Firestore la refuse.
     match /{path=**}/reservations/{reservationId} {
-      allow read: if signedIn();
-    }
-
-    match /{path=**}/invitations/{inviteId} {
-      allow read: if true;
+      allow read: if signedIn()
+        && resource.data.get('customerId', '') == request.auth.uid;
     }
 
     // Les notifications d'annulation par une entreprise
@@ -150,8 +180,19 @@ service cloud.firestore {
       allow read, write: if signedIn() && request.auth.uid == customerId;
     }
 
+    // Profil : chacun gère le sien, SAUF le quota de réservations du jour
+    // (dailyBookingCount / lastBookingDate), tenu uniquement par la Cloud
+    // Function `booking` — sinon la limite quotidienne serait contournable.
+    // Pas de suppression côté client (l'app n'en fait pas) : supprimer puis
+    // recréer son profil remettrait le quota à zéro.
     match /users/{userId} {
-      allow read, write: if signedIn() && request.auth.uid == userId;
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create: if signedIn() && request.auth.uid == userId
+        && !request.resource.data.keys()
+          .hasAny(['dailyBookingCount', 'lastBookingDate']);
+      allow update: if signedIn() && request.auth.uid == userId
+        && !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['dailyBookingCount', 'lastBookingDate']);
 
       match /favorites/{favId} {
         allow read, write: if signedIn() && request.auth.uid == userId;

@@ -8,6 +8,7 @@ import 'package:baxa/page%20b-acceuil/customer/slots_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/reservation_ticket_page.dart';
 import 'package:baxa/page b-acceuil/customer/annulation_confirmation_page.dart';
 import 'package:baxa/services/notifications/gestionnaire_annulations_page.dart';
+import 'package:baxa/services/reservation_rules_service.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -86,6 +87,9 @@ class _HousePageState extends State<HousePage>
     _loadPrenom();
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) {
+      // Réveil anticipé de la fonction de réservation : une annulation
+      // depuis l'accueil répond alors sans démarrage à froid.
+      ReservationRulesService().warmUp();
       _appointmentsStream = FirebaseFirestore.instance
           .collectionGroup('reservations')
           .where('customerId', isEqualTo: user.uid)
@@ -392,53 +396,14 @@ class _HousePageState extends State<HousePage>
   }
 
   Future<void> _cancelReservation(DocumentSnapshot doc) async {
-    final data = doc.data() as Map<String, dynamic>;
-    final companyId = data['companyId'] as String?;
-    final queueId = data['queueId'] as String?;
-    final slotId = data['slotId'] as String?;
-    final slotStartTs = data['slotStart'] as Timestamp?;
+    // Annulation par le serveur (point unique, voir ReservationRulesService).
+    final companyId = doc.reference.parent.parent!.id;
 
     try {
-      await FirebaseFirestore.instance.runTransaction((tx) async {
-        tx.update(doc.reference, {
-          'status': 'cancelled',
-          'cancelledAt': FieldValue.serverTimestamp(),
-        });
-
-        if (companyId != null && queueId != null && slotId != null) {
-          final slotRef = FirebaseFirestore.instance
-              .collection('companies')
-              .doc(companyId)
-              .collection('queues')
-              .doc(queueId)
-              .collection('slots')
-              .doc(slotId);
-          tx.update(slotRef, {
-            'reserved': FieldValue.increment(-1),
-            'cancelled': FieldValue.increment(1),
-          });
-
-          if (slotStartTs != null) {
-            final slotStart = slotStartTs.toDate().toLocal();
-            final dateStr =
-                '${slotStart.year}-'
-                '${slotStart.month.toString().padLeft(2, '0')}-'
-                '${slotStart.day.toString().padLeft(2, '0')}';
-            final dailyStatsRef = FirebaseFirestore.instance
-                .collection('companies')
-                .doc(companyId)
-                .collection('queues')
-                .doc(queueId)
-                .collection('dailyStats')
-                .doc(dateStr);
-            tx.set(dailyStatsRef, {
-              'reserved': FieldValue.increment(-1),
-              'available': FieldValue.increment(1),
-              'cancelled': FieldValue.increment(1),
-            }, SetOptions(merge: true));
-          }
-        }
-      });
+      await ReservationRulesService().cancelReservation(
+        companyId: companyId,
+        reservationId: doc.id,
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

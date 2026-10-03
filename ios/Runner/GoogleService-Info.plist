@@ -3,9 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CLIENT_ID</key>
-	<string>62903909022-f625efcm9fhinotgd89gjmk8gmjv9oe4.apps.googleusercontent.com</string>
+	<string>62903909022-gq4ul3dh1948h0gulkjl8tglv65m5ss8.apps.googleusercontent.com</string>
 	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.62903909022-f625efcm9fhinotgd89gjmk8gmjv9oe4</string>
+	<string>com.googleusercontent.apps.62903909022-gq4ul3dh1948h0gulkjl8tglv65m5ss8</string>
+	<key>ANDROID_CLIENT_ID</key>
+	<string>62903909022-6c4k4ee4ls5osfehotvtq9s46jnl7e41.apps.googleusercontent.com</string>
 	<key>API_KEY</key>
 	<string>AIzaSyCJJc2UiESmtsSG3GCo8Ms35vsF5RAAqEw</string>
 	<key>GCM_SENDER_ID</key>
@@ -13,7 +15,7 @@
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>com.domain.baxa</string>
+	<string>com.baxa.app</string>
 	<key>PROJECT_ID</key>
 	<string>baxa-5bab0</string>
 	<key>STORAGE_BUCKET</key>
@@ -29,6 +31,6 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:62903909022:ios:c685b4cd46423acb44598f</string>
+	<string>1:62903909022:ios:b2cbc7c0819cd57844598f</string>
 </dict>
 </plist>

@@ -768,6 +768,7 @@ class _TeamPageState extends State<TeamPage> {
                 final displayName = data['displayName'] as String? ?? '';
                 final uid = doc.id;
                 final joinedAt = data['joinedAt'] as Timestamp?;
+                final lastSeenAt = data['lastSeenAt'] as Timestamp?;
 
                 return Container(
                   margin: const EdgeInsets.only(bottom: 10),
@@ -830,6 +831,14 @@ class _TeamPageState extends State<TeamPage> {
                                   color: Colors.grey.shade500,
                                 ),
                               ),
+                            if (lastSeenAt != null)
+                              Text(
+                                _lastSeenLabel(lastSeenAt.toDate()),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade500,
+                                ),
+                              ),
                           ],
                         ),
                       ),
@@ -873,5 +882,17 @@ class _TeamPageState extends State<TeamPage> {
       'déc',
     ];
     return '${date.day} ${months[date.month - 1]} ${date.year}';
+  }
+
+  // « Actif aujourd'hui », « Vu hier », « Vu il y a 3 jours »…
+  String _lastSeenLabel(DateTime date) {
+    final now = DateTime.now();
+    final days = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(date.year, date.month, date.day))
+        .inDays;
+    if (days <= 0) return 'Actif aujourd\'hui';
+    if (days == 1) return 'Vu hier';
+    if (days < 30) return 'Vu il y a $days jours';
+    return 'Vu le ${_formatDate(date)}';
   }
 }

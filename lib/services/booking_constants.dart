@@ -8,10 +8,6 @@
 /// Les annulations ne restituent pas de quota.
 const int kMaxDailyReservations = 5;
 
-/// Délai minimum (en minutes) à attendre après la fin d'un créneau
-/// avant de pouvoir réserver à nouveau dans la MÊME file
-const int kCooldownSameQueueMinutes = 5;
-
 /// Écart minimum (en minutes) requis entre deux créneaux
 /// dans des files DIFFÉRENTES de la MÊME entreprise
 const int kMinGapSameCompanyMinutes = 5;

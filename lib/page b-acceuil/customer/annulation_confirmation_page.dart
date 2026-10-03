@@ -87,7 +87,7 @@ class _CancellationConfirmationPageState
                         shape: BoxShape.circle,
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.orange.withOpacity(0.2),
+                            color: Colors.orange.withValues(alpha: 0.2),
                             blurRadius: 20,
                             offset: const Offset(0, 10),
                           ),
@@ -137,7 +137,7 @@ class _CancellationConfirmationPageState
                       borderRadius: BorderRadius.circular(20),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.05),
+                          color: Colors.black.withValues(alpha: 0.05),
                           blurRadius: 20,
                           offset: const Offset(0, 4),
                         ),
@@ -151,7 +151,7 @@ class _CancellationConfirmationPageState
                             Container(
                               padding: const EdgeInsets.all(10),
                               decoration: BoxDecoration(
-                                color: _lightGreen.withOpacity(0.3),
+                                color: _lightGreen.withValues(alpha: 0.3),
                                 borderRadius: BorderRadius.circular(12),
                               ),
                               child: Icon(
@@ -216,13 +216,13 @@ class _CancellationConfirmationPageState
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
                         colors: [
-                          _lightGreen.withOpacity(0.3),
-                          _lightGreen.withOpacity(0.1),
+                          _lightGreen.withValues(alpha: 0.3),
+                          _lightGreen.withValues(alpha: 0.1),
                         ],
                       ),
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(
-                        color: _primaryGreen.withOpacity(0.2),
+                        color: _primaryGreen.withValues(alpha: 0.2),
                         width: 1,
                       ),
                     ),
@@ -409,7 +409,7 @@ class _CancellationConfirmationPageState
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
-                  color: _primaryGreen.withOpacity(0.1),
+                  color: _primaryGreen.withValues(alpha: 0.1),
                   shape: BoxShape.circle,
                 ),
                 child: Icon(

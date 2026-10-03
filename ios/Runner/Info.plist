@@ -3,7 +3,6 @@
 <plist version="1.0">
 	<dict>
 		<key>GIDClientID</key>
-		<!-- TODO Replace this value: -->
 		<!-- Copied from GoogleService-Info.plist key CLIENT_ID -->
 		<string>62903909022-f625efcm9fhinotgd89gjmk8gmjv9oe4.apps.googleusercontent.com</string>
 		<!-- Google Sign-in Section -->
@@ -14,9 +13,8 @@
 				<string>Editor</string>
 				<key>CFBundleURLSchemes</key>
 				<array>
-					<!-- TODO Replace this value: -->
 					<!-- Copied from GoogleService-Info.plist key REVERSED_CLIENT_ID -->
-					<string>com.googleusercontent.apps.62903909022-f625efcm9fhinotgd89gjmk8gmjv9oe4</string>
+					<string>com.googleusercontent.apps.62903909022-gq4ul3dh1948h0gulkjl8tglv65m5ss8</string>
 				</array>
 			</dict>
 		</array>

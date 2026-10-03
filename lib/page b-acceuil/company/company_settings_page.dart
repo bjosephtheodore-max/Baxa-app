@@ -210,12 +210,12 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
-                    color: _green.withOpacity(0.3),
+                    color: _green.withValues(alpha: 0.3),
                     width: 1.5,
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.04),
+                      color: Colors.black.withValues(alpha: 0.04),
                       blurRadius: 8,
                       offset: const Offset(0, 2),
                     ),
@@ -226,7 +226,7 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                     Container(
                       padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(
-                        color: _green.withOpacity(0.1),
+                        color: _green.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: const Icon(
@@ -259,7 +259,7 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                     Container(
                       padding: const EdgeInsets.all(6),
                       decoration: BoxDecoration(
-                        color: _green.withOpacity(0.08),
+                        color: _green.withValues(alpha: 0.08),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: const Icon(

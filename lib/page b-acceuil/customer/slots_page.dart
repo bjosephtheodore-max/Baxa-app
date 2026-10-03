@@ -187,6 +187,10 @@ class _SlotsPageState extends State<SlotsPage>
       reverseDuration: const Duration(milliseconds: 180),
     );
 
+    // Réveil anticipé de la fonction de réservation : le temps que le
+    // client choisisse son créneau, elle est prête à répondre vite.
+    _rulesService.warmUp();
+
     // Config transmise par l'écran précédent → démarrage sans attente serveur.
     if (widget.initialMaxAdvanceDays != null) {
       _maxAdvanceDays = widget.initialMaxAdvanceDays!;
@@ -1301,9 +1305,6 @@ class _SlotsPageState extends State<SlotsPage>
       default:
         final message = ReservationRulesService.violationMessage(
           result.violation!,
-          conflictData: result.conflictingReservation != null
-              ? result.conflictingReservation!.data() as Map<String, dynamic>
-              : null,
         );
         _showBlockedSnackbar(message);
     }
@@ -1992,8 +1993,6 @@ class _SlotsPageState extends State<SlotsPage>
         queueId: widget.queueId,
         timeSlotId: timeSlotId,
         slotDocId: slotDoc.id,
-        slotStart: start,
-        slotEnd: end,
         companyName: widget.entrepriseNom,
         queueName: _displayQueueName,
       );
@@ -2035,7 +2034,7 @@ class _SlotsPageState extends State<SlotsPage>
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        _showErrorSnackbar('$e');
+        _showBookingError(e);
       }
     }
   }
@@ -2054,14 +2053,10 @@ class _SlotsPageState extends State<SlotsPage>
       await _rulesService.replaceReservation(
         oldReservationId: existingRes.id,
         oldCompanyId: existingData['companyId'] as String,
-        oldSlotDocId: existingData['slotId'] as String,
-        oldQueueId: existingData['queueId'] as String,
         newCompanyId: widget.entrepriseId,
         newQueueId: widget.queueId,
         newTimeSlotId: timeSlotId,
         newSlotDocId: slotDoc.id,
-        newSlotStart: newStart,
-        newSlotEnd: newEnd,
         companyName: widget.entrepriseNom,
         queueName: _displayQueueName,
       );
@@ -2083,7 +2078,7 @@ class _SlotsPageState extends State<SlotsPage>
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        _showErrorSnackbar('$e');
+        _showBookingError(e);
       }
     }
   }
@@ -2275,11 +2270,12 @@ class _SlotsPageState extends State<SlotsPage>
               ),
             ),
             const SizedBox(width: 12),
-            const Text('Réservation en cours...'),
+            const Text('Confirmation en cours…'),
           ],
         ),
         backgroundColor: widget.primaryGreen,
-        duration: const Duration(seconds: 10),
+        // Masquée dès la réponse du serveur ; marge large pour un réseau lent.
+        duration: const Duration(seconds: 30),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
@@ -2332,6 +2328,16 @@ class _SlotsPageState extends State<SlotsPage>
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     );
+  }
+
+  // Refus du serveur (créneau complet, quota atteint…) : message métier,
+  // affiché comme une information. Autre échec (réseau…) : erreur.
+  void _showBookingError(Object e) {
+    if (e is BookingException && e.reason != null) {
+      _showBlockedSnackbar(e.message);
+    } else {
+      _showErrorSnackbar('$e');
+    }
   }
 
   void _showErrorSnackbar(String message) {

@@ -13,6 +13,8 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
   // Streams stockés en instance — évite la réinscription à chaque rebuild.
   late final Stream<QuerySnapshot> _slotsStream;
   late final Stream<List<_DayCapacity>> _capacityStream;
+  // Document de la file : lu pour le réglage « Réservations simultanées ».
+  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _queueStream;
 
   bool _guideDismissed = false;
   bool _hasSlots = false;
@@ -29,6 +31,7 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
         .doc(widget.queueId);
     _slotsStream = queueRef.collection('timeSlots').snapshots();
     _capacityStream = _buildCapacityStream(queueRef);
+    _queueStream = queueRef.snapshots();
     if (widget.autoOpenSlotDialog) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _showTimeSlotDialog();
@@ -272,6 +275,8 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
                                           );
                                         }).toList(),
                                       ),
+                                    if (slots.length == 1)
+                                      _buildSecondPlageHint(),
                                   ],
                                 ),
                               ),
@@ -378,6 +383,54 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
     }
   }
 
+  // Rappel discret : « Réservations simultanées » n'a d'effet qu'à partir de
+  // 2 plages (une réservation active par plage). Affiché seulement quand la
+  // file n'en a qu'une — l'appelant le garantit — et hors parcours guidé
+  // (sinon il surgirait en même temps que la célébration de la 1re plage).
+  Widget _buildSecondPlageHint() {
+    return ListenableBuilder(
+      listenable: OnboardingService(),
+      builder: (context, _) {
+        if (OnboardingService().isActive) return const SizedBox.shrink();
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: _queueStream,
+          builder: (context, snap) {
+            final allow =
+                snap.data?.data()?['allowMultiplePerPlage'] as bool? ?? false;
+            if (!allow) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 1),
+                    child: Icon(
+                      Icons.info_outline_rounded,
+                      size: 13,
+                      color: _kGreen,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Réservations simultanées : ajoutez une 2e plage pour en profiter.',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: Colors.grey.shade600,
+                        height: 1.35,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _buildTimeSlotsGuide() {
     return SafeArea(
       child: Column(
@@ -420,7 +473,7 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
                   const SizedBox(height: 10),
                   Center(
                     child: Text(
-                      'Avant de créer votre première plage,\ncomprenez les 3 clés d\'une bonne configuration.',
+                      'Une plage est un horaire découpé en créneaux.\nVoici les 3 réglages à connaître.',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 14,
@@ -433,23 +486,64 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
                   // Les 3 paramètres
                   _buildGuideParam(
                     Icons.schedule_rounded,
-                    'L\'horaire',
-                    'Définit la fenêtre où vous recevez vos clients',
-                    'ex : 8h–12h · 14h–17h',
+                    'La plage horaire',
+                    'La période où vous recevez vos clients',
+                    'ex : 8h–12h ou 14h–17h',
                   ),
                   const SizedBox(height: 12),
                   _buildGuideParam(
                     Icons.timer_rounded,
-                    'La durée par client',
-                    'Le temps alloué à chaque service',
-                    'ex : 10 min · 15 min · 30 min',
+                    'La durée par créneau',
+                    'La plage est découpée en créneaux de durée fixe',
+                    'ex : 15 min → 8h00, 8h15, 8h30…',
                   ),
                   const SizedBox(height: 12),
                   _buildGuideParam(
                     Icons.people_rounded,
                     'La capacité du créneau',
-                    'Combien de clients vous recevez en simultané',
-                    'ex : 1 · 2 · 5 personnes',
+                    'Nombre de clients reçus en même temps',
+                    'ex : 1, 2 ou 5 personnes',
+                  ),
+                  const SizedBox(height: 16),
+                  // Mini-calcul : relie les 3 réglages à la capacité affichée
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade50,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.grey.shade200),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.calculate_rounded,
+                            color: _kGreen, size: 18),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text.rich(
+                            TextSpan(
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey.shade700,
+                              ),
+                              children: const [
+                                TextSpan(
+                                    text:
+                                        '8h–12h · créneaux de 15 min · 2 pers. = '),
+                                TextSpan(
+                                  text: '32 clients',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    color: _kGreen,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 24),
                   // Encart clé
@@ -469,7 +563,7 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
                         SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            'Vous pouvez créer plusieurs plages pour une même file — c\'est là que réside la puissance du système.',
+                            'Créez plusieurs plages dans une même file pour adapter vos réglages à chaque moment de la journée.',
                             style: TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.w600,

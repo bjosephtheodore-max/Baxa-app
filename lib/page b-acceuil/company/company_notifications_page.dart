@@ -261,6 +261,7 @@ const Map<String, _Style> _styles = {
     _Family.green,
     'Équipe',
   ),
+  'staff_left': _Style(Icons.person_remove_rounded, _Family.grey, 'Équipe'),
   'plage_recap': _Style(
     Icons.bar_chart_rounded,
     _Family.grey,
@@ -512,7 +513,7 @@ class _NotifCard extends StatelessWidget {
           ),
         ),
       );
-    } else if (type == 'staff_joined') {
+    } else if (type == 'staff_joined' || type == 'staff_left') {
       label = "Voir l'équipe";
       onTap = () => Navigator.push(
         context,

@@ -55,10 +55,22 @@ class CustomerEntry {
   final String id;
   final String name;
   final bool isCompanyManual;
+
+  /// Inscription manuelle : uid et rôle (`admin` / `staff`) de l'auteur, et
+  /// nom du membre au moment de l'inscription. Absents sur les inscriptions
+  /// antérieures à ce suivi (auteur inconnu → traitées comme celles de
+  /// l'admin : lui seul peut les supprimer).
+  final String? createdBy;
+  final String? createdByRole;
+  final String? createdByName;
+
   const CustomerEntry({
     required this.id,
     required this.name,
     required this.isCompanyManual,
+    this.createdBy,
+    this.createdByRole,
+    this.createdByName,
   });
 }
 
@@ -110,7 +122,10 @@ class AgendaService {
   factory AgendaService() => _instance;
   AgendaService._internal();
 
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  // `late` : Firestore n'est obtenu qu'au premier accès. Les calculs purs
+  // (stats, espaces libres, arrondis) restent ainsi utilisables — et
+  // testables — sans initialiser Firebase.
+  late final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   String _companyId = '';
 
   /// Doit être appelé une fois après login
@@ -241,6 +256,9 @@ class AgendaService {
           id: d.id,
           name: data['customerName'] as String? ?? 'Client',
           isCompanyManual: data['source'] == 'company_manual',
+          createdBy: data['createdBy'] as String?,
+          createdByRole: data['createdByRole'] as String?,
+          createdByName: data['createdByName'] as String?,
         );
       }).toList();
     } catch (_) {
@@ -743,7 +761,10 @@ class AgendaService {
       // Places restantes et réservées = uniquement sur les créneaux OUVERTS
       if (!slot.isBlocked) {
         placesReservees += slot.reserved;
-        placesRestantes += (slot.capacity - slot.reserved);
+        // Jamais négatif : un créneau surréservé ne doit pas réduire les
+        // places restantes des autres créneaux.
+        final free = slot.capacity - slot.reserved;
+        if (free > 0) placesRestantes += free;
       }
     }
 
@@ -799,8 +820,20 @@ class AgendaService {
     DateTime rangeStart,
     DateTime rangeEnd,
   ) {
-    final reservedSlots = existingSlots.where((s) => s.reserved > 0).toList()
-      ..sort((a, b) => a.start.compareTo(b.start));
+    // Seules les réservations qui touchent la plage comptent : un créneau
+    // réservé hors plage (plage raccourcie après coup) ne doit pas étirer
+    // l'espace libre au-delà de rangeEnd — sinon des créneaux seraient
+    // recréés hors plage. Il n'est lui-même jamais touché.
+    final reservedSlots =
+        existingSlots
+            .where(
+              (s) =>
+                  s.reserved > 0 &&
+                  s.start.isBefore(rangeEnd) &&
+                  s.end.isAfter(rangeStart),
+            )
+            .toList()
+          ..sort((a, b) => a.start.compareTo(b.start));
 
     final spans = <({DateTime start, DateTime end})>[];
     DateTime cursor = rangeStart;

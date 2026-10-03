@@ -51,7 +51,7 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions android = FirebaseOptions(
     apiKey: 'AIzaSyB1AIHDUGdjKnj7yhfpFbc_h6vScp_6kJU',
-    appId: '1:62903909022:android:eccbc1d9a071d8b044598f',
+    appId: '1:62903909022:android:d04b4aab6ba32dae44598f',
     messagingSenderId: '62903909022',
     projectId: 'baxa-5bab0',
     storageBucket: 'baxa-5bab0.firebasestorage.app',
@@ -59,20 +59,20 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyCJJc2UiESmtsSG3GCo8Ms35vsF5RAAqEw',
-    appId: '1:62903909022:ios:c685b4cd46423acb44598f',
+    appId: '1:62903909022:ios:b2cbc7c0819cd57844598f',
     messagingSenderId: '62903909022',
     projectId: 'baxa-5bab0',
     storageBucket: 'baxa-5bab0.firebasestorage.app',
-    iosBundleId: 'com.domain.baxa',
+    iosBundleId: 'com.baxa.app',
   );
 
   static const FirebaseOptions macos = FirebaseOptions(
     apiKey: 'AIzaSyCJJc2UiESmtsSG3GCo8Ms35vsF5RAAqEw',
-    appId: '1:62903909022:ios:c685b4cd46423acb44598f',
+    appId: '1:62903909022:ios:b2cbc7c0819cd57844598f',
     messagingSenderId: '62903909022',
     projectId: 'baxa-5bab0',
     storageBucket: 'baxa-5bab0.firebasestorage.app',
-    iosBundleId: 'com.domain.baxa',
+    iosBundleId: 'com.baxa.app',
   );
 
   static const FirebaseOptions windows = FirebaseOptions(

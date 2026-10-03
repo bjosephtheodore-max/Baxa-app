@@ -1,12 +1,15 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:baxa/services/support_constants.dart';
 import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/notification_settings_page.dart';
+import 'package:baxa/widgets/profession_picker_sheet.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -245,6 +248,24 @@ class _PersonaPageState extends State<PersonaPage> {
     }
   }
 
+  // ── Profession : liste fermée (identique à celle de l'inscription) ────────
+  Future<void> _showProfessionPicker() async {
+    final current = _userData?['profession'] as String?;
+    final selected = await showProfessionPickerSheet(
+      context,
+      current: (current != null && current.isNotEmpty) ? current : null,
+      showSkip: false,
+    );
+    if (selected == null) return;
+    await _updateField('profession', selected);
+    unawaited(
+      FirebaseAnalytics.instance.setUserProperty(
+        name: 'profession',
+        value: selected,
+      ),
+    );
+  }
+
   // ── Liens externes ───────────────────────────────────────────────────────
 
   Future<void> _openAvis() async {
@@ -357,12 +378,7 @@ class _PersonaPageState extends State<PersonaPage> {
                                 true
                             ? _userData!['profession']
                             : 'Non renseigné',
-                        onEdit: () => _showEditDialog(
-                          title: 'Modifier la profession',
-                          field: 'profession',
-                          currentValue: _userData?['profession'] ?? '',
-                          optional: true,
-                        ),
+                        onEdit: _showProfessionPicker,
                       ),
                       _buildDivider(),
                       _buildReadOnlyRow(

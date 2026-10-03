@@ -20,6 +20,10 @@ const TASKS_QUEUE = "reservation-notifications";
 // si la limite change là-bas, la changer ici aussi.
 const MAX_DAILY_RESERVATIONS = 5;
 
+// Nombre maximum de membres actifs dans une équipe.
+// MIROIR de kMaxActiveStaff (lib/services/booking_constants.dart).
+const MAX_ACTIVE_STAFF = 5;
+
 // ────────────────────────────────────────────────────────────────────
 // Une file est « fermée maintenant » si une fermeture (closureStart /
 // closureEnd ; closureEnd absent = fermeture indéterminée) englobe
@@ -112,6 +116,7 @@ const COMPANY_NOTIF_TTL_HOURS = {
   plage_full: 2 * 24,
   plage_near_full: 2 * 24,
   staff_joined: 2 * 24,
+  staff_left: 2 * 24,
   day_digest: 24,
   queue_checkin: 24,
 };
@@ -2021,6 +2026,244 @@ exports.onStaffJoined = functions.firestore
     });
     return null;
   });
+
+// ── Équipe : rejoindre / quitter (fonctions appelables) ─────────────
+// Toute l'adhésion à une équipe passe par le serveur : les règles
+// Firestore interdisent au client de créer son document staff. C'est ce
+// qui garantit qu'on ne devient membre QU'AVEC un code valide, que la
+// limite MAX_ACTIVE_STAFF est tenue, et qu'un ancien membre (parti ou
+// retiré) peut être réactivé avec un nouveau code.
+
+const {HttpsError} = functions.https;
+
+function normalizeInviteCode(raw) {
+  return String(raw || "").trim().toUpperCase();
+}
+
+/** Invitation active portant ce code, `{used: true}` si le code existe
+ *  mais a déjà servi, ou null s'il n'existe pas. */
+async function findInvite(code) {
+  const snap = await db
+    .collectionGroup("invitations")
+    .where("code", "==", code)
+    .get();
+  if (snap.empty) return null;
+  const active = snap.docs.find((d) => d.get("active") === true);
+  return active ? {doc: active} : {used: true};
+}
+
+function inviteCompanyId(inviteDoc) {
+  return inviteDoc.get("companyId") || inviteDoc.ref.parent.parent.id;
+}
+
+async function requireActiveInvite(rawCode) {
+  const code = normalizeInviteCode(rawCode);
+  if (!code) {
+    throw new HttpsError("invalid-argument", "Code manquant.");
+  }
+  const found = await findInvite(code);
+  if (!found) throw new HttpsError("not-found", "Code invalide.");
+  if (found.used) {
+    throw new HttpsError("failed-precondition", "Code déjà utilisé.");
+  }
+  return found.doc;
+}
+
+// Vérification du code AVANT connexion (1re étape de l'écran staff) :
+// renvoie seulement le nom de l'entreprise. Les invitations ne sont plus
+// lisibles publiquement, cette fonction les remplace.
+exports.checkInviteCode = functions.https.onCall(async (data) => {
+  const invite = await requireActiveInvite(data && data.code);
+  const companyId = inviteCompanyId(invite);
+  const activeSnap = await db
+    .collection("companies").doc(companyId)
+    .collection("staff")
+    .where("isActive", "==", true)
+    .get();
+  if (activeSnap.size >= MAX_ACTIVE_STAFF) {
+    throw new HttpsError("resource-exhausted", "Équipe complète.");
+  }
+  return {companyName: invite.get("companyName") || ""};
+});
+
+// Adhésion avec un code : nouveau membre OU ancien membre réactivé.
+exports.joinTeamWithCode = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new HttpsError("unauthenticated", "Connexion requise.");
+  }
+  const uid = context.auth.uid;
+  const token = context.auth.token || {};
+  const invite = await requireActiveInvite(data && data.code);
+  const companyId = inviteCompanyId(invite);
+  const companyName = invite.get("companyName") || "";
+
+  if (uid === companyId) {
+    throw new HttpsError(
+      "failed-precondition", "Ce compte est celui de l'entreprise.",
+    );
+  }
+
+  const staffCol = db.collection("companies").doc(companyId)
+    .collection("staff");
+  const staffRef = staffCol.doc(uid);
+  const userRef = db.collection("users").doc(uid);
+  const ownCompanyRef = db.collection("companies").doc(uid);
+
+  const result = await db.runTransaction(async (tx) => {
+    // Toutes les lectures d'abord (contrainte des transactions).
+    const [inv, staffDoc, userDoc, ownCompany, activeSnap] =
+      await Promise.all([
+        tx.get(invite.ref),
+        tx.get(staffRef),
+        tx.get(userRef),
+        tx.get(ownCompanyRef),
+        tx.get(staffCol.where("isActive", "==", true)),
+      ]);
+
+    if (ownCompany.exists) {
+      throw new HttpsError(
+        "failed-precondition", "Ce compte est déjà un compte entreprise.",
+      );
+    }
+
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const userData = {role: "staff", companyId, companyName, updatedAt: now};
+
+    if (staffDoc.exists && staffDoc.get("isActive") === true) {
+      // Déjà membre actif : simple reconnexion, le code reste disponible.
+      tx.set(userRef, userData, {merge: true});
+      return {status: "already"};
+    }
+
+    if (!inv.exists || inv.get("active") !== true) {
+      throw new HttpsError("failed-precondition", "Code déjà utilisé.");
+    }
+    if (activeSnap.size >= MAX_ACTIVE_STAFF) {
+      throw new HttpsError("resource-exhausted", "Équipe complète.");
+    }
+
+    // Membre d'une AUTRE équipe : on le détache de l'ancienne (un compte
+    // staff = une seule équipe).
+    const prev = userDoc.exists ? userDoc.data() : {};
+    let prevStaffRef = null;
+    if (prev.role === "staff" && prev.companyId &&
+        prev.companyId !== companyId) {
+      prevStaffRef = db
+        .collection("companies").doc(prev.companyId)
+        .collection("staff").doc(uid);
+      const prevStaff = await tx.get(prevStaffRef);
+      if (!prevStaff.exists || prevStaff.get("isActive") !== true) {
+        prevStaffRef = null;
+      }
+    }
+
+    const phone = token.phone_number || "";
+    const email = token.email || "";
+
+    if (prevStaffRef) {
+      tx.update(prevStaffRef, {isActive: false, leftAt: now});
+    }
+
+    if (staffDoc.exists) {
+      // Retour d'un ancien membre : on garde son nom (posé par l'admin)
+      // et sa date d'arrivée d'origine.
+      const update = {
+        isActive: true,
+        rejoinedAt: now,
+        lastSeenAt: now,
+        leftAt: admin.firestore.FieldValue.delete(),
+      };
+      if (phone) update.phone = phone;
+      if (email) update.email = email;
+      tx.update(staffRef, update);
+    } else {
+      tx.set(staffRef, {
+        uid,
+        phone,
+        email,
+        displayName: token.name || "",
+        companyId,
+        role: "staff",
+        isActive: true,
+        joinedAt: now,
+        lastSeenAt: now,
+      });
+    }
+
+    tx.update(invite.ref, {active: false, usedBy: uid, usedAt: now});
+    tx.set(userRef, userData, {merge: true});
+
+    return {
+      status: staffDoc.exists ? "rejoined" : "joined",
+      name: (staffDoc.exists && staffDoc.get("displayName")) ||
+        token.name || email || phone || "Un membre",
+    };
+  });
+
+  // Un nouveau document déclenche onStaffJoined ; une réactivation non,
+  // d'où la notification envoyée ici.
+  if (result.status === "rejoined") {
+    await writeCompanyNotification(companyId, {
+      type: "staff_joined",
+      title: "👋 Retour dans l'équipe",
+      body: `${result.name} a rejoint à nouveau votre équipe.`,
+      audience: "admin",
+      payload: {staffUid: uid, staffName: result.name},
+    });
+  }
+
+  return {companyId, companyName};
+});
+
+// Départ volontaire (« Quitter l'équipe »). La simple déconnexion, elle,
+// ne touche à rien : le membre reste dans l'équipe.
+exports.leaveTeam = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new HttpsError("unauthenticated", "Connexion requise.");
+  }
+  const uid = context.auth.uid;
+  const userRef = db.collection("users").doc(uid);
+  const userDoc = await userRef.get();
+  const companyId = userDoc.exists ? userDoc.get("companyId") : null;
+  if (!userDoc.exists || userDoc.get("role") !== "staff" || !companyId) {
+    return {ok: true};
+  }
+
+  const staffRef = db
+    .collection("companies").doc(companyId)
+    .collection("staff").doc(uid);
+  const staffDoc = await staffRef.get();
+  const wasActive = staffDoc.exists && staffDoc.get("isActive") === true;
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  const del = admin.firestore.FieldValue.delete();
+
+  const batch = db.batch();
+  if (wasActive) batch.update(staffRef, {isActive: false, leftAt: now});
+  batch.update(userRef, {
+    role: del,
+    companyId: del,
+    companyName: del,
+    updatedAt: now,
+  });
+  await batch.commit();
+
+  if (wasActive) {
+    const d = staffDoc.data() || {};
+    const name = d.displayName || d.email || d.phone || "Un membre";
+    await writeCompanyNotification(companyId, {
+      type: "staff_left",
+      title: "Départ de l'équipe",
+      body: `${name} a quitté votre équipe.`,
+      audience: "admin",
+      payload: {staffUid: uid, staffName: name},
+    });
+  }
+  return {ok: true};
+});
+
+// ── Réservations client (réserver / remplacer / annuler) ────────────
+// Fonction 2e génération en africa-south1 : voir booking.js.
+exports.booking = require("./booking").booking;
 
 // ── Plage complète / bientôt complète (déclenché à chaque réservation) ─
 async function checkPlageFillAfterReservation(companyId, resa) {

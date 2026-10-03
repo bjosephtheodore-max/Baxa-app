@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/booking_constants.dart';
 import 'package:baxa/services/slot_generation_service.dart';
@@ -62,7 +64,12 @@ class _SettingsPageState extends State<SettingsPage> {
   int _queueCount = 0;
   bool _isCreatingQueue = false;
   late final Stream<QuerySnapshot> _queuesStream;
-  final Map<String, Stream<int>> _capacityStreams = {};
+  final Map<String, Stream<_QueueCapacity>> _capacityStreams = {};
+  // Dernière valeur reçue par file : les snapshots Firestore sont diffusés
+  // (broadcast) sans rejouer le dernier état, donc une carte recréée qui se
+  // réabonne au flux en cache n'obtiendrait rien tant que les plages ne
+  // changent pas → spinner infini. On la lui fournit en initialData.
+  final Map<String, _QueueCapacity> _lastCapacity = {};
 
   @override
   void initState() {
@@ -257,6 +264,7 @@ class _SettingsPageState extends State<SettingsPage> {
         queueId,
         () => _calculateTotalCapacity(queueId),
       ),
+      initialCapacity: _lastCapacity[queueId],
       onTap: () {
         if (OnboardingService().step == 4) {
           OnboardingService().advance(4); // 4 → 5
@@ -275,17 +283,15 @@ class _SettingsPageState extends State<SettingsPage> {
       onMoreTap: () => _showQueueActions(queueId, queueData),
     );
 
+    // PulsingGlow toujours présent (seul `active` varie) : l'ajouter/le retirer
+    // à l'étape 4 détruisait et recréait la carte, donc son StreamBuilder.
     return ListenableBuilder(
       listenable: OnboardingService(),
-      builder: (_, child) {
-        if (OnboardingService().step == 4) {
-          return PulsingGlow(
-            borderRadius: BorderRadius.circular(14),
-            child: child!,
-          );
-        }
-        return child!;
-      },
+      builder: (_, child) => PulsingGlow(
+        active: OnboardingService().step == 4,
+        borderRadius: BorderRadius.circular(14),
+        child: child!,
+      ),
       child: card,
     );
   }
@@ -769,7 +775,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         ),
                         const SizedBox(height: 12),
 
-                        // ── Plusieurs réservations par jour ──────────
+                        // ── Réservations simultanées ─────────────────
                         Container(
                           padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
@@ -790,7 +796,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                       CrossAxisAlignment.start,
                                   children: [
                                     const Text(
-                                      'Plusieurs réservations par jour',
+                                      'Réservations simultanées',
                                       style: TextStyle(
                                         fontWeight: FontWeight.w700,
                                         fontSize: 13,
@@ -799,10 +805,10 @@ class _SettingsPageState extends State<SettingsPage> {
                                     ),
                                     const SizedBox(height: 3),
                                     Text(
-                                      'Un client peut réserver une fois '
-                                      'par plage (ex. déjeuner + dîner) au '
-                                      'lieu d\'une seule fois pour toute '
-                                      'la file.',
+                                      'Vos clients doivent attendre que leur '
+                                      'réservation soit passée pour en refaire '
+                                      'une. Activez pour qu\'ils en cumulent '
+                                      'plusieurs (ex. midi et soir).',
                                       style: TextStyle(
                                         fontSize: 11.5,
                                         height: 1.35,
@@ -1574,7 +1580,7 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Stream<int> _calculateTotalCapacity(String queueId) {
+  Stream<_QueueCapacity> _calculateTotalCapacity(String queueId) {
     return _firestore
         .collection('companies')
         .doc(_companyId)
@@ -1596,7 +1602,11 @@ class _SettingsPageState extends State<SettingsPage> {
               total += slotsCount * capacity;
             }
           }
-          return total;
+          // Toutes les plages comptent, y compris celles en suppression
+          // programmée : « À configurer » = aucune plage du tout.
+          final result = (plages: snapshot.docs.length, total: total);
+          _lastCapacity[queueId] = result;
+          return result;
         });
   }
 
@@ -1647,6 +1657,14 @@ class _SettingsPageState extends State<SettingsPage> {
             'allowMultiplePerPlage': created.allowMultiplePerPlage,
             'createdAt': FieldValue.serverTimestamp(),
           });
+
+      unawaited(
+        FirebaseAnalytics.instance.logEvent(
+          name: 'queue_created',
+          parameters: {'company_id': _companyId ?? '', 'queue_id': docRef.id},
+        ),
+      );
+
       if (!mounted) return;
 
       final inOnboarding = OnboardingService().step == 3;
@@ -1688,6 +1706,9 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
+// Nombre de plages de la file + capacité totale (clients/jour) qu'elles offrent.
+typedef _QueueCapacity = ({int plages, int total});
+
 // ============================================================
 // CARTE FILE D'ATTENTE — avec animation "push" au press
 // ============================================================
@@ -1696,7 +1717,8 @@ class _AnimatedQueueCard extends StatefulWidget {
   final String subtitle;
   final bool open; // false = fermée aux nouvelles réservations maintenant
   final DateTime? closurePlannedFor; // fermeture planifiée, pas encore active
-  final Stream<int> capacityStream;
+  final Stream<_QueueCapacity> capacityStream;
+  final _QueueCapacity? initialCapacity;
   final VoidCallback onTap;
   final VoidCallback onMoreTap;
   final DateTime? deleteAfter;
@@ -1707,6 +1729,7 @@ class _AnimatedQueueCard extends StatefulWidget {
     required this.open,
     this.closurePlannedFor,
     required this.capacityStream,
+    this.initialCapacity,
     required this.onTap,
     required this.onMoreTap,
     this.deleteAfter,
@@ -1849,20 +1872,49 @@ class _AnimatedQueueCardState extends State<_AnimatedQueueCard> {
                                 const SizedBox(width: 8),
 
                                 // Capacité totale
-                                StreamBuilder<int>(
+                                StreamBuilder<_QueueCapacity>(
                                   stream: widget.capacityStream,
+                                  initialData: widget.initialCapacity,
                                   builder: (context, snap) {
-                                    if (snap.connectionState ==
-                                        ConnectionState.waiting) {
-                                      return const SizedBox(
-                                        width: 18,
-                                        height: 18,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
+                                    final data = snap.data;
+                                    if (data == null) {
+                                      // Vraie première lecture uniquement.
+                                      if (snap.connectionState ==
+                                          ConnectionState.waiting) {
+                                        return const SizedBox(
+                                          width: 18,
+                                          height: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        );
+                                      }
+                                      return const SizedBox.shrink();
+                                    }
+                                    // Aucune plage du tout : la file existe
+                                    // mais personne ne peut y réserver.
+                                    if (data.plages == 0) {
+                                      return Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                          vertical: 5,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.orange.shade50,
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                        ),
+                                        child: Text(
+                                          'À configurer',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.orange.shade700,
+                                          ),
                                         ),
                                       );
                                     }
-                                    final total = snap.data ?? 0;
+                                    final total = data.total;
                                     if (total == 0) {
                                       return const SizedBox.shrink();
                                     }

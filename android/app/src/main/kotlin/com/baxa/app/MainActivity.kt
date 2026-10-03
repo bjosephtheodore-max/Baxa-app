@@ -1,4 +1,4 @@
-package com.domain.baxa
+package com.baxa.app
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'booking_constants.dart';
 
 /// ============================================================
@@ -34,9 +37,6 @@ enum RuleViolation {
   /// Créneau actif dans cette file → proposer remplacement
   activeInSameQueue,
 
-  /// Cooldown 5 min non écoulé après fin de créneau dans cette file
-  cooldownNotElapsed,
-
   /// Chevauchement horaire avec une réservation dans cette entreprise
   overlapInSameCompany,
 
@@ -54,15 +54,31 @@ enum RuleViolation {
 /// SERVICE PRINCIPAL
 /// ============================================================
 class ReservationRulesService {
-  final FirebaseFirestore _fs = FirebaseFirestore.instance;
+  /// Région de la fonction `booking` : à côté de la base Firestore
+  /// (Johannesburg), voir functions/booking.js.
+  static const String bookingRegion = 'africa-south1';
+
+  // Injectables pour les tests (base et session simulées) ; l'app utilise
+  // toujours les instances Firebase réelles.
+  ReservationRulesService({
+    FirebaseFirestore? firestore,
+    FirebaseAuth? auth,
+    FirebaseFunctions? functions,
+  }) : _fs = firestore ?? FirebaseFirestore.instance,
+       _auth = auth ?? FirebaseAuth.instance,
+       _functionsOverride = functions;
+
+  final FirebaseFirestore _fs;
+  final FirebaseAuth _auth;
+  final FirebaseFunctions? _functionsOverride;
+
+  // Obtenu au premier appel seulement : les vérifications (checkCanReserve)
+  // restent ainsi testables sans initialiser Firebase.
+  late final FirebaseFunctions _functions =
+      _functionsOverride ??
+      FirebaseFunctions.instanceFor(region: bookingRegion);
 
   // ── Helpers ──────────────────────────────────────────────────
-
-  bool _isExpired(Map<String, dynamic> resData) {
-    final end = (resData['slotEnd'] as Timestamp).toDate();
-    final cooldownEnd = end.add(Duration(minutes: kCooldownSameQueueMinutes));
-    return DateTime.now().isAfter(cooldownEnd);
-  }
 
   bool _overlaps(
     DateTime aStart,
@@ -76,15 +92,6 @@ class ReservationRulesService {
   String _todayStr() {
     final now = DateTime.now();
     return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-  }
-
-  /// Concatène prénom + nom depuis un document `users/{uid}`.
-  /// Retourne null si aucun des deux n'est renseigné.
-  String? _fullName(Map<String, dynamic> userData) {
-    final prenom = (userData['prenom'] as String?)?.trim() ?? '';
-    final nom = (userData['nom'] as String?)?.trim() ?? '';
-    final full = [prenom, nom].where((s) => s.isNotEmpty).join(' ');
-    return full.isEmpty ? null : full;
   }
 
   // ── Quota journalier (pré-vérification) ──────────────────────
@@ -129,7 +136,7 @@ class ReservationRulesService {
     required String companyId,
     required String queueId,
   }) async {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = _auth.currentUser;
     if (user == null) return 0;
 
     final active = await _getUserActiveReservations(user.uid);
@@ -158,7 +165,7 @@ class ReservationRulesService {
     // par plage (timeSlotId) au lieu d'une seule pour toute la file.
     bool allowMultiplePerPlage = false,
   }) async {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = _auth.currentUser;
     if (user == null) return const RuleCheckResult.allowed();
 
     // ── Règle 0a : créneau déjà commencé ─────────────────────
@@ -266,18 +273,9 @@ class ReservationRulesService {
           : sameQueue;
 
       if (blocking.isNotEmpty) {
-        final res = blocking.first;
-        final data = res.data() as Map<String, dynamic>;
-
-        if (!_isExpired(data)) {
-          return RuleCheckResult.blocked(
-            RuleViolation.activeInSameQueue,
-            conflictingReservation: res,
-          );
-        }
         return RuleCheckResult.blocked(
-          RuleViolation.cooldownNotElapsed,
-          conflictingReservation: res,
+          RuleViolation.activeInSameQueue,
+          conflictingReservation: blocking.first,
         );
       }
       // Réglage activé, plage différente : autorisé, mais on remonte les
@@ -293,28 +291,13 @@ class ReservationRulesService {
 
   // ── MESSAGE UI ────────────────────────────────────────────────
 
-  static String violationMessage(
-    RuleViolation violation, {
-    Map<String, dynamic>? conflictData,
-  }) {
+  static String violationMessage(RuleViolation violation) {
     switch (violation) {
       case RuleViolation.globalLimitReached:
         return 'Vous avez atteint votre limite de $kMaxDailyReservations réservations pour aujourd\'hui. Revenez demain pour réserver à nouveau.';
 
       case RuleViolation.activeInSameQueue:
         return '';
-
-      case RuleViolation.cooldownNotElapsed:
-        if (conflictData != null) {
-          final end = (conflictData['slotEnd'] as Timestamp).toDate();
-          final available = end.add(
-            Duration(minutes: kCooldownSameQueueMinutes),
-          );
-          final h = available.hour.toString().padLeft(2, '0');
-          final m = available.minute.toString().padLeft(2, '0');
-          return 'Vous pourrez réserver à nouveau dans cette file à partir de $h:$m.';
-        }
-        return 'Veuillez attendre la fin de votre créneau actuel avant de réserver à nouveau.';
 
       case RuleViolation.overlapInSameCompany:
         return 'Vous avez déjà un rendez-vous prévu à cet horaire.';
@@ -330,407 +313,141 @@ class ReservationRulesService {
     }
   }
 
-  // ── TRANSACTION : RÉSERVER ────────────────────────────────────
+  // ── ÉCRITURES : via la Cloud Function `booking` ───────────────
+  //
+  // Le client ne peut plus écrire lui-même réservations, compteurs ni quota
+  // (firestore.rules) : réserver / remplacer / annuler passent par le
+  // serveur, qui refait toutes les vérifications puis écrit en une seule
+  // transaction. Les règles de checkCanReserve ci-dessus restent ici pour
+  // les messages immédiats ; le serveur a le dernier mot.
+
+  /// Réveille la fonction de réservation (page créneaux ouverte) pour que
+  /// le premier appui sur « Réserver » ne subisse pas le démarrage à froid.
+  /// Sans effet visible ; toute erreur est ignorée.
+  void warmUp() {
+    unawaited(
+      _callBooking({'action': 'warmup'}).then<void>((_) {}, onError: (_) {}),
+    );
+  }
+
+  Future<Map<String, dynamic>> _callBooking(Map<String, dynamic> data) async {
+    try {
+      final res = await _functions.httpsCallable('booking').call(data);
+      return Map<String, dynamic>.from(res.data as Map);
+    } on FirebaseFunctionsException catch (e) {
+      final details = e.details;
+      throw BookingException(
+        e.message?.isNotEmpty == true
+            ? e.message!
+            : 'La réservation n\'a pas pu aboutir. Réessayez.',
+        reason: details is Map ? details['reason'] as String? : null,
+      );
+    } catch (e) {
+      if (e is BookingException) rethrow;
+      throw const BookingException(
+        'Connexion impossible. Vérifiez votre réseau et réessayez.',
+      );
+    }
+  }
+
+  // ── RÉSERVER ──────────────────────────────────────────────────
 
   Future<String> reserveSlot({
     required String companyId,
     required String queueId,
     required String timeSlotId,
     required String slotDocId,
-    required DateTime slotStart,
-    required DateTime slotEnd,
     String? companyName,
     String? queueName,
   }) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) throw Exception('Utilisateur non connecté');
-
-    final queueRef = _fs
-        .collection('companies')
-        .doc(companyId)
-        .collection('queues')
-        .doc(queueId);
-
-    final slotRef = queueRef.collection('slots').doc(slotDocId);
-
-    final reservationRef = _fs
-        .collection('companies')
-        .doc(companyId)
-        .collection('reservations')
-        .doc();
-
-    final dateStr =
-        '${slotStart.year}-'
-        '${slotStart.month.toString().padLeft(2, '0')}-'
-        '${slotStart.day.toString().padLeft(2, '0')}';
-    final dailyStatsRef = _fs
-        .collection('companies')
-        .doc(companyId)
-        .collection('queues')
-        .doc(queueId)
-        .collection('dailyStats')
-        .doc(dateStr);
-
-    final userRef = _fs.collection('users').doc(user.uid);
-    final timeSlotRef = queueRef.collection('timeSlots').doc(timeSlotId);
-
-    await _fs.runTransaction((tx) async {
-      // Reads d'abord (obligation Firestore)
-      final freshSlot = await tx.get(slotRef);
-      final freshUser = await tx.get(userRef);
-      final freshQueue = await tx.get(queueRef);
-      final freshTimeSlot = await tx.get(timeSlotRef);
-
-      if (!freshSlot.exists) throw Exception('Créneau introuvable');
-
-      // File fermée par l'entreprise (fermeture planifiée ou immédiate) :
-      // aucune nouvelle réservation possible, même depuis une page déjà
-      // ouverte ou un client de mauvaise foi.
-      final qd = freshQueue.data();
-      if (isQueueClosedNow(
-        (qd?['closureStart'] as Timestamp?)?.toDate(),
-        (qd?['closureEnd'] as Timestamp?)?.toDate(),
-      )) {
-        throw Exception(
-          'Les réservations pour cette file sont fermées pour le moment.',
-        );
-      }
-
-      // Plage en cours de suppression programmée : plus aucune nouvelle
-      // réservation, y compris sur un créneau déjà partiellement rempli.
-      if (freshTimeSlot.data()?['deleteAfter'] != null) {
-        throw Exception(
-          'Cette plage horaire n\'accepte plus de nouvelles réservations.',
-        );
-      }
-
-      final freshData = freshSlot.data()!;
-      final capacity = (freshData['capacity'] ?? 1) as int;
-      final reserved = (freshData['reserved'] ?? 0) as int;
-      final status = (freshData['status'] ?? 'open') as String;
-      final start = (freshData['start'] as Timestamp).toDate().toUtc();
-
-      if (status != 'open') {
-        throw Exception('Ce créneau n\'est plus disponible');
-      }
-      if (reserved >= capacity) throw Exception('Ce créneau est complet');
-      if (start.difference(DateTime.now().toUtc()).inMinutes < 1) {
-        throw Exception('Ce créneau a déjà commencé');
-      }
-
-      // Filet serveur : l'anticipation max et le délai min de la file ne sont
-      // que des filtres d'affichage côté client. On les fait respecter ici
-      // aussi, pour qu'une liste périmée / une course / un client modifié ne
-      // puisse pas réserver hors de la fenêtre voulue. Ne touche ni la
-      // génération des créneaux ni ce que voit l'entreprise.
-      final maxAdvanceDays = (qd?['maxAdvanceDays'] as num?)?.toInt();
-      if (maxAdvanceDays != null) {
-        // Même borne que le pré-check (Règle 0b) : autorisé jusqu'à la fin
-        // du jour « aujourd'hui + maxAdvanceDays ».
-        final n = DateTime.now();
-        final lastDay = DateTime(n.year, n.month, n.day)
-            .add(Duration(days: maxAdvanceDays + 1));
-        if (start.toLocal().isAfter(lastDay)) {
-          throw Exception(
-            'Ce créneau est trop loin dans le temps pour être réservé.',
-          );
-        }
-      }
-      final deadlineMin =
-          (freshData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
-      if (deadlineMin > 0 &&
-          start.difference(DateTime.now().toUtc()).inMinutes < deadlineMin) {
-        throw Exception('Il est trop tard pour réserver ce créneau.');
-      }
-
-      // Double vérification atomique du quota journalier
-      final userData = freshUser.data() ?? {};
-      final today = _todayStr();
-      final lastDate = userData['lastBookingDate'] as String? ?? '';
-      final dailyCount = lastDate == today
-          ? (userData['dailyBookingCount'] as int? ?? 0)
-          : 0;
-      if (dailyCount >= kMaxDailyReservations) {
-        throw Exception(
-          'Limite de $kMaxDailyReservations réservations atteinte pour aujourd\'hui',
-        );
-      }
-
-      final customerName = _fullName(userData);
-
-      // Writes
-      tx.set(reservationRef, {
-        'companyId': companyId,
-        'queueId': queueId,
-        'timeSlotId': timeSlotId,
-        'slotId': slotDocId,
-        'customerId': user.uid,
-        'customerEmail': user.email,
-        if (customerName != null) 'customerName': customerName,
-        'slotStart': Timestamp.fromDate(slotStart.toUtc()),
-        'slotEnd': Timestamp.fromDate(slotEnd.toUtc()),
-        'createdAt': FieldValue.serverTimestamp(),
-        'status': 'confirmed',
-        if (companyName != null && companyName.isNotEmpty)
-          'companyName': companyName,
-        if (queueName != null && queueName.isNotEmpty) 'queueName': queueName,
-      });
-
-      tx.update(slotRef, {'reserved': FieldValue.increment(1)});
-
-      tx.set(dailyStatsRef, {
-        'reserved': FieldValue.increment(1),
-        'available': FieldValue.increment(-1),
-      }, SetOptions(merge: true));
-
-      // Incrémenter le quota journalier (les annulations ne restituent pas)
-      tx.set(userRef, {
-        'lastBookingDate': today,
-        'dailyBookingCount': lastDate == today ? FieldValue.increment(1) : 1,
-      }, SetOptions(merge: true));
+    if (_auth.currentUser == null) {
+      throw const BookingException('Utilisateur non connecté');
+    }
+    final result = await _callBooking({
+      'action': 'reserve',
+      'companyId': companyId,
+      'queueId': queueId,
+      'slotId': slotDocId,
+      'timeSlotId': timeSlotId,
+      if (companyName != null && companyName.isNotEmpty)
+        'companyName': companyName,
+      if (queueName != null && queueName.isNotEmpty) 'queueName': queueName,
     });
 
-    return reservationRef.id;
+    unawaited(
+      FirebaseAnalytics.instance.logEvent(
+        name: 'booking_created',
+        parameters: {
+          'company_id': companyId,
+          'queue_id': queueId,
+          'time_slot_id': timeSlotId,
+        },
+      ),
+    );
+
+    return result['reservationId'] as String;
   }
 
-  // ── TRANSACTION : REMPLACER ───────────────────────────────────
+  // ── REMPLACER ─────────────────────────────────────────────────
 
-  /// Annule l'ancienne réservation et crée la nouvelle — atomique.
+  /// Annule l'ancienne réservation et crée la nouvelle — atomique, côté
+  /// serveur.
   Future<String> replaceReservation({
     required String oldReservationId,
     required String oldCompanyId,
-    required String oldSlotDocId,
-    required String oldQueueId,
     required String newCompanyId,
     required String newQueueId,
     required String newTimeSlotId,
     required String newSlotDocId,
-    required DateTime newSlotStart,
-    required DateTime newSlotEnd,
     String? companyName,
     String? queueName,
   }) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) throw Exception('Utilisateur non connecté');
-
-    // Filet de sécurité : remplacer un créneau par lui-même n'a aucun sens
-    // (annulerait puis recréerait la même réservation à l'identique).
-    if (oldCompanyId == newCompanyId &&
-        oldQueueId == newQueueId &&
-        oldSlotDocId == newSlotDocId) {
-      throw Exception('Vous avez déjà réservé ce créneau.');
+    if (_auth.currentUser == null) {
+      throw const BookingException('Utilisateur non connecté');
     }
-
-    final oldResRef = _fs
-        .collection('companies')
-        .doc(oldCompanyId)
-        .collection('reservations')
-        .doc(oldReservationId);
-
-    final oldSlotRef = _fs
-        .collection('companies')
-        .doc(oldCompanyId)
-        .collection('queues')
-        .doc(oldQueueId)
-        .collection('slots')
-        .doc(oldSlotDocId);
-
-    final newQueueRef = _fs
-        .collection('companies')
-        .doc(newCompanyId)
-        .collection('queues')
-        .doc(newQueueId);
-
-    final newSlotRef = newQueueRef.collection('slots').doc(newSlotDocId);
-
-    final newResRef = _fs
-        .collection('companies')
-        .doc(newCompanyId)
-        .collection('reservations')
-        .doc();
-
-    final oldDateStr =
-        '${newSlotStart.year}-'
-        '${newSlotStart.month.toString().padLeft(2, '0')}-'
-        '${newSlotStart.day.toString().padLeft(2, '0')}';
-    // oldSlot date — lire depuis oldSlotDocId n'est pas disponible ici,
-    // on suppose que le remplacement reste sur le même jour (cas standard)
-    final newDateStr =
-        '${newSlotStart.year}-'
-        '${newSlotStart.month.toString().padLeft(2, '0')}-'
-        '${newSlotStart.day.toString().padLeft(2, '0')}';
-    final oldDailyStatsRef = _fs
-        .collection('companies')
-        .doc(oldCompanyId)
-        .collection('queues')
-        .doc(oldQueueId)
-        .collection('dailyStats')
-        .doc(oldDateStr);
-    final newDailyStatsRef = _fs
-        .collection('companies')
-        .doc(newCompanyId)
-        .collection('queues')
-        .doc(newQueueId)
-        .collection('dailyStats')
-        .doc(newDateStr);
-
-    final userRef = _fs.collection('users').doc(user.uid);
-
-    await _fs.runTransaction((tx) async {
-      // Reads d'abord (obligation Firestore)
-      final freshNewSlot = await tx.get(newSlotRef);
-      final freshUser = await tx.get(userRef);
-      final freshNewQueue = await tx.get(newQueueRef);
-      if (!freshNewSlot.exists) throw Exception('Nouveau créneau introuvable');
-
-      final nq = freshNewQueue.data();
-      if (isQueueClosedNow(
-        (nq?['closureStart'] as Timestamp?)?.toDate(),
-        (nq?['closureEnd'] as Timestamp?)?.toDate(),
-      )) {
-        throw Exception(
-          'Les réservations pour cette file sont fermées pour le moment.',
-        );
-      }
-
-      // Plage en cours de suppression programmée : plus de réservation.
-      final newTsId = freshNewSlot.data()?['timeSlotId'] as String?;
-      if (newTsId != null && newTsId.isNotEmpty) {
-        final freshNewTs = await tx.get(
-          newQueueRef.collection('timeSlots').doc(newTsId),
-        );
-        if (freshNewTs.data()?['deleteAfter'] != null) {
-          throw Exception(
-            'Cette plage horaire n\'accepte plus de nouvelles réservations.',
-          );
-        }
-      }
-
-      final newData = freshNewSlot.data()!;
-      final capacity = (newData['capacity'] ?? 1) as int;
-      final reserved = (newData['reserved'] ?? 0) as int;
-      final newStatus = (newData['status'] ?? 'open') as String;
-      if (newStatus != 'open') {
-        throw Exception('Ce créneau n\'est plus disponible');
-      }
-      if (reserved >= capacity) {
-        throw Exception('Ce créneau est maintenant complet');
-      }
-
-      // Filet serveur — mêmes garde-fous que reserveSlot : l'anticipation max
-      // et le délai min de la file sont aussi vérifiés ici (ce ne sont que des
-      // filtres d'affichage côté client), pour qu'un remplacement ne vise pas
-      // un créneau hors de la fenêtre voulue.
-      final newStart = (newData['start'] as Timestamp).toDate();
-      final maxAdvanceDays = (nq?['maxAdvanceDays'] as num?)?.toInt();
-      if (maxAdvanceDays != null) {
-        final n = DateTime.now();
-        final lastDay = DateTime(n.year, n.month, n.day)
-            .add(Duration(days: maxAdvanceDays + 1));
-        if (newStart.toLocal().isAfter(lastDay)) {
-          throw Exception(
-            'Ce créneau est trop loin dans le temps pour être réservé.',
-          );
-        }
-      }
-      final deadlineMin =
-          (newData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
-      if (deadlineMin > 0 &&
-          newStart.toUtc().difference(DateTime.now().toUtc()).inMinutes <
-              deadlineMin) {
-        throw Exception('Il est trop tard pour réserver ce créneau.');
-      }
-
-      final customerName = _fullName(freshUser.data() ?? {});
-
-      // Annuler l'ancienne réservation
-      tx.update(oldResRef, {
-        'status': 'cancelled',
-        'cancelledAt': FieldValue.serverTimestamp(),
-      });
-      tx.update(oldSlotRef, {'reserved': FieldValue.increment(-1)});
-      tx.set(oldDailyStatsRef, {
-        'reserved': FieldValue.increment(-1),
-        'available': FieldValue.increment(1),
-      }, SetOptions(merge: true));
-
-      // Créer la nouvelle
-      tx.set(newResRef, {
-        'companyId': newCompanyId,
-        'queueId': newQueueId,
-        'timeSlotId': newTimeSlotId,
-        'slotId': newSlotDocId,
-        'customerId': user.uid,
-        'customerEmail': user.email,
-        if (customerName != null) 'customerName': customerName,
-        'slotStart': Timestamp.fromDate(newSlotStart.toUtc()),
-        'slotEnd': Timestamp.fromDate(newSlotEnd.toUtc()),
-        'createdAt': FieldValue.serverTimestamp(),
-        'status': 'confirmed',
-        'replacedReservationId': oldReservationId,
-        if (companyName != null && companyName.isNotEmpty)
-          'companyName': companyName,
-        if (queueName != null && queueName.isNotEmpty) 'queueName': queueName,
-      });
-      tx.update(newSlotRef, {'reserved': FieldValue.increment(1)});
-      tx.set(newDailyStatsRef, {
-        'reserved': FieldValue.increment(1),
-        'available': FieldValue.increment(-1),
-      }, SetOptions(merge: true));
+    final result = await _callBooking({
+      'action': 'replace',
+      'oldCompanyId': oldCompanyId,
+      'oldReservationId': oldReservationId,
+      'companyId': newCompanyId,
+      'queueId': newQueueId,
+      'slotId': newSlotDocId,
+      'timeSlotId': newTimeSlotId,
+      if (companyName != null && companyName.isNotEmpty)
+        'companyName': companyName,
+      if (queueName != null && queueName.isNotEmpty) 'queueName': queueName,
     });
-
-    return newResRef.id;
+    return result['reservationId'] as String;
   }
 
-  // ── ANNULATION ────────────────────────────────────────────────
+  // ── ANNULER ───────────────────────────────────────────────────
 
+  /// Point UNIQUE d'annulation par le client (accueil, « Mes
+  /// réservations », notification). [fromNotification] trace l'origine.
   Future<void> cancelReservation({
     required String companyId,
     required String reservationId,
-    required String queueId,
-    required String slotDocId,
-    required DateTime slotStart,
+    bool fromNotification = false,
   }) async {
-    final resRef = _fs
-        .collection('companies')
-        .doc(companyId)
-        .collection('reservations')
-        .doc(reservationId);
-
-    final slotRef = _fs
-        .collection('companies')
-        .doc(companyId)
-        .collection('queues')
-        .doc(queueId)
-        .collection('slots')
-        .doc(slotDocId);
-
-    final dateStr =
-        '${slotStart.year}-'
-        '${slotStart.month.toString().padLeft(2, '0')}-'
-        '${slotStart.day.toString().padLeft(2, '0')}';
-    final dailyStatsRef = _fs
-        .collection('companies')
-        .doc(companyId)
-        .collection('queues')
-        .doc(queueId)
-        .collection('dailyStats')
-        .doc(dateStr);
-
-    await _fs.runTransaction((tx) async {
-      tx.update(resRef, {
-        'status': 'cancelled',
-        'cancelledAt': FieldValue.serverTimestamp(),
-      });
-      tx.update(slotRef, {
-        'reserved': FieldValue.increment(-1),
-        'cancelled': FieldValue.increment(1),
-      });
-      tx.set(dailyStatsRef, {
-        'reserved': FieldValue.increment(-1),
-        'available': FieldValue.increment(1),
-        'cancelled': FieldValue.increment(1),
-      }, SetOptions(merge: true));
+    await _callBooking({
+      'action': 'cancel',
+      'companyId': companyId,
+      'reservationId': reservationId,
+      if (fromNotification) 'source': 'notification',
     });
   }
+}
+
+/// Refus ou échec renvoyé par la fonction de réservation. [toString] donne
+/// directement le message à afficher (les écrans font `'$e'`).
+class BookingException implements Exception {
+  final String message;
+
+  /// Motif technique du refus (ex. `slotFull`, `globalLimitReached`).
+  final String? reason;
+
+  const BookingException(this.message, {this.reason});
+
+  @override
+  String toString() => message;
 }

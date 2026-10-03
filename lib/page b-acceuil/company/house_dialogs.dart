@@ -29,9 +29,9 @@ Future<_ModifResult?> _showModifDialog(
               width: double.infinity,
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: _green.withOpacity(0.06),
+                color: _green.withValues(alpha: 0.06),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: _green.withOpacity(0.3)),
+                border: Border.all(color: _green.withValues(alpha: 0.3)),
               ),
               child: Text(
                 preview,
@@ -44,9 +44,9 @@ Future<_ModifResult?> _showModifDialog(
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: _green.withOpacity(0.06),
+                  color: _green.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: _green.withOpacity(0.25)),
+                  border: Border.all(color: _green.withValues(alpha: 0.25)),
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -74,40 +74,50 @@ Future<_ModifResult?> _showModifDialog(
             ],
 
             const SizedBox(height: 16),
-            Opacity(
-              opacity: todayDone ? 0.4 : 1.0,
-              child: RadioListTile<ModificationType>(
-                title: const Text("Juste pour aujourd'hui"),
-                subtitle: const Text(
-                  'Les paramètres reviendront à la normale demain',
-                  style: TextStyle(fontSize: 12),
-                ),
-                value: ModificationType.ponctuelle,
-                groupValue: type,
-                activeColor: _green,
-                contentPadding: EdgeInsets.zero,
-                onChanged: todayDone ? null : (v) => setD(() => type = v!),
-              ),
-            ),
-            if (todayDone)
-              Padding(
-                padding: const EdgeInsets.only(left: 12, bottom: 4),
-                child: Text(
-                  'Tous les créneaux d\'aujourd\'hui sont terminés',
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                ),
-              ),
-            RadioListTile<ModificationType>(
-              title: const Text('Permanente'),
-              subtitle: const Text(
-                'Met à jour les paramètres globaux de la file',
-                style: TextStyle(fontSize: 12),
-              ),
-              value: ModificationType.permanente,
+            RadioGroup<ModificationType>(
               groupValue: type,
-              activeColor: _green,
-              contentPadding: EdgeInsets.zero,
               onChanged: (v) => setD(() => type = v!),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Opacity(
+                    opacity: todayDone ? 0.4 : 1.0,
+                    child: RadioListTile<ModificationType>(
+                      title: const Text("Juste pour aujourd'hui"),
+                      subtitle: const Text(
+                        'Les paramètres reviendront à la normale demain',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      value: ModificationType.ponctuelle,
+                      enabled: !todayDone,
+                      activeColor: _green,
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                  if (todayDone)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 12, bottom: 4),
+                      child: Text(
+                        'Tous les créneaux d\'aujourd\'hui sont terminés',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade500,
+                        ),
+                      ),
+                    ),
+                  const RadioListTile<ModificationType>(
+                    title: Text('Permanente'),
+                    subtitle: Text(
+                      'Met à jour les paramètres globaux de la file',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    value: ModificationType.permanente,
+                    activeColor: _green,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -142,11 +152,15 @@ class _QuickAddSheet extends StatefulWidget {
   final DateFormat timeFormat;
   final Future<void> Function(String name, AgendaSlot slot) onConfirm;
 
+  /// Affiche l'exemple « Ex : Jean Dupont » (5 premières inscriptions).
+  final bool showNameHint;
+
   const _QuickAddSheet({
     required this.queue,
     required this.availableSlots,
     required this.timeFormat,
     required this.onConfirm,
+    this.showNameHint = true,
   });
 
   @override
@@ -339,7 +353,7 @@ class _QuickAddSheetState extends State<_QuickAddSheet> {
               },
               decoration: InputDecoration(
                 labelText: 'Nom du client',
-                hintText: 'Ex : Jean Dupont',
+                hintText: widget.showNameHint ? 'Ex : Jean Dupont' : null,
                 prefixIcon: const Icon(Icons.person_outline_rounded),
                 errorText: _nameError,
                 border: OutlineInputBorder(

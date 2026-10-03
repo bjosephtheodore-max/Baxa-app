@@ -112,7 +112,45 @@ class _RetryState extends StatelessWidget {
 
 // ── Empty state (accueil sans files) ─────────────────────────────────────────
 class _EmptyState extends StatelessWidget {
-  const _EmptyState();
+  // Une file existe déjà (parcours repris après avoir quitté l'app) : l'étape
+  // « Créez votre première file » est cochée d'après les données réelles.
+  final bool hasQueue;
+  const _EmptyState({this.hasQueue = false});
+
+  Future<void> _confirmSkip(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'Passer le guide ?',
+          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+        ),
+        content: Text(
+          'Le guide ne réapparaîtra plus. Tant qu\'une file n\'a aucune plage, '
+          'vos clients ne peuvent pas y réserver.',
+          style: TextStyle(color: Colors.grey.shade700, height: 1.45),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(
+              'Continuer le guide',
+              style: TextStyle(color: Colors.grey.shade600),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              'Passer',
+              style: TextStyle(color: _green, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) await OnboardingService().skip();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -193,7 +231,7 @@ class _EmptyState extends StatelessWidget {
                           number: '3',
                           icon: Icons.add_circle_outline_rounded,
                           text: 'Créez votre première file',
-                          done: OnboardingService().step > 4,
+                          done: hasQueue || OnboardingService().step > 3,
                         ),
                         const SizedBox(height: 12),
                         _OnboardingStep(
@@ -205,6 +243,25 @@ class _EmptyState extends StatelessWidget {
                       ],
                     ),
                   ),
+                  // Proposé seulement quand le parcours reprend (2e session
+                  // ou plus) — jamais au tout premier passage.
+                  if (OnboardingService().canSkip) ...[
+                    const SizedBox(height: 16),
+                    TextButton(
+                      onPressed: () => _confirmSkip(context),
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.grey.shade500,
+                      ),
+                      child: const Text(
+                        'Passer, je configurerai plus tard',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ],
             ),
@@ -861,7 +918,7 @@ class _PlusMinusBtn extends StatelessWidget {
         width: 36,
         height: 36,
         decoration: BoxDecoration(
-          color: enabled ? _green.withOpacity(0.1) : Colors.grey.shade200,
+          color: enabled ? _green.withValues(alpha: 0.1) : Colors.grey.shade200,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: enabled ? _green : Colors.grey.shade300),
         ),
@@ -1029,7 +1086,7 @@ class _SlotCard extends StatelessWidget {
                 ? Colors.red.shade200
                 : isFull
                 ? _green
-                : _lightGreen.withOpacity(0.4),
+                : _lightGreen.withValues(alpha: 0.4),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Center(
