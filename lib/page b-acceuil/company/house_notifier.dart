@@ -492,8 +492,11 @@ class _HouseNotifier extends ChangeNotifier {
     return c.createdBy != null && c.createdBy == _myUid;
   }
 
-  /// « Ajouté par … » sous le nom du client, ou null si l'auteur est
+  /// « Ajouté par … » pour une inscription manuelle, ou null si l'auteur est
   /// inconnu (inscriptions antérieures à ce suivi).
+  ///
+  /// Plus affiché dans le panneau d'un créneau (place laissée à la liste),
+  /// mais conservé avec les champs `createdBy*` pour l'onglet Analyse (V2).
   String? addedByLabel(CustomerEntry c) {
     if (!c.isCompanyManual || c.createdBy == null) return null;
     if (c.createdBy == _myUid) return 'Ajouté par vous';

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -986,7 +987,6 @@ class _HousePageState extends State<HousePage>
         onDeleteClient: (customer) =>
             _deleteManualClientForSlot(customer, queue, slot),
         canDeleteClient: _n.canDeleteManual,
-        addedByLabel: _n.addedByLabel,
         showNameHint: _n.showNameHint,
       ),
     );
@@ -1593,9 +1593,8 @@ class _SlotDetailDialog extends StatefulWidget {
   final Future<bool> Function(CustomerEntry customer)? onDeleteClient;
 
   /// Droit de supprimer cette inscription (admin : toutes ; staff : les
-  /// siennes) et libellé « Ajouté par … » — fournis par le notifier.
+  /// siennes) — fourni par le notifier.
   final bool Function(CustomerEntry customer) canDeleteClient;
-  final String? Function(CustomerEntry customer) addedByLabel;
 
   /// Affiche l'exemple « Ex : Jean Dupont » (5 premières inscriptions).
   final bool showNameHint;
@@ -1611,7 +1610,6 @@ class _SlotDetailDialog extends StatefulWidget {
     this.onAddClient,
     this.onDeleteClient,
     required this.canDeleteClient,
-    required this.addedByLabel,
     this.showNameHint = true,
   });
 
@@ -1624,6 +1622,7 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
   bool _loadingNames = false;
   bool _showAddForm = false;
   final _nameCtrl = TextEditingController();
+  final _listCtrl = ScrollController();
   String? _nameError;
   late int _reservedCount;
 
@@ -1637,6 +1636,7 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
   @override
   void dispose() {
     _nameCtrl.dispose();
+    _listCtrl.dispose();
     super.dispose();
   }
 
@@ -1702,12 +1702,22 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
         !isFull && !isBlocked && !widget.isPast && widget.onAddClient != null;
     final remaining = slot.capacity - _reservedCount;
 
-    final bottomPadding = 28.0 + MediaQuery.of(context).padding.bottom;
+    final media = MediaQuery.of(context);
+    // Hauteur max du panneau : 60 % de l'écran. Clavier ouvert, le panneau
+    // remonte au-dessus et se limite encore pour laisser l'App Bar visible
+    // en haut — c'est alors la liste des clients qui rétrécit (marge basse
+    // réduite au passage : la barre système est sous le clavier).
+    final keyboard = media.viewInsets.bottom;
+    final bottomPadding = keyboard > 0 ? 16.0 : 28.0 + media.padding.bottom;
+    final appBarReserve = media.padding.top + kToolbarHeight;
+    final maxSheetHeight = math.min(
+      media.size.height * 0.60,
+      media.size.height - keyboard - appBarReserve,
+    );
     return Padding(
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom,
-      ),
+      padding: EdgeInsets.only(bottom: keyboard),
       child: Container(
+        constraints: BoxConstraints(maxHeight: maxSheetHeight),
         decoration: const BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
@@ -1809,88 +1819,23 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                   ),
                 )
               else if (_customers != null && _customers!.isNotEmpty)
-                ..._customers!.asMap().entries.map((entry) {
-                  final c = entry.value;
-                  final initial = c.name.isNotEmpty
-                      ? c.name.trim()[0].toUpperCase()
-                      : '?';
-                  final circleBg = c.isCompanyManual
-                      ? Colors.blue.shade50
-                      : const Color(0xFFE8F5ED);
-                  final circleText = c.isCompanyManual
-                      ? Colors.blue.shade400
-                      : _green;
-                  final addedBy = widget.addedByLabel(c);
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(
+                // Seule zone qui défile : l'en-tête au-dessus et le bouton
+                // d'ajout en dessous restent toujours visibles. Peu de
+                // clients → hauteur naturelle ; au-delà de la hauteur max du
+                // panneau, la liste défile.
+                Flexible(
+                  child: Scrollbar(
+                    controller: _listCtrl,
+                    child: ListView(
+                      controller: _listCtrl,
+                      shrinkWrap: true,
+                      padding: EdgeInsets.zero,
                       children: [
-                        Container(
-                          width: 32,
-                          height: 32,
-                          decoration: BoxDecoration(
-                            color: circleBg,
-                            shape: BoxShape.circle,
-                          ),
-                          alignment: Alignment.center,
-                          child: Text(
-                            initial,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
-                              color: circleText,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        // Nom (2 lignes max) puis « Ajouté par … » (1 ligne)
-                        // : tous deux tronqués par « … », quelle que soit leur
-                        // longueur, sans jamais déplacer la poubelle.
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                c.name,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                              if (addedBy != null)
-                                Text(
-                                  addedBy,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 11.5,
-                                    color: Colors.grey.shade500,
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                        if (widget.onDeleteClient != null &&
-                            widget.canDeleteClient(c))
-                          IconButton(
-                            icon: Icon(
-                              Icons.delete_outline_rounded,
-                              color: Colors.red.shade400,
-                              size: 20,
-                            ),
-                            tooltip: 'Supprimer',
-                            visualDensity: VisualDensity.compact,
-                            constraints: const BoxConstraints(),
-                            padding: const EdgeInsets.all(6),
-                            onPressed: () => _confirmDeleteCustomer(c),
-                          ),
+                        for (final c in _customers!) _customerRow(c),
                       ],
                     ),
-                  );
-                })
+                  ),
+                )
               else
                 Text(
                   'Aucun nom trouvé',
@@ -2009,6 +1954,59 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _customerRow(CustomerEntry c) {
+    final initial = c.name.isNotEmpty ? c.name.trim()[0].toUpperCase() : '?';
+    final circleBg = c.isCompanyManual
+        ? Colors.blue.shade50
+        : const Color(0xFFE8F5ED);
+    final circleText = c.isCompanyManual ? Colors.blue.shade400 : _green;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(color: circleBg, shape: BoxShape.circle),
+            alignment: Alignment.center,
+            child: Text(
+              initial,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: circleText,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          // Nom sur 2 lignes max, tronqué par « … » quelle que soit sa
+          // longueur, sans jamais déplacer la poubelle.
+          Expanded(
+            child: Text(
+              c.name,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+            ),
+          ),
+          if (widget.onDeleteClient != null && widget.canDeleteClient(c))
+            IconButton(
+              icon: Icon(
+                Icons.delete_outline_rounded,
+                color: Colors.red.shade400,
+                size: 20,
+              ),
+              tooltip: 'Supprimer',
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(),
+              padding: const EdgeInsets.all(6),
+              onPressed: () => _confirmDeleteCustomer(c),
+            ),
+        ],
       ),
     );
   }

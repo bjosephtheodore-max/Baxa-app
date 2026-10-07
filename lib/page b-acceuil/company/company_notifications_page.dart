@@ -262,6 +262,7 @@ const Map<String, _Style> _styles = {
     'Équipe',
   ),
   'staff_left': _Style(Icons.person_remove_rounded, _Family.grey, 'Équipe'),
+  'team_adds': _Style(Icons.groups_rounded, _Family.green, 'Équipe'),
   'plage_recap': _Style(
     Icons.bar_chart_rounded,
     _Family.grey,

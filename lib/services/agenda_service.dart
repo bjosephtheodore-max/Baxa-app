@@ -64,6 +64,11 @@ class CustomerEntry {
   final String? createdByRole;
   final String? createdByName;
 
+  /// Date d'inscription (`createdAt`), qui sert au tri de la liste.
+  /// Null sur une réservation très ancienne ou dont l'horodatage serveur
+  /// n'est pas encore résolu.
+  final DateTime? createdAt;
+
   const CustomerEntry({
     required this.id,
     required this.name,
@@ -71,6 +76,7 @@ class CustomerEntry {
     this.createdBy,
     this.createdByRole,
     this.createdByName,
+    this.createdAt,
   });
 }
 
@@ -238,6 +244,11 @@ class AgendaService {
   /// Charge les clients d'un créneau avec leur source (entreprise ou app).
   /// Lit `companies/{companyId}/reservations`, la collection où sont
   /// réellement écrites toutes les réservations (client comme manuelles).
+  ///
+  /// Triés du plus récent au plus ancien : le dernier inscrit apparaît en
+  /// haut du panneau, visible sans défiler. Tri fait ici plutôt que par
+  /// `orderBy` : pas d'index composite à maintenir, et Firestore exclurait
+  /// silencieusement les réservations sans `createdAt` (rangées en bas).
   Future<List<CustomerEntry>> loadCustomers(
     String slotId, {
     required String companyId,
@@ -250,7 +261,7 @@ class AgendaService {
           .where('slotId', isEqualTo: slotId)
           .where('status', isEqualTo: 'confirmed')
           .get();
-      return snap.docs.map((d) {
+      final customers = snap.docs.map((d) {
         final data = d.data();
         return CustomerEntry(
           id: d.id,
@@ -259,8 +270,19 @@ class AgendaService {
           createdBy: data['createdBy'] as String?,
           createdByRole: data['createdByRole'] as String?,
           createdByName: data['createdByName'] as String?,
+          createdAt: (data['createdAt'] as Timestamp?)?.toDate(),
         );
       }).toList();
+      customers.sort((a, b) {
+        final ta = a.createdAt;
+        final tb = b.createdAt;
+        if (ta == null && tb == null) return a.id.compareTo(b.id);
+        if (ta == null) return 1;
+        if (tb == null) return -1;
+        final byDate = tb.compareTo(ta);
+        return byDate != 0 ? byDate : a.id.compareTo(b.id);
+      });
+      return customers;
     } catch (_) {
       return [];
     }

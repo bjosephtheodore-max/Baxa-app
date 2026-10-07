@@ -1,6 +1,7 @@
 const functions = require("firebase-functions/v1");
 const admin = require("firebase-admin");
 const {CloudTasksClient} = require("@google-cloud/tasks");
+const wake = require("./wake");
 admin.initializeApp();
 
 const db = admin.firestore();
@@ -106,7 +107,7 @@ async function writeCompanySearchSummary(companyId, queuesDocs, now) {
 // récaps, jamais un magma) :
 //   récap de plage ............ 30 jours
 //   bilan hebdo (sous-utilisée)  7 jours
-//   plage complète / bientôt / nouveau membre .... 2 jours
+//   plage complète / bientôt / membre / ajouts équipe . 2 jours
 //   résumé du matin / coup de coude ............. 24 h
 // Purge aussi l'ancienne collection `notificationsHistory` (transition).
 // ====================================================================
@@ -117,6 +118,7 @@ const COMPANY_NOTIF_TTL_HOURS = {
   plage_near_full: 2 * 24,
   staff_joined: 2 * 24,
   staff_left: 2 * 24,
+  team_adds: 2 * 24,
   day_digest: 24,
   queue_checkin: 24,
 };
@@ -623,6 +625,17 @@ exports.updateCompanySearchSummary = functions.firestore
       .collection("queues")
       .get();
     await writeCompanySearchSummary(companyId, queuesSnap.docs, new Date());
+
+    // Même déclencheur (pas d'appel de fonction en plus) : une file créée,
+    // supprimée, fermée ou rouverte change les horaires du jour → les
+    // réveils des notifs (bilan, coup d'œil, ajouts équipe) sont replanifiés.
+    if (queueScheduleChanged(change)) {
+      try {
+        await requestCompanyReplan(companyId);
+      } catch (e) {
+        console.error(`❌ requestCompanyReplan ${companyId}:`, e.message);
+      }
+    }
     return null;
   });
 
@@ -2340,155 +2353,501 @@ async function checkPlageFillAfterReservation(companyId, resa) {
   await tsRef.set({ nearFullNotifiedOn: today }, { merge: true });
 }
 
-// ── Passage ~30 min : récap de fin de plage + coup de coude ─────────
-exports.companyQueuePulse = functions.pubsub
-  .schedule("*/30 * * * *")
-  .timeZone(FR_TZ)
+// ════════════════════════════════════════════════════════════════════
+// RÉVEILS : Bilan du jour, coup d'œil, ajouts de l'équipe
+//
+// Voir functions/wake.js pour le principe. En bref, chaque structure a un
+// document `companyWake/{companyId}` :
+//   events              : échéances datées [{kind, queueId?, day, at, …}]
+//   wakeAt              : Timestamp de la plus proche (null si aucune)
+//   plannedDay          : jour (AAAA-MM-JJ) de la dernière planification
+//   plannedAt           : instant de cette planification
+//   replanRequestedAt   : posé par les déclencheurs (plage / fermeture
+//                         modifiée) → replanifier au prochain passage
+//   sent                : registre anti-doublon {"recap:<file>": jour, …}
+//
+// - planCompanyDays (00:05) planifie la journée de toutes les structures.
+// - companyWakeTick (toutes les 15 min) ne traite que les structures dont
+//   `wakeAt` est passé (une seule requête, ~1 lecture si rien à faire),
+//   plus, par sécurité après 1h, celles que la planification de nuit
+//   aurait manquées (`plannedDay` < aujourd'hui).
+// - Le jour d'une échéance (et non l'heure du passage) fixe les bornes
+//   lues : un récap de minuit porte bien sur la veille.
+// ════════════════════════════════════════════════════════════════════
+
+// Fuseau des « jours » de l'app (Sénégal, UTC+0 sans heure d'été) — le
+// même que BOOKING_TZ (booking.js) et que l'heure du serveur.
+const WAKE_TZ = "Africa/Dakar";
+
+function wakeRef(companyId) {
+  return db.collection("companyWake").doc(companyId);
+}
+
+/** Bornes [début, fin[ d'un jour « AAAA-MM-JJ » (heure serveur). */
+function dayBoundsOf(dayStr) {
+  const [y, m, d] = dayStr.split("-").map(Number);
+  const start = new Date(y, m - 1, d);
+  const end = new Date(y, m - 1, d + 1);
+  return { start, end };
+}
+
+function addDaysStr(dayStr, n) {
+  const { start } = dayBoundsOf(dayStr);
+  start.setDate(start.getDate() + n);
+  return ymd(start);
+}
+
+function tsOrNull(msValue) {
+  return msValue == null
+    ? null
+    : admin.firestore.Timestamp.fromMillis(msValue);
+}
+
+/**
+ * Calcule les échéances du jour `day` pour toutes les files ouvertes de la
+ * structure (lecture des créneaux de ce jour, une fois par file).
+ */
+async function computeDayEvents(companyId, day, now, sent) {
+  const { start, end } = dayBoundsOf(day);
+  const queuesSnap = await db
+    .collection("companies").doc(companyId)
+    .collection("queues").get();
+
+  const queueEvents = [];
+  for (const queueDoc of queuesSnap.docs) {
+    const qd = queueDoc.data();
+    if (isQueueClosedNow(qd.closureStart, qd.closureEnd, now)) continue;
+    const plages = await aggregateSlotsByPlage(
+      companyId, queueDoc.id, start, end,
+    );
+    queueEvents.push(...wake.planQueueEvents({
+      queueId: queueDoc.id, day, plages, now, sent,
+    }));
+  }
+  const team = wake.planTeamEvent({ day, queueEvents, sent });
+  return team ? [...queueEvents, team] : queueEvents;
+}
+
+/** (Re)planifie le jour en cours d'une structure et écrit son réveil. */
+async function planCompanyWake(companyId, now) {
+  const ref = wakeRef(companyId);
+  const snap = await ref.get();
+  const prev = snap.exists ? snap.data() : {};
+  const today = ymd(now);
+  const sent = wake.pruneSent(prev.sent, addDaysStr(today, -2));
+  const fresh = await computeDayEvents(companyId, today, now, sent);
+  const events = wake.mergeDayEvents(prev.events, today, fresh);
+  await ref.set({
+    events,
+    wakeAt: tsOrNull(wake.nextWakeAt(events)),
+    plannedDay: today,
+    plannedAt: admin.firestore.Timestamp.fromDate(now),
+    sent,
+  }, { merge: true });
+}
+
+/** Demande une replanification (plage ou fermeture modifiée) : le
+ * prochain passage, au plus tôt dans 2 min, relira les créneaux du jour. */
+async function requestCompanyReplan(companyId) {
+  const at = Date.now() + wake.REPLAN_DEBOUNCE_MS;
+  const ref = wakeRef(companyId);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const cur = snap.exists && snap.get("wakeAt")
+      ? snap.get("wakeAt").toMillis()
+      : null;
+    tx.set(ref, {
+      replanRequestedAt: admin.firestore.FieldValue.serverTimestamp(),
+      wakeAt: tsOrNull(cur == null ? at : Math.min(cur, at)),
+    }, { merge: true });
+  });
+}
+
+// Champs écrits sur les plages par les notifs serveur (pas des horaires).
+const TIMESLOT_NOTIF_MARKERS = [
+  "fullNotifiedOn", "nearFullNotifiedOn", "underusedNotifiedAt",
+];
+// Champs d'une file qui changent ses horaires du jour : création /
+// suppression, fermeture posée, levée ou « Rouvrir immédiatement ».
+const QUEUE_SCHEDULE_FIELDS = ["closureStart", "closureEnd", "isActive"];
+
+/** Vrai si le doc est créé / supprimé, ou si un champ autre que
+ * `ignored` a changé. */
+function scheduleFieldsChanged(change, ignored) {
+  if (!change.before.exists || !change.after.exists) return true;
+  const a = { ...change.before.data() };
+  const b = { ...change.after.data() };
+  for (const k of ignored) {
+    delete a[k];
+    delete b[k];
+  }
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) {
+    if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return true;
+  }
+  return false;
+}
+
+/** Vrai si la file est créée / supprimée ou si sa fermeture change. */
+function queueScheduleChanged(change) {
+  if (!change.before.exists || !change.after.exists) return true;
+  const a = change.before.data();
+  const b = change.after.data();
+  return QUEUE_SCHEDULE_FIELDS.some(
+    (k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]),
+  );
+}
+
+// ── Contenu des notifications ───────────────────────────────────────
+
+/** Corps et payload du « 📊 Bilan du jour » (logique inchangée). */
+async function buildRecapNotification(queueRef, plages, queueName, word) {
+  const tsSnap = await queueRef.collection("timeSlots").get();
+  const tsMap = new Map(tsSnap.docs.map((t) => [t.id, t.data()]));
+  const entries = [...plages.entries()].sort(
+    (a, b) =>
+      (a[1].firstStart ? a[1].firstStart.getTime() : 0) -
+      (b[1].firstStart ? b[1].firstStart.getTime() : 0),
+  );
+  // Seules les plages qui ont eu ≥ 1 réservation sont détaillées ;
+  // les autres sont résumées en « + N plages sans réservation ».
+  const activePlages = [];
+  let silentPlages = 0;
+  let totalRes = 0;
+  let totalCap = 0;
+  let totalCancel = 0;
+  let totalEmpty = 0;
+  for (const [tsId, g] of entries) {
+    const label = rangeLabel(tsMap.get(tsId)) ||
+      `${fmtClock(g.firstStart)}–${fmtClock(g.lastEnd)}`;
+    totalRes += g.reservations;
+    totalCap += g.capacity;
+    totalCancel += g.cancellations;
+    totalEmpty += g.emptySlots;
+    if (g.reservations > 0) {
+      activePlages.push({
+        range: label,
+        reservations: g.reservations,
+        fillPct: fillPct(g.reservations, g.capacity),
+        emptySlots: g.emptySlots,
+      });
+    } else {
+      silentPlages += 1;
+    }
+  }
+
+  // Taux de remplissage de la file = places réservées / places proposées
+  // sur toute la journée (pondéré par la capacité, pas la moyenne des %
+  // de plages : une petite plage vide ne doit pas écraser le chiffre).
+  const queueFill = fillPct(totalRes, totalCap);
+  const verdict = queueFill >= 90
+    ? "record"
+    : queueFill >= 60 ? "bonne" : "calme";
+
+  let body;
+  if (totalRes === 0) {
+    body =
+      `Aucune réservation ${word}. Partagez votre QR code pour ` +
+      "attirer vos premiers clients 📣";
+  } else {
+    const parts = [`${totalRes} réservation${totalRes > 1 ? "s" : ""}`];
+    if (totalCancel > 0) {
+      parts.push(`${totalCancel} annulation${totalCancel > 1 ? "s" : ""}`);
+    }
+    parts.push(`${queueFill} % rempli`);
+    body = parts.join(" · ");
+  }
+
+  return {
+    title: `📊 Bilan du jour · ${queueName}`,
+    body,
+    payload: {
+      reservations: totalRes,
+      cancellations: totalCancel,
+      fillPct: queueFill,
+      emptySlots: totalEmpty,
+      verdict,
+      plages: activePlages,
+      silentPlages,
+    },
+  };
+}
+
+// ── Traitement d'une échéance ───────────────────────────────────────
+// Chaque handler renvoie {sent: bool} si l'échéance est consommée, ou
+// {retryAt: ms} pour la repousser (ex. plage allongée entre-temps).
+
+async function handleRecapEvent(companyId, ev, now, today) {
+  const queueRef = db
+    .collection("companies").doc(companyId)
+    .collection("queues").doc(ev.queueId);
+  const queueDoc = await queueRef.get();
+  if (!queueDoc.exists) return { sent: false };
+  const qd = queueDoc.data();
+  if (isQueueClosedNow(qd.closureStart, qd.closureEnd, now)) {
+    return { sent: false };
+  }
+
+  const { start, end } = dayBoundsOf(ev.day);
+  const plages = await aggregateSlotsByPlage(
+    companyId, ev.queueId, start, end, now,
+  );
+  if (plages.size === 0) return { sent: false };
+
+  // Filet de sécurité : un créneau finit encore plus tard (plage allongée
+  // dans la journée) → on attend sa fin au lieu d'envoyer trop tôt.
+  let dayLast = 0;
+  for (const g of plages.values()) {
+    if (g.lastEnd && g.lastEnd.getTime() > dayLast) dayLast = g.lastEnd.getTime();
+  }
+  if (dayLast > now.getTime()) return { retryAt: dayLast };
+
+  const queueName = qd.name || "votre file";
+  const recap = await buildRecapNotification(
+    queueRef, plages, queueName, wake.dayWord(ev.day, today),
+  );
+  await writeCompanyNotification(companyId, {
+    type: "plage_recap",
+    title: recap.title,
+    body: recap.body,
+    audience: "admin",
+    payload: {
+      queueId: ev.queueId, queueName, day: ev.day, ...recap.payload,
+    },
+  });
+  return { sent: true, recapEnd: dayLast };
+}
+
+async function handleCheckinEvent(companyId, ev, now) {
+  // Hors de la plage, ou trop tard après son milieu : périmé.
+  if (now.getTime() > ev.until) return { sent: false };
+  if (now.getTime() - ev.at > wake.CHECKIN_MAX_DELAY_MS) return { sent: false };
+
+  const companyRef = db.collection("companies").doc(companyId);
+  const queueRef = companyRef.collection("queues").doc(ev.queueId);
+  const queueDoc = await queueRef.get();
+  if (!queueDoc.exists) return { sent: false };
+  const qd = queueDoc.data();
+  if (isQueueClosedNow(qd.closureStart, qd.closureEnd, now)) {
+    return { sent: false };
+  }
+
+  const { start, end } = dayBoundsOf(ev.day);
+  const plages = await aggregateSlotsByPlage(
+    companyId, ev.queueId, start, end, now,
+  );
+  let remainingTotal = 0;
+  for (const g of plages.values()) remainingTotal += g.remaining;
+  if (remainingTotal < 3) return { sent: false };
+
+  // Aucune autre notif envoyée depuis le début de cette plage ?
+  const since = await companyRef
+    .collection("companyNotifications")
+    .where("createdAt", ">=", admin.firestore.Timestamp.fromMillis(ev.from))
+    .limit(1)
+    .get();
+  if (!since.empty) return { sent: false };
+
+  const queueName = qd.name || "votre file";
+  const per = remainingTotal > 1
+    ? "personnes encore à servir"
+    : "personne encore à servir";
+  await writeCompanyNotification(companyId, {
+    type: "queue_checkin",
+    title: `👀 Un coup d'œil sur ${queueName} ?`,
+    body: `Votre file tourne — ${remainingTotal} ${per} aujourd'hui.`,
+    audience: "admin",
+    payload: { queueId: ev.queueId, queueName, toServe: remainingTotal },
+  });
+  return { sent: true };
+}
+
+async function handleTeamEvent(companyId, ev, today) {
+  // Inscriptions manuelles du staff faites ce jour-là (date de l'ajout),
+  // encore actives — mêmes critères que wake.isStaffManualAdd. Requête de
+  // comptage : 1 lecture quel que soit le nombre d'ajouts (index composite
+  // source + createdByRole + status + createdAt, firestore.indexes.json).
+  const { start, end } = dayBoundsOf(ev.day);
+  const agg = await db
+    .collection("companies").doc(companyId)
+    .collection("reservations")
+    .where("source", "==", "company_manual")
+    .where("createdByRole", "==", "staff")
+    .where("status", "==", "confirmed")
+    .where("createdAt", ">=", admin.firestore.Timestamp.fromDate(start))
+    .where("createdAt", "<", admin.firestore.Timestamp.fromDate(end))
+    .count()
+    .get();
+  const count = agg.data().count;
+  if (count === 0) return { sent: false };
+
+  await writeCompanyNotification(companyId, {
+    type: "team_adds",
+    title: "👥 Ajouts de votre équipe",
+    body: wake.teamAddsBody(count, wake.dayWord(ev.day, today)),
+    audience: "admin",
+    payload: { day: ev.day, count },
+  });
+  return { sent: true };
+}
+
+/** Traite les échéances arrivées à terme d'une structure. */
+async function processCompanyWake(companyId, now) {
+  const ref = wakeRef(companyId);
+  const today = ymd(now);
+  let data = (await ref.get()).data() || {};
+
+  // Replanification demandée (ou planification de nuit manquée). Une
+  // demande toute fraîche attend son délai : l'app est peut-être encore en
+  // train de régénérer les créneaux du jour.
+  const requested = data.replanRequestedAt && data.replanRequestedAt.toMillis();
+  const planned = data.plannedAt && data.plannedAt.toMillis();
+  const replanReady = !!requested && (!planned || requested > planned) &&
+    now.getTime() >= requested + wake.REPLAN_DEBOUNCE_MS;
+  if (data.plannedDay !== today || replanReady) {
+    await planCompanyWake(companyId, now);
+    data = (await ref.get()).data() || {};
+  }
+
+  const sent = { ...(data.sent || {}) };
+  const { due, later } = wake.splitDue(data.events, now);
+  const keep = [...later];
+
+  for (const ev of due) {
+    const kind = ev.kind;
+    if (wake.alreadySent(sent, kind, ev.queueId, ev.day)) continue;
+    try {
+      let res;
+      if (kind === "recap") {
+        res = await handleRecapEvent(companyId, ev, now, today);
+      } else if (kind === "checkin") {
+        res = await handleCheckinEvent(companyId, ev, now);
+      } else if (kind === "team") {
+        // La dernière file a été allongée : le récap équipe suit.
+        const pendingRecap = keep
+          .filter((e) => e.kind === "recap" && e.day === ev.day)
+          .reduce((mx, e) => Math.max(mx, e.at), 0);
+        res = pendingRecap > ev.at
+          ? { retryAt: pendingRecap }
+          : await handleTeamEvent(companyId, ev, today);
+      } else {
+        continue;
+      }
+
+      if (res.retryAt) {
+        keep.push({ ...ev, at: res.retryAt });
+        if (kind === "recap") {
+          // Le récap équipe du même jour ne doit pas partir avant.
+          for (const e of keep) {
+            if (e.kind === "team" && e.day === ev.day && e.at < res.retryAt) {
+              e.at = res.retryAt;
+            }
+          }
+        }
+        continue;
+      }
+      if (res.sent) sent[wake.sentKey(kind, ev.queueId)] = ev.day;
+      if (res.sent && kind === "checkin") {
+        // Un seul coup d'œil par file et par jour.
+        for (let i = keep.length - 1; i >= 0; i--) {
+          const e = keep[i];
+          if (e.kind === "checkin" && e.queueId === ev.queueId && e.day === ev.day) {
+            keep.splice(i, 1);
+          }
+        }
+      }
+    } catch (e) {
+      // Échéance en erreur : on la garde pour le prochain passage plutôt
+      // que de perdre la notif.
+      console.error(`❌ Réveil ${kind} ${companyId}/${ev.queueId || "-"}:`, e.message);
+      keep.push(ev);
+    }
+  }
+
+  keep.sort((a, b) => a.at - b.at);
+  // Écriture finale en transaction : si un déclencheur a demandé une
+  // replanification pendant le traitement, on garde un réveil immédiat.
+  await db.runTransaction(async (tx) => {
+    const cur = await tx.get(ref);
+    const req = cur.get("replanRequestedAt");
+    const plannedNow = cur.get("plannedAt");
+    let wakeMs = wake.nextWakeAt(keep);
+    if (req && (!plannedNow || req.toMillis() > plannedNow.toMillis())) {
+      const soon = Math.max(
+        req.toMillis() + wake.REPLAN_DEBOUNCE_MS, now.getTime(),
+      );
+      wakeMs = wakeMs == null ? soon : Math.min(wakeMs, soon);
+    }
+    tx.set(ref, { events: keep, wakeAt: tsOrNull(wakeMs), sent }, { merge: true });
+  });
+}
+
+// ── Planification de nuit (00:05) ───────────────────────────────────
+exports.planCompanyDays = functions
+  .runWith({ timeoutSeconds: 540 })
+  .pubsub
+  .schedule("5 0 * * *")
+  .timeZone(WAKE_TZ)
   .onRun(async () => {
     const now = new Date();
-    const { start, end } = todayBounds(now);
-    const today = ymd(now);
-
-    const companiesSnap = await db.collection("companies").get();
+    const companiesSnap = await db.collection("companies").select().get();
     for (const companyDoc of companiesSnap.docs) {
-      const companyId = companyDoc.id;
-      const queuesSnap = await companyDoc.ref.collection("queues").get();
-
-      for (const queueDoc of queuesSnap.docs) {
-        const queueId = queueDoc.id;
-        const qd = queueDoc.data();
-        if (isQueueClosedNow(qd.closureStart, qd.closureEnd, now)) continue;
-        const queueName = qd.name || "votre file";
-
-        const byPlage = await aggregateSlotsByPlage(
-          companyId, queueId, start, end, now,
-        );
-        if (byPlage.size === 0) continue;
-
-        let dayLast = null;
-        let remainingTotal = 0;
-        for (const g of byPlage.values()) {
-          if (g.lastEnd && (!dayLast || g.lastEnd > dayLast)) dayLast = g.lastEnd;
-          remainingTotal += g.remaining;
-        }
-
-        // ── plage_recap : dernière plage du jour terminée ──
-        if (dayLast && now >= dayLast && qd.recapSentOn !== today) {
-          const tsSnap = await queueDoc.ref.collection("timeSlots").get();
-          const tsMap = new Map(tsSnap.docs.map((t) => [t.id, t.data()]));
-          const entries = [...byPlage.entries()].sort(
-            (a, b) =>
-              (a[1].firstStart ? a[1].firstStart.getTime() : 0) -
-              (b[1].firstStart ? b[1].firstStart.getTime() : 0),
-          );
-          // Seules les plages qui ont eu ≥ 1 réservation sont détaillées ;
-          // les autres sont résumées en « + N plages sans réservation ».
-          const activePlages = [];
-          let silentPlages = 0;
-          let totalRes = 0;
-          let totalCap = 0;
-          let totalCancel = 0;
-          let totalEmpty = 0;
-          for (const [tsId, g] of entries) {
-            const label = rangeLabel(tsMap.get(tsId)) ||
-              `${fmtClock(g.firstStart)}–${fmtClock(g.lastEnd)}`;
-            totalRes += g.reservations;
-            totalCap += g.capacity;
-            totalCancel += g.cancellations;
-            totalEmpty += g.emptySlots;
-            if (g.reservations > 0) {
-              activePlages.push({
-                range: label,
-                reservations: g.reservations,
-                fillPct: fillPct(g.reservations, g.capacity),
-                emptySlots: g.emptySlots,
-              });
-            } else {
-              silentPlages += 1;
-            }
-          }
-
-          // Taux de remplissage de la file = places réservées / places
-          // proposées sur toute la journée (pondéré par la capacité, pas la
-          // moyenne des % de plages : une petite plage vide ne doit pas
-          // écraser le chiffre du jour).
-          const queueFill = fillPct(totalRes, totalCap);
-          const verdict = queueFill >= 90
-            ? "record"
-            : queueFill >= 60 ? "bonne" : "calme";
-
-          let body;
-          if (totalRes === 0) {
-            body =
-              "Aucune réservation aujourd'hui. Partagez votre QR code pour " +
-              "attirer vos premiers clients 📣";
-          } else {
-            const parts = [
-              `${totalRes} réservation${totalRes > 1 ? "s" : ""}`,
-            ];
-            if (totalCancel > 0) {
-              parts.push(`${totalCancel} annulation${totalCancel > 1 ? "s" : ""}`);
-            }
-            parts.push(`${queueFill} % rempli`);
-            body = parts.join(" · ");
-          }
-
-          await writeCompanyNotification(companyId, {
-            type: "plage_recap",
-            title: `📊 Bilan du jour · ${queueName}`,
-            body,
-            audience: "admin",
-            payload: {
-              queueId,
-              queueName,
-              reservations: totalRes,
-              cancellations: totalCancel,
-              fillPct: queueFill,
-              emptySlots: totalEmpty,
-              verdict,
-              plages: activePlages,
-              silentPlages,
-            },
-          });
-          await queueDoc.ref.set({ recapSentOn: today }, { merge: true });
-        }
-
-        // ── queue_checkin : milieu d'une plage en cours ──
-        if (qd.checkinSentOn === today || remainingTotal < 3) continue;
-
-        let fire = false;
-        for (const g of byPlage.values()) {
-          if (!g.firstStart || !g.lastEnd) continue;
-          if (now < g.firstStart || now > g.lastEnd) continue;
-          const mid = (g.firstStart.getTime() + g.lastEnd.getTime()) / 2;
-          if (Math.abs(now.getTime() - mid) > 16 * 60 * 1000) continue;
-
-          // Aucune autre notif envoyée depuis le début de cette plage ?
-          const since = await companyDoc.ref
-            .collection("companyNotifications")
-            .where(
-              "createdAt", ">=",
-              admin.firestore.Timestamp.fromDate(g.firstStart),
-            )
-            .limit(1)
-            .get();
-          if (since.empty) fire = true;
-          break;
-        }
-        if (!fire) continue;
-
-        const per = remainingTotal > 1
-          ? "personnes encore à servir"
-          : "personne encore à servir";
-        await writeCompanyNotification(companyId, {
-          type: "queue_checkin",
-          title: `👀 Un coup d'œil sur ${queueName} ?`,
-          body: `Votre file tourne — ${remainingTotal} ${per} aujourd'hui.`,
-          audience: "admin",
-          payload: { queueId, queueName, toServe: remainingTotal },
-        });
-        await queueDoc.ref.set({ checkinSentOn: today }, { merge: true });
+      try {
+        await planCompanyWake(companyDoc.id, now);
+      } catch (e) {
+        console.error(`❌ planCompanyWake ${companyDoc.id}:`, e.message);
       }
+    }
+    return null;
+  });
+
+// ── Passage toutes les 15 min : échéances arrivées à terme ──────────
+exports.companyWakeTick = functions
+  .runWith({ timeoutSeconds: 540 })
+  .pubsub
+  .schedule("*/15 * * * *")
+  .timeZone(WAKE_TZ)
+  .onRun(async () => {
+    const now = new Date();
+    const today = ymd(now);
+    const ids = new Set();
+
+    const dueSnap = await db.collection("companyWake")
+      .where("wakeAt", "<=", admin.firestore.Timestamp.fromDate(now))
+      .get();
+    dueSnap.docs.forEach((d) => ids.add(d.id));
+
+    // Filet : planification de nuit manquée (laissée tranquille avant 1h,
+    // le temps que planCompanyDays passe).
+    if (now.getHours() >= 1) {
+      const staleSnap = await db.collection("companyWake")
+        .where("plannedDay", "<", today)
+        .get();
+      staleSnap.docs.forEach((d) => ids.add(d.id));
+    }
+
+    for (const companyId of ids) {
+      try {
+        await processCompanyWake(companyId, now);
+      } catch (e) {
+        console.error(`❌ processCompanyWake ${companyId}:`, e.message);
+      }
+    }
+    return null;
+  });
+
+// ── Plage créée / modifiée / supprimée → replanifier la journée ─────
+exports.onTimeSlotScheduleChange = functions.firestore
+  .document("companies/{companyId}/queues/{queueId}/timeSlots/{timeSlotId}")
+  .onWrite(async (change, context) => {
+    // Les marqueurs écrits par les notifs de remplissage / bilan hebdo ne
+    // changent pas les horaires : on les ignore (sinon chaque notif
+    // « plage complète » relancerait une replanification).
+    if (!scheduleFieldsChanged(change, TIMESLOT_NOTIF_MARKERS)) return null;
+    try {
+      await requestCompanyReplan(context.params.companyId);
+    } catch (e) {
+      console.error(`❌ requestCompanyReplan ${context.params.companyId}:`, e.message);
     }
     return null;
   });
