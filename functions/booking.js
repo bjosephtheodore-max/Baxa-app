@@ -17,6 +17,7 @@
 // ════════════════════════════════════════════════════════════════════
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
+const zone = require("./zone");
 const {FieldValue, Timestamp} = require("firebase-admin/firestore");
 
 const REGION = "africa-south1";
@@ -26,26 +27,18 @@ const MAX_DAILY_RESERVATIONS = 5;
 const MIN_GAP_SAME_COMPANY_MINUTES = 5;
 const MIN_GAP_DIFFERENT_COMPANY_MINUTES = 30;
 
-// Fuseau des dates « jour » (quota, places par jour) — identique à celui
-// des téléphones au Sénégal et au calcul actuel des dailyStats.
-const BOOKING_TZ = "Africa/Dakar";
+// Jours (« AAAA-MM-JJ ») : places par jour et horizon d'anticipation dans
+// le fuseau de la STRUCTURE (`timeZone` de sa fiche) ; quota journalier
+// dans le fuseau du CLIENT (`timeZone` de users/{uid}). Fuseau absent →
+// Africa/Dakar. Voir zone.js.
 
 const MINUTE = 60 * 1000;
 
 // ── Utilitaires ─────────────────────────────────────────────────────
 
-/** Date « AAAA-MM-JJ » dans le fuseau de réservation. */
-function ymd(date) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: BOOKING_TZ, year: "numeric", month: "2-digit", day: "2-digit",
-  }).format(date);
-  return parts; // en-CA formate déjà en AAAA-MM-JJ
-}
-
-/** « AAAA-MM-JJ » + n jours. */
-function addDays(ymdStr, n) {
-  const [y, m, d] = ymdStr.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+/** Date « AAAA-MM-JJ » dans le fuseau `tz` (par défaut celui de zone.js). */
+function ymd(date, tz) {
+  return zone.ymdIn(date, zone.tzOf(tz));
 }
 
 function toDate(v) {
@@ -123,10 +116,17 @@ class StatsDelta {
   }
 }
 
-function dailyStatsRef(db, companyId, queueId, date) {
+/** Places du jour local (fuseau `tz` de la structure) d'un créneau. */
+function dailyStatsRef(db, companyId, queueId, date, tz) {
   return db.collection("companies").doc(companyId)
     .collection("queues").doc(queueId)
-    .collection("dailyStats").doc(ymd(date));
+    .collection("dailyStats").doc(ymd(date, tz));
+}
+
+/** Fuseau d'une structure, lu dans la transaction (avant toute écriture). */
+async function companyTz(tx, db, companyId) {
+  const snap = await tx.get(db.collection("companies").doc(companyId));
+  return zone.tzOf(snap.exists ? snap.get("timeZone") : null);
 }
 
 // ── Vérification d'un créneau cible (réserver / remplacer) ─────────
@@ -136,8 +136,8 @@ async function loadTargetSlot(tx, db, target, now) {
   const queueRef = db.collection("companies").doc(companyId)
     .collection("queues").doc(queueId);
   const slotRef = queueRef.collection("slots").doc(slotId);
-  const [slotSnap, queueSnap] = await Promise.all([
-    tx.get(slotRef), tx.get(queueRef),
+  const [slotSnap, queueSnap, tz] = await Promise.all([
+    tx.get(slotRef), tx.get(queueRef), companyTz(tx, db, companyId),
   ]);
   if (!slotSnap.exists) {
     throw new HttpsError("not-found", "Ce créneau n'existe plus.");
@@ -178,8 +178,8 @@ async function loadTargetSlot(tx, db, target, now) {
       "Ce créneau a déjà commencé et ne peut plus être réservé.");
   }
   if (queue.maxAdvanceDays != null) {
-    const lastDay = addDays(ymd(now), Number(queue.maxAdvanceDays));
-    if (ymd(start) > lastDay) {
+    const lastDay = zone.addDays(ymd(now, tz), Number(queue.maxAdvanceDays));
+    if (ymd(start, tz) > lastDay) {
       throw refuse("tooFarInAdvance",
         "Ce créneau dépasse le délai de réservation autorisé par cet " +
         "établissement.");
@@ -195,6 +195,7 @@ async function loadTargetSlot(tx, db, target, now) {
     // Anciens créneaux sans timeSlotId : repli sur la plage transmise.
     timeSlotId: slot.timeSlotId || fallbackTimeSlotId || "",
     allowMultiplePerPlage: queue.allowMultiplePerPlage === true,
+    tz,
   };
 }
 
@@ -283,7 +284,8 @@ async function reserve(db, user, data, now = new Date()) {
     const active = await loadActive(tx, db, user.uid, now, null);
 
     const userData = userSnap.data() || {};
-    const today = ymd(now);
+    // Quota : jour local du CLIENT.
+    const today = ymd(now, userData.timeZone);
     const used = userData.lastBookingDate === today ?
       Number(userData.dailyBookingCount || 0) : 0;
     if (used >= MAX_DAILY_RESERVATIONS) {
@@ -301,7 +303,7 @@ async function reserve(db, user, data, now = new Date()) {
     }));
     tx.update(target.slotRef, {reserved: FieldValue.increment(1)});
     const stats = new StatsDelta();
-    stats.add(dailyStatsRef(db, companyId, queueId, target.start),
+    stats.add(dailyStatsRef(db, companyId, queueId, target.start, target.tz),
       {reserved: 1, available: -1});
     stats.apply(tx);
     // Quota du jour (les annulations ne le restituent pas).
@@ -346,8 +348,10 @@ async function replace(db, user, data, now = new Date()) {
     const oldSlotRef = db.collection("companies").doc(old.companyId)
       .collection("queues").doc(old.queueId)
       .collection("slots").doc(old.slotId);
-    const [oldSlotSnap, userSnap] = await Promise.all([
+    const [oldSlotSnap, userSnap, oldTz] = await Promise.all([
       tx.get(oldSlotRef), tx.get(userRef),
+      old.companyId === companyId ?
+        target.tz : companyTz(tx, db, old.companyId),
     ]);
     const active = await loadActive(tx, db, user.uid, now, oldResRef.path);
     checkConflicts(active, target, {companyId, queueId});
@@ -377,8 +381,8 @@ async function replace(db, user, data, now = new Date()) {
     // Date de l'ANCIEN créneau (l'ancienne version prenait à tort celle
     // du nouveau).
     stats.add(dailyStatsRef(db, old.companyId, old.queueId,
-      toDate(old.slotStart)), {reserved: -1, available: 1});
-    stats.add(dailyStatsRef(db, companyId, queueId, target.start),
+      toDate(old.slotStart), oldTz), {reserved: -1, available: 1});
+    stats.add(dailyStatsRef(db, companyId, queueId, target.start, target.tz),
       {reserved: 1, available: -1});
     stats.apply(tx);
   });
@@ -409,7 +413,9 @@ async function cancel(db, user, data) {
     const slotRef = db.collection("companies").doc(companyId)
       .collection("queues").doc(res.queueId)
       .collection("slots").doc(res.slotId);
-    const slotSnap = await tx.get(slotRef);
+    const [slotSnap, tz] = await Promise.all([
+      tx.get(slotRef), companyTz(tx, db, companyId),
+    ]);
 
     tx.update(resRef, {
       status: "cancelled",
@@ -424,7 +430,7 @@ async function cancel(db, user, data) {
     }
     const stats = new StatsDelta();
     stats.add(dailyStatsRef(db, companyId, res.queueId,
-      toDate(res.slotStart)), {reserved: -1, available: 1, cancelled: 1});
+      toDate(res.slotStart), tz), {reserved: -1, available: 1, cancelled: 1});
     stats.apply(tx);
   });
 

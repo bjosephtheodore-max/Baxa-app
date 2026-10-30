@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -9,6 +10,7 @@ import 'package:baxa/page b-acceuil/company/staff_page.dart';
 import 'package:baxa/page b-acceuil/company/company_deletion_gate_page.dart';
 import 'package:baxa/services/notifications/company_messaging_service.dart';
 import 'package:baxa/services/onboarding_service.dart';
+import 'package:baxa/services/time_zone_service.dart';
 import 'package:baxa/widgets/notifications_nav_icon.dart';
 import 'package:baxa/widgets/onboarding_widgets.dart';
 
@@ -94,6 +96,9 @@ class CompanyPageState extends State<CompanyPage> {
           return;
         }
       }
+
+      // Admin : fuseau de la structure (une seule fois, s'il manque).
+      unawaited(TimeZoneService.ensureCompanyTimeZone(user.uid));
 
       // Admin : départ de Baxa en cours ?
       try {

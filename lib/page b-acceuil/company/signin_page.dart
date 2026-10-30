@@ -5,6 +5,7 @@ import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:baxa/services/time_zone_service.dart';
 
 // Palette de l'onboarding structure (company_onboarding_page.dart) : la page
 // d'inscription en est la dernière étape et doit en garder l'esthétique.
@@ -209,6 +210,12 @@ class SigninPageState extends State<SigninPage> {
         }
         if (widget.locale != null) {
           entrepriseData["locale"] = widget.locale!;
+        }
+        // Fuseau du téléphone : jours et heures de la structure côté
+        // serveur (créneaux de nuit, résumé du matin, textes des notifs).
+        final timeZone = await TimeZoneService.deviceTimeZone();
+        if (timeZone != null) {
+          entrepriseData["timeZone"] = timeZone;
         }
 
         await FirebaseFirestore.instance

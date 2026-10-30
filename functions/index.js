@@ -8,6 +8,7 @@ const admin = require("firebase-admin");
 const {CloudTasksClient} = require("@google-cloud/tasks");
 const wake = require("./wake");
 const searchDir = require("./search_directory");
+const zone = require("./zone");
 admin.initializeApp();
 
 // Plafond d'instances par fonction (2e génération). Par défaut chacune peut
@@ -83,6 +84,13 @@ function isQueueClosedNow(closureStart, closureEnd, now) {
     if (n > ce) return false;
   }
   return true;
+}
+
+/** Fuseau horaire d'une structure (`timeZone` de sa fiche), ou celui par
+ * défaut si absent / invalide. Voir zone.js. */
+async function companyTimeZone(companyId) {
+  const snap = await db.collection("companies").doc(companyId).get();
+  return zone.tzOf(snap.exists ? snap.get("timeZone") : null);
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -220,12 +228,15 @@ async function cleanCompanyNotifications(companyId) {
 // (lancée chaque nuit par la maintenance de nuit, voir companyJob).
 // ====================================================================
 async function generateSlotsForCompany(companyId) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Tous les jours et toutes les heures (« 9h » d'une plage, minuit…) sont
+  // ceux du fuseau de la structure (voir zone.js).
+  const tz = await companyTimeZone(companyId);
+  const todayStr = zone.ymdIn(new Date(), tz);
+  const today = zone.dayBounds(todayStr, tz).start; // minuit local
 
   // Date limite passée : J-7 (on supprime ce qui est plus vieux)
-  const deleteBeforeDate = new Date(today);
-  deleteBeforeDate.setDate(deleteBeforeDate.getDate() - 7);
+  const deleteBeforeStr = zone.addDays(todayStr, -7);
+  const deleteBeforeDate = zone.dayBounds(deleteBeforeStr, tz).start;
 
   let totalGenerated = 0;
   let totalDeleted = 0;
@@ -332,7 +343,7 @@ async function generateSlotsForCompany(companyId) {
 
       // Supprimer les dailyStats obsolètes (< J-7)
       const oldStatsSnap = await dailyStatsRef
-        .where("date", "<", deleteBeforeDate.toISOString().split("T")[0])
+        .where("date", "<", deleteBeforeStr)
         .get();
       if (!oldStatsSnap.empty) {
         let statsBatch = db.batch();
@@ -343,20 +354,10 @@ async function generateSlotsForCompany(companyId) {
       console.log(`🗑️ File ${queueId}: ${deleteCount} vieux créneaux supprimés`);
     }
 
-    // Helper : formater une date en "YYYY-MM-DD"
-    const fmtDate = (d) => {
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      return `${y}-${m}-${day}`;
-    };
-
-    // Helper : écrire/mettre à jour les dailyStats d'un jour en agrégeant les slots existants
-    const upsertDailyStats = async (targetDate) => {
-      const dayStart = new Date(targetDate);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(dayStart);
-      dayEnd.setDate(dayEnd.getDate() + 1);
+    // Helper : écrire/mettre à jour les dailyStats d'un jour local
+    // (« AAAA-MM-JJ ») en agrégeant les slots existants
+    const upsertDailyStats = async (dayStr) => {
+      const { start: dayStart, end: dayEnd } = zone.dayBounds(dayStr, tz);
 
       const allSlots = await slotsRef
         .where("start", ">=", dayStart)
@@ -380,8 +381,8 @@ async function generateSlotsForCompany(companyId) {
         cancelled += sd.cancelled || 0;
       }
 
-      await dailyStatsRef.doc(fmtDate(targetDate)).set({
-        date: fmtDate(targetDate),
+      await dailyStatsRef.doc(dayStr).set({
+        date: dayStr,
         totalSlots,
         totalCapacity,
         available: totalCapacity - reserved,
@@ -416,12 +417,11 @@ async function generateSlotsForCompany(companyId) {
           );
 
           if (stillToCome.length === 0) {
-            const affectedDays = new Map();
+            const affectedDays = new Set();
             let delBatch = db.batch();
             let delCount = 0;
             for (const d of remainingSnap.docs) {
-              const day = d.data().start.toDate();
-              affectedDays.set(fmtDate(day), day);
+              affectedDays.add(zone.ymdIn(d.data().start.toDate(), tz));
               delBatch.delete(d.ref);
               delCount++;
               if (delCount >= 450) {
@@ -432,8 +432,8 @@ async function generateSlotsForCompany(companyId) {
             }
             if (delCount > 0) await delBatch.commit();
             await timeSlotDoc.ref.delete();
-            for (const day of affectedDays.values()) {
-              await upsertDailyStats(day);
+            for (const dayStr of affectedDays) {
+              await upsertDailyStats(dayStr);
             }
             totalDeleted += remainingSnap.size;
             console.log(
@@ -506,27 +506,20 @@ async function generateSlotsForCompany(companyId) {
       // Horizon de génération fixe (8 jours). Ce que le client VOIT est
       // borné séparément par `maxAdvanceDays` du doc file (filtre d'affichage).
       for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
-        const targetDate = new Date(today);
-        targetDate.setDate(targetDate.getDate() + dayOffset);
+        const dayStr = zone.addDays(todayStr, dayOffset);
+        const dayStart = zone.dayBounds(dayStr, tz).start;
 
-        const cfg = (pendingCfg && targetDate >= pendingEffectiveDate)
+        const cfg = (pendingCfg && dayStart >= pendingEffectiveDate)
           ? pendingCfg
           : currentCfg;
 
         // Vérifier si ce jour est ouvré (1=Lundi, 7=Dimanche)
-        const jsWeekday = targetDate.getDay();
-        const dartWeekday = jsWeekday === 0 ? 7 : jsWeekday;
-        if (!cfg.activeDays.includes(dartWeekday)) continue;
+        if (!cfg.activeDays.includes(zone.weekdayOf(dayStr))) continue;
 
-        // Parser les heures
-        const [startH, startM] = cfg.startTime.split(":").map(Number);
-        const [endH, endM] = cfg.endTime.split(":").map(Number);
-
-        const plageStart = new Date(targetDate);
-        plageStart.setHours(startH, startM, 0, 0);
-
-        const plageEnd = new Date(targetDate);
-        plageEnd.setHours(endH, endM, 0, 0);
+        // Heures murales de la plage, dans le fuseau de la structure
+        // (« 24:00 » = minuit du lendemain).
+        const plageStart = zone.zonedTime(dayStr, cfg.startTime, tz);
+        const plageEnd = zone.zonedTime(dayStr, cfg.endTime, tz);
 
         // Vérifier si des créneaux existent déjà pour cette plage
         const existingSnap = await slotsRef
@@ -537,10 +530,10 @@ async function generateSlotsForCompany(companyId) {
 
         if (!existingSnap.empty) {
           // Slots déjà générés — créer dailyStats si absent (migration)
-          const statsDoc = await dailyStatsRef.doc(fmtDate(targetDate)).get();
+          const statsDoc = await dailyStatsRef.doc(dayStr).get();
           if (!statsDoc.exists) {
-            await upsertDailyStats(targetDate);
-            console.log(`📊 File ${queueId}: dailyStats créé (migration) pour ${fmtDate(targetDate)}`);
+            await upsertDailyStats(dayStr);
+            console.log(`📊 File ${queueId}: dailyStats créé (migration) pour ${dayStr}`);
           }
           continue;
         }
@@ -579,8 +572,8 @@ async function generateSlotsForCompany(companyId) {
           await createBatch.commit();
           totalGenerated += createCount;
           // Écrire dailyStats précis en agrégeant les slots de ce jour
-          await upsertDailyStats(targetDate);
-          console.log(`✅ File ${queueId} / ${fmtDate(targetDate)}: ${createCount} créneaux + dailyStats`);
+          await upsertDailyStats(dayStr);
+          console.log(`✅ File ${queueId} / ${dayStr}: ${createCount} créneaux + dailyStats`);
         }
       }
     }
@@ -848,14 +841,13 @@ exports.onReservationCancelledByCompany = v2Updated("companies/{companyId}/reser
     const companyName = companyDoc.exists ? (companyDoc.data().nom || "L'entreprise") : "L'entreprise";
     const queueName = after.queueName || "";
 
+    // Date et heure dans le fuseau de la structure (voir zone.js).
+    const tz = zone.tzOf(companyDoc.exists ? companyDoc.get("timeZone") : null);
     let dateTimeText = "";
     const slotStart = after.slotStart ? after.slotStart.toDate() : null;
     if (slotStart) {
-      const dd = String(slotStart.getDate()).padStart(2, "0");
-      const mm = String(slotStart.getMonth() + 1).padStart(2, "0");
-      const hh = String(slotStart.getHours()).padStart(2, "0");
-      const mn = String(slotStart.getMinutes()).padStart(2, "0");
-      dateTimeText = ` du ${dd}/${mm}/${slotStart.getFullYear()} à ${hh}h${mn}`;
+      dateTimeText =
+        ` du ${zone.fmtDdMmYyyy(slotStart, tz)} à ${zone.fmtHHhMM(slotStart, tz)}`;
     }
 
     let reasonText;
@@ -932,14 +924,13 @@ exports.onReservationBlockChange = v2Updated("companies/{companyId}/reservations
     const queueName = after.queueName || "";
     const queueId = after.queueId || "";
 
+    // Date et heure dans le fuseau de la structure (voir zone.js).
+    const tz = zone.tzOf(companyDoc.exists ? companyDoc.get("timeZone") : null);
     let dateTimeText = "";
     const slotStart = after.slotStart ? after.slotStart.toDate() : null;
     if (slotStart) {
-      const dd = String(slotStart.getDate()).padStart(2, "0");
-      const mm = String(slotStart.getMonth() + 1).padStart(2, "0");
-      const hh = String(slotStart.getHours()).padStart(2, "0");
-      const mn = String(slotStart.getMinutes()).padStart(2, "0");
-      dateTimeText = ` du ${dd}/${mm} à ${hh}h${mn}`;
+      dateTimeText =
+        ` du ${zone.fmtDdMm(slotStart, tz)} à ${zone.fmtHHhMM(slotStart, tz)}`;
     }
 
     let title;
@@ -993,6 +984,8 @@ exports.onDeleteCompanyApproved = v2Updated("deletionRequests/{companyId}", asyn
       // ── 1. Récupérer les infos de l'entreprise ───────────────────
       const companyDoc = await companyRef.get();
       const companyName = companyDoc.exists ? (companyDoc.data().nom || "") : "";
+      // Dates des notifications dans le fuseau de la structure (zone.js).
+      const tz = zone.tzOf(companyDoc.exists ? companyDoc.get("timeZone") : null);
 
       // ── 2. Annuler toutes les réservations futures + notifier ─────
       const now = new Date();
@@ -1022,10 +1015,6 @@ exports.onDeleteCompanyApproved = v2Updated("deletionRequests/{companyId}", asyn
         count++;
 
         if (customerId && customerId !== "manual_booking" && slotStart) {
-          const dd = String(slotStart.getDate()).padStart(2, "0");
-          const mm = String(slotStart.getMonth() + 1).padStart(2, "0");
-          const hh = String(slotStart.getHours()).padStart(2, "0");
-          const mn = String(slotStart.getMinutes()).padStart(2, "0");
           const queueName = data.queueName || companyName;
 
           const notifRef = db
@@ -1036,8 +1025,8 @@ exports.onDeleteCompanyApproved = v2Updated("deletionRequests/{companyId}", asyn
           batch.set(notifRef, {
             title: "📅 Réservation annulée",
             body:
-              `Votre réservation du ${dd}/${mm}/${slotStart.getFullYear()} ` +
-              `à ${hh}h${mn} chez ${queueName} a été annulée. ` +
+              `Votre réservation du ${zone.fmtDdMmYyyy(slotStart, tz)} ` +
+              `à ${zone.fmtHHhMM(slotStart, tz)} chez ${queueName} a été annulée. ` +
               `${companyName} n'est plus disponible sur Baxa.`,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             type: "cancellation_by_company",
@@ -1215,7 +1204,7 @@ exports.onDeletionRequestCancelled = v2Deleted("deletionRequests/{companyId}", a
 // suppression existante (onDeleteCompanyApproved, FONCTION 6).
 // ====================================================================
 exports.executeScheduledDeletions = onSchedule(
-  { schedule: "0 3 * * *", timeZone: "Europe/Paris", region: SCHEDULER_REGION },
+  { schedule: "0 3 * * *", timeZone: "UTC", region: SCHEDULER_REGION },
   async () => {
     const now = new Date();
     const snap = await db
@@ -1315,6 +1304,8 @@ exports.scheduleReservationTimeline = v2Created({
 
     const companyName = data.companyName || "";
     const queueName = data.queueName || "";
+    // Heures des rappels affichées dans le fuseau de la structure.
+    const timeZone = await companyTimeZone(companyId);
 
     // Étape "confirmée" : écrite tout de suite (pas besoin de Cloud Tasks,
     // c'est immédiat) — donne une première entrée dans l'historique dès la
@@ -1326,6 +1317,7 @@ exports.scheduleReservationTimeline = v2Created({
       undefined,
       slotStart,
       slotEnd,
+      timeZone,
     );
     await db
       .collection("customers")
@@ -1368,6 +1360,7 @@ exports.scheduleReservationTimeline = v2Created({
       queueName,
       slotStart: slotStart.toISOString(),
       slotEnd: slotEnd.toISOString(),
+      timeZone,
     };
 
     const jobs = [
@@ -1466,17 +1459,13 @@ function formatMinutesLabel(minutes) {
 /** "28/02" — volontairement sans année : le titre de la notif doit rester
  * court (voir reservationStageContent), l'année n'aide en rien à repérer une
  * capture d'écran réutilisée d'un jour à l'autre. */
-function formatDayMonth(date) {
-  const dd = String(date.getDate()).padStart(2, "0");
-  const mm = String(date.getMonth() + 1).padStart(2, "0");
-  return `${dd}/${mm}`;
+function formatDayMonth(date, tz) {
+  return zone.fmtDdMm(date, tz);
 }
 
-/** "12h30 - 12h40" */
-function formatHourRange(start, end) {
-  const hm = (d) =>
-    `${String(d.getHours()).padStart(2, "0")}h${String(d.getMinutes()).padStart(2, "0")}`;
-  return `${hm(start)} - ${hm(end)}`;
+/** "12h30 - 12h40" (heure locale de la structure) */
+function formatHourRange(start, end, tz) {
+  return `${zone.fmtHHhMM(start, tz)} - ${zone.fmtHHhMM(end, tz)}`;
 }
 
 function reservationStageContent(
@@ -1486,6 +1475,7 @@ function reservationStageContent(
   reminderMinutes,
   slotStart,
   slotEnd,
+  tz,
 ) {
   const place = reservationVenueLabel(companyName, queueName);
   switch (kind) {
@@ -1508,15 +1498,15 @@ function reservationStageContent(
       // capture d'écran à devoir la refaire chaque jour plutôt qu'une seule
       // fois — voir la discussion sur la fraude aux notifications.
       return {
-        title: `🟢 ${place} · ${formatDayMonth(slotStart)}`,
+        title: `🟢 ${place} · ${formatDayMonth(slotStart, tz)}`,
         body:
-          `C'est ton tour (${formatHourRange(slotStart, slotEnd)}), ` +
+          `C'est ton tour (${formatHourRange(slotStart, slotEnd, tz)}), ` +
           "présente-toi maintenant ✅",
       };
     case "passed":
       return {
-        title: `🟠 ${place} · ${formatDayMonth(slotStart)}`,
-        body: `Ton créneau (${formatHourRange(slotStart, slotEnd)}) est terminé ⌛`,
+        title: `🟠 ${place} · ${formatDayMonth(slotStart, tz)}`,
+        body: `Ton créneau (${formatHourRange(slotStart, slotEnd, tz)}) est terminé ⌛`,
       };
     default:
       return null;
@@ -1543,6 +1533,7 @@ exports.deliverReservationNotification = onRequest(
       minutes,
       slotStart: slotStartIso,
       slotEnd: slotEndIso,
+      timeZone,
     } = req.body || {};
 
     const slotStart = slotStartIso ? new Date(slotStartIso) : null;
@@ -1555,6 +1546,7 @@ exports.deliverReservationNotification = onRequest(
       minutes,
       slotStart,
       slotEnd,
+      zone.tzOf(timeZone),
     );
     if (!customerId || !companyId || !reservationId || !content) {
       res.status(400).send("Payload invalide");
@@ -1765,25 +1757,10 @@ async function resolveCompanySuspensions(companyId) {
 // staff, pastille de non-lus). Le push est livré par sendCompanyPush.
 // ════════════════════════════════════════════════════════════════════
 
-const FR_TZ = "Europe/Paris";
+// Jours et heures des notifications : toujours ceux du fuseau de la
+// structure (zone.js — todayBounds, ymdIn, fmtClock, fmtDateFr…).
 const NEAR_FULL_PCT = 85;
 const UNDERUSED_PCT = 10;
-
-/** Bornes [début, fin[ du jour courant (heure serveur). */
-function todayBounds(now) {
-  const start = new Date(now || Date.now());
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return { start, end };
-}
-
-function ymd(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
 
 /** "08:00" → "8h" · "08:30" → "8h30" · "24:00" → "minuit". */
 function fmtHm(hm) {
@@ -1801,13 +1778,6 @@ function rangeLabel(tsData) {
   return a && b ? `${a}–${b}` : "";
 }
 
-/** Libellé d'horaire à partir d'une Date. */
-function fmtClock(d) {
-  if (!d) return "";
-  const h = d.getHours();
-  const m = d.getMinutes();
-  return m ? `${h}h${String(m).padStart(2, "0")}` : `${h}h`;
-}
 
 function fillPct(reservations, capacity) {
   if (!capacity) return 0;
@@ -1843,16 +1813,6 @@ async function writeCompanyNotification(companyId, opts) {
   }
 }
 
-const MOIS_FR = [
-  "janvier", "février", "mars", "avril", "mai", "juin",
-  "juillet", "août", "septembre", "octobre", "novembre", "décembre",
-];
-
-/** Date en français court : "15 septembre". */
-function fmtDateFr(d) {
-  if (!d) return "";
-  return `${d.getDate()} ${MOIS_FR[d.getMonth()]}`;
-}
 
 /** Écrit la même notification pour chaque membre d'équipe ACTIF
  * (audience "staff", une entrée par staffId → un push par personne).
@@ -1986,6 +1946,7 @@ exports.onCompanyStateChange = v2Updated("companies/{companyId}", async (change,
     if (dr.exists && dr.data().status !== "completed") return null;
 
     const name = after.nom || "Votre établissement";
+    const tz = zone.tzOf(after.timeZone); // dates dans le fuseau de la structure
 
     if (!wasClosed && isClosed) {
       const reopen = after.reopenAt ? after.reopenAt.toDate() : null;
@@ -1994,7 +1955,7 @@ exports.onCompanyStateChange = v2Updated("companies/{companyId}", async (change,
         title: "🔒 Réservations fermées",
         body: reopen
           ? `${name} ne prend plus de nouvelles réservations jusqu'au ` +
-            `${fmtDateFr(reopen)}. Les clients déjà réservés restent à ` +
+            `${zone.fmtDateFr(reopen, tz)}. Les clients déjà réservés restent à ` +
             `honorer — ils sont dans votre agenda.`
           : `${name} ne prend plus de nouvelles réservations. Les clients ` +
             `déjà réservés restent à honorer — ils sont dans votre agenda.`,
@@ -2018,7 +1979,7 @@ exports.onCompanyStateChange = v2Updated("companies/{companyId}", async (change,
         title: "📅 Fermeture prévue",
         body:
           `${name} sera fermé aux réservations à partir du ` +
-          `${fmtDateFr(start)}. Les clients déjà réservés pour cette période ` +
+          `${zone.fmtDateFr(start, tz)}. Les clients déjà réservés pour cette période ` +
           `restent à honorer.`,
       });
       return null;
@@ -2317,7 +2278,9 @@ async function checkPlageFillAfterReservation(companyId, resa) {
   if (!timeSlotId || !slot.start) return;
 
   const now = new Date();
-  const { start, end } = todayBounds(now);
+  // « Aujourd'hui » chez la structure.
+  const tz = await companyTimeZone(companyId);
+  const { start, end } = zone.todayBounds(now, tz);
   const slotStart = slot.start.toDate();
   if (slotStart < start || slotStart >= end) return; // pas aujourd'hui
 
@@ -2330,9 +2293,10 @@ async function checkPlageFillAfterReservation(companyId, resa) {
   const tsRef = queueRef.collection("timeSlots").doc(timeSlotId);
   const tsDoc = await tsRef.get();
   const tsData = tsDoc.exists ? tsDoc.data() : {};
-  const today = ymd(now);
+  const today = zone.ymdIn(now, tz);
   const label = rangeLabel(tsData) ||
-    `${fmtClock(g.firstStart)}–${fmtClock(g.lastEnd)}` || "cette plage";
+    `${zone.fmtClock(g.firstStart, tz)}–${zone.fmtClock(g.lastEnd, tz)}` ||
+    "cette plage";
 
   const queueDoc = await queueRef.get();
   const queueName =
@@ -2394,35 +2358,19 @@ async function checkPlageFillAfterReservation(companyId, resa) {
 //                         modifiée) → replanifier au prochain passage
 //   sent                : registre anti-doublon {"recap:<file>": jour, …}
 //
-// - planDaysDispatch (00:05) planifie la journée de toutes les structures.
-// - wakeTickDispatch (toutes les 15 min) ne traite que les structures dont
-//   `wakeAt` est passé (une seule requête, ~1 lecture si rien à faire),
-//   plus, par sécurité après 1h, celles que la planification de nuit
-//   aurait manquées (`plannedDay` < aujourd'hui).
-// - Le jour d'une échéance (et non l'heure du passage) fixe les bornes
-//   lues : un récap de minuit porte bien sur la veille.
+// - Le chef horloge (clockDispatch) planifie la journée de chaque
+//   structure à 0h DANS SON FUSEAU (tâche `planDay`).
+// - Le même chef, toutes les 15 min, ne traite que les structures dont
+//   `wakeAt` est passé (une seule requête, ~1 lecture si rien à faire).
+// - Filet : `wakeAt` ne dépasse jamais 0h30 locale du lendemain
+//   (capAtLocalRollover) — une planification manquée est rattrapée.
+// - Jours et heures sont ceux du fuseau de la structure (zone.js). Le jour
+//   d'une échéance (et non l'heure du passage) fixe les bornes lues : un
+//   récap de minuit porte bien sur la veille.
 // ════════════════════════════════════════════════════════════════════
-
-// Fuseau des « jours » de l'app (Sénégal, UTC+0 sans heure d'été) — le
-// même que BOOKING_TZ (booking.js) et que l'heure du serveur.
-const WAKE_TZ = "Africa/Dakar";
 
 function wakeRef(companyId) {
   return db.collection("companyWake").doc(companyId);
-}
-
-/** Bornes [début, fin[ d'un jour « AAAA-MM-JJ » (heure serveur). */
-function dayBoundsOf(dayStr) {
-  const [y, m, d] = dayStr.split("-").map(Number);
-  const start = new Date(y, m - 1, d);
-  const end = new Date(y, m - 1, d + 1);
-  return { start, end };
-}
-
-function addDaysStr(dayStr, n) {
-  const { start } = dayBoundsOf(dayStr);
-  start.setDate(start.getDate() + n);
-  return ymd(start);
 }
 
 function tsOrNull(msValue) {
@@ -2431,12 +2379,21 @@ function tsOrNull(msValue) {
     : admin.firestore.Timestamp.fromMillis(msValue);
 }
 
+/** Réveil au plus tard 30 min après le minuit local suivant : même sans
+ * échéance, chaque structure se replanifie chaque jour (processCompanyWake
+ * voit alors `plannedDay` ≠ aujourd'hui), quel que soit son fuseau. */
+function capAtLocalRollover(wakeMs, today, tz) {
+  const rollover = zone.dayBounds(zone.addDays(today, 1), tz).start.getTime() +
+    30 * 60 * 1000;
+  return wakeMs == null ? rollover : Math.min(wakeMs, rollover);
+}
+
 /**
  * Calcule les échéances du jour `day` pour toutes les files ouvertes de la
  * structure (lecture des créneaux de ce jour, une fois par file).
  */
-async function computeDayEvents(companyId, day, now, sent) {
-  const { start, end } = dayBoundsOf(day);
+async function computeDayEvents(companyId, day, now, sent, tz) {
+  const { start, end } = zone.dayBounds(day, tz);
   const queuesSnap = await db
     .collection("companies").doc(companyId)
     .collection("queues").get();
@@ -2461,13 +2418,14 @@ async function planCompanyWake(companyId, now) {
   const ref = wakeRef(companyId);
   const snap = await ref.get();
   const prev = snap.exists ? snap.data() : {};
-  const today = ymd(now);
-  const sent = wake.pruneSent(prev.sent, addDaysStr(today, -2));
-  const fresh = await computeDayEvents(companyId, today, now, sent);
+  const tz = await companyTimeZone(companyId);
+  const today = zone.ymdIn(now, tz);
+  const sent = wake.pruneSent(prev.sent, zone.addDays(today, -2));
+  const fresh = await computeDayEvents(companyId, today, now, sent, tz);
   const events = wake.mergeDayEvents(prev.events, today, fresh);
   await ref.set({
     events,
-    wakeAt: tsOrNull(wake.nextWakeAt(events)),
+    wakeAt: tsOrNull(capAtLocalRollover(wake.nextWakeAt(events), today, tz)),
     plannedDay: today,
     plannedAt: admin.firestore.Timestamp.fromDate(now),
     sent,
@@ -2529,7 +2487,7 @@ function queueScheduleChanged(change) {
 // ── Contenu des notifications ───────────────────────────────────────
 
 /** Corps et payload du « 📊 Bilan du jour » (logique inchangée). */
-async function buildRecapNotification(queueRef, plages, queueName, word) {
+async function buildRecapNotification(queueRef, plages, queueName, word, tz) {
   const tsSnap = await queueRef.collection("timeSlots").get();
   const tsMap = new Map(tsSnap.docs.map((t) => [t.id, t.data()]));
   const entries = [...plages.entries()].sort(
@@ -2547,7 +2505,7 @@ async function buildRecapNotification(queueRef, plages, queueName, word) {
   let totalEmpty = 0;
   for (const [tsId, g] of entries) {
     const label = rangeLabel(tsMap.get(tsId)) ||
-      `${fmtClock(g.firstStart)}–${fmtClock(g.lastEnd)}`;
+      `${zone.fmtClock(g.firstStart, tz)}–${zone.fmtClock(g.lastEnd, tz)}`;
     totalRes += g.reservations;
     totalCap += g.capacity;
     totalCancel += g.cancellations;
@@ -2605,7 +2563,7 @@ async function buildRecapNotification(queueRef, plages, queueName, word) {
 // Chaque handler renvoie {sent: bool} si l'échéance est consommée, ou
 // {retryAt: ms} pour la repousser (ex. plage allongée entre-temps).
 
-async function handleRecapEvent(companyId, ev, now, today) {
+async function handleRecapEvent(companyId, ev, now, today, tz) {
   const queueRef = db
     .collection("companies").doc(companyId)
     .collection("queues").doc(ev.queueId);
@@ -2616,7 +2574,7 @@ async function handleRecapEvent(companyId, ev, now, today) {
     return { sent: false };
   }
 
-  const { start, end } = dayBoundsOf(ev.day);
+  const { start, end } = zone.dayBounds(ev.day, tz);
   const plages = await aggregateSlotsByPlage(
     companyId, ev.queueId, start, end, now,
   );
@@ -2632,7 +2590,7 @@ async function handleRecapEvent(companyId, ev, now, today) {
 
   const queueName = qd.name || "votre file";
   const recap = await buildRecapNotification(
-    queueRef, plages, queueName, wake.dayWord(ev.day, today),
+    queueRef, plages, queueName, wake.dayWord(ev.day, today), tz,
   );
   await writeCompanyNotification(companyId, {
     type: "plage_recap",
@@ -2646,7 +2604,7 @@ async function handleRecapEvent(companyId, ev, now, today) {
   return { sent: true, recapEnd: dayLast };
 }
 
-async function handleCheckinEvent(companyId, ev, now) {
+async function handleCheckinEvent(companyId, ev, now, tz) {
   // Hors de la plage, ou trop tard après son milieu : périmé.
   if (now.getTime() > ev.until) return { sent: false };
   if (now.getTime() - ev.at > wake.CHECKIN_MAX_DELAY_MS) return { sent: false };
@@ -2660,7 +2618,7 @@ async function handleCheckinEvent(companyId, ev, now) {
     return { sent: false };
   }
 
-  const { start, end } = dayBoundsOf(ev.day);
+  const { start, end } = zone.dayBounds(ev.day, tz);
   const plages = await aggregateSlotsByPlage(
     companyId, ev.queueId, start, end, now,
   );
@@ -2691,12 +2649,12 @@ async function handleCheckinEvent(companyId, ev, now) {
   return { sent: true };
 }
 
-async function handleTeamEvent(companyId, ev, today) {
+async function handleTeamEvent(companyId, ev, today, tz) {
   // Inscriptions manuelles du staff faites ce jour-là (date de l'ajout),
   // encore actives — mêmes critères que wake.isStaffManualAdd. Requête de
   // comptage : 1 lecture quel que soit le nombre d'ajouts (index composite
   // source + createdByRole + status + createdAt, firestore.indexes.json).
-  const { start, end } = dayBoundsOf(ev.day);
+  const { start, end } = zone.dayBounds(ev.day, tz);
   const agg = await db
     .collection("companies").doc(companyId)
     .collection("reservations")
@@ -2723,7 +2681,8 @@ async function handleTeamEvent(companyId, ev, today) {
 /** Traite les échéances arrivées à terme d'une structure. */
 async function processCompanyWake(companyId, now) {
   const ref = wakeRef(companyId);
-  const today = ymd(now);
+  const tz = await companyTimeZone(companyId);
+  const today = zone.ymdIn(now, tz); // jour local de la structure
   let data = (await ref.get()).data() || {};
 
   // Replanification demandée (ou planification de nuit manquée). Une
@@ -2748,9 +2707,9 @@ async function processCompanyWake(companyId, now) {
     try {
       let res;
       if (kind === "recap") {
-        res = await handleRecapEvent(companyId, ev, now, today);
+        res = await handleRecapEvent(companyId, ev, now, today, tz);
       } else if (kind === "checkin") {
-        res = await handleCheckinEvent(companyId, ev, now);
+        res = await handleCheckinEvent(companyId, ev, now, tz);
       } else if (kind === "team") {
         // La dernière file a été allongée : le récap équipe suit.
         const pendingRecap = keep
@@ -2758,7 +2717,7 @@ async function processCompanyWake(companyId, now) {
           .reduce((mx, e) => Math.max(mx, e.at), 0);
         res = pendingRecap > ev.at
           ? { retryAt: pendingRecap }
-          : await handleTeamEvent(companyId, ev, today);
+          : await handleTeamEvent(companyId, ev, today, tz);
       } else {
         continue;
       }
@@ -2800,7 +2759,7 @@ async function processCompanyWake(companyId, now) {
     const cur = await tx.get(ref);
     const req = cur.get("replanRequestedAt");
     const plannedNow = cur.get("plannedAt");
-    let wakeMs = wake.nextWakeAt(keep);
+    let wakeMs = capAtLocalRollover(wake.nextWakeAt(keep), today, tz);
     if (req && (!plannedNow || req.toMillis() > plannedNow.toMillis())) {
       const soon = Math.max(
         req.toMillis() + wake.REPLAN_DEBOUNCE_MS, now.getTime(),
@@ -2818,9 +2777,10 @@ async function processCompanyWake(companyId, now) {
 // après l'autre dans une seule exécution (limite de temps → structures
 // de fin de liste jamais traitées quand il y en a beaucoup).
 //
-// Maintenant, à l'heure prévue, un « chef » (Europe : Cloud Scheduler et
-// Cloud Tasks n'existent pas à Johannesburg) dépose une tâche par
-// structure dans la file Cloud Tasks `company-jobs`. Chaque tâche appelle
+// Maintenant, un « chef horloge » (clockDispatch, toutes les 15 min, en
+// Europe : Cloud Scheduler et Cloud Tasks n'existent pas à Johannesburg)
+// dépose une tâche par structure dans la file Cloud Tasks `company-jobs`,
+// à l'heure LOCALE de chaque structure (0h, 2h, 7h, lundi 6h). Chaque tâche appelle
 // l'ouvrier `companyJob` (Johannesburg, à côté de la base), qui traite
 // UNE structure avec son propre chrono. Une tâche en erreur est
 // réessayée (3 tentatives) : tout ce que fait l'ouvrier peut être rejoué
@@ -2949,76 +2909,86 @@ async function dispatchCompanyJobs(job, companyIds, runKey) {
   if (failed) throw new Error(`${failed} tâche(s) ${job} non déposée(s)`);
 }
 
-/** Identifiants de toutes les structures (sans lire leur contenu). */
-async function allCompanyIds() {
-  const snap = await db.collection("companies").select().get();
-  return snap.docs.map((d) => d.id);
-}
-
-// Réglages communs des chefs (fonctions planifiées, 2e génération).
+// Réglages communs des fonctions planifiées (2e génération).
 const DISPATCH_OPTS = {
   region: SCHEDULER_REGION,
   secrets: ["TASK_AUTH_SECRET"],
   timeoutSeconds: 300,
 };
 
-// ── Maintenance de nuit (2h, heure de Paris) ────────────────────────
-exports.nightlyMaintenanceDispatch = onSchedule(
-  { ...DISPATCH_OPTS, schedule: "0 2 * * *", timeZone: FR_TZ },
-  async () => {
-    await dispatchCompanyJobs("nightly", await allCompanyIds(), ymd(new Date()));
-  });
+// ── Fuseaux utilisés par les structures ─────────────────────────────
+// Liste tenue à jour par syncSearchDirectory (nouvelle structure ou
+// fuseau modifié) et recalculée chaque nuit par rebuildSearchDirectory :
+// le chef horloge sait ainsi quels fuseaux interroger sans relire toutes
+// les fiches à chaque passage.
+const timeZonesRef = () => db.collection("platformMeta").doc("timeZones");
 
-// ── Résumé du matin (7h) ────────────────────────────────────────────
-exports.dayDigestDispatch = onSchedule(
-  { ...DISPATCH_OPTS, schedule: "0 7 * * *", timeZone: FR_TZ },
-  async () => {
-    await dispatchCompanyJobs("dayDigest", await allCompanyIds(), ymd(new Date()));
-  });
+async function timeZonesInUse() {
+  const snap = await timeZonesRef().get();
+  const zones = snap.exists ? snap.get("zones") : null;
+  return Array.isArray(zones) && zones.length ? zones : [zone.DEFAULT_TZ];
+}
 
-// ── Bilan hebdo (lundi 6h) ──────────────────────────────────────────
-exports.weeklyReviewDispatch = onSchedule(
-  { ...DISPATCH_OPTS, schedule: "0 6 * * 1", timeZone: FR_TZ },
-  async () => {
-    await dispatchCompanyJobs("weeklyReview", await allCompanyIds(), ymd(new Date()));
-  });
+/** Identifiants des structures d'un fuseau (sans lire leur contenu). */
+async function companyIdsInZone(tz) {
+  const snap = await db.collection("companies")
+    .where("timeZone", "==", tz)
+    .select()
+    .get();
+  return snap.docs.map((d) => d.id);
+}
 
-// ── Planification des réveils du jour (00:05) ───────────────────────
-exports.planDaysDispatch = onSchedule(
-  { ...DISPATCH_OPTS, schedule: "5 0 * * *", timeZone: WAKE_TZ },
-  async () => {
-    await dispatchCompanyJobs("planDay", await allCompanyIds(), ymd(new Date()));
-  });
+// Rendez-vous à l'HEURE LOCALE de chaque structure.
+const LOCAL_JOBS = [
+  { job: "planDay", hour: 0 }, // planification des réveils du jour
+  { job: "nightly", hour: 2 }, // maintenance de nuit
+  { job: "weeklyReview", hour: 6, weekday: 1 }, // bilan hebdo du lundi
+  { job: "dayDigest", hour: 7 }, // résumé du matin
+];
 
-// ── Passage toutes les 15 min : échéances arrivées à terme ──────────
-// Le chef ne lit que les réveils dus ; l'ouvrier traite chaque structure.
-exports.wakeTickDispatch = onSchedule(
-  { ...DISPATCH_OPTS, schedule: "*/15 * * * *", timeZone: WAKE_TZ },
+// ── Le chef horloge (toutes les 15 min) ─────────────────────────────
+// 1. Réveils arrivés à terme (instants absolus : bilan du jour, coup
+//    d'œil, ajouts de l'équipe) — une seule requête sur companyWake.
+// 2. Pour chaque fuseau utilisé où il est 0h, 2h, 7h (ou lundi 6h) en ce
+//    moment : une tâche par structure de ce fuseau. Le nom de la tâche
+//    porte le jour LOCAL : un passage relancé ne double rien.
+exports.clockDispatch = onSchedule(
+  { ...DISPATCH_OPTS, schedule: "*/15 * * * *", timeZone: "UTC" },
   async () => {
     const now = new Date();
-    const today = ymd(now);
-    const ids = new Set();
+    const errors = [];
 
     const dueSnap = await db.collection("companyWake")
       .where("wakeAt", "<=", admin.firestore.Timestamp.fromDate(now))
       .select()
       .get();
-    dueSnap.docs.forEach((d) => ids.add(d.id));
-
-    // Filet : planification de nuit manquée (laissée tranquille avant 1h,
-    // le temps que planDaysDispatch passe).
-    if (now.getHours() >= 1) {
-      const staleSnap = await db.collection("companyWake")
-        .where("plannedDay", "<", today)
-        .select()
-        .get();
-      staleSnap.docs.forEach((d) => ids.add(d.id));
+    if (!dueSnap.empty) {
+      const tickKey = now.toISOString().slice(0, 16).replace(/[-:T]/g, "");
+      try {
+        await dispatchCompanyJobs("wake", dueSnap.docs.map((d) => d.id), tickKey);
+      } catch (e) {
+        errors.push(e.message);
+      }
     }
-    if (ids.size === 0) return;
 
-    const hhmm = `${String(now.getHours()).padStart(2, "0")}` +
-      `${String(now.getMinutes()).padStart(2, "0")}`;
-    await dispatchCompanyJobs("wake", [...ids], `${today}-${hhmm}`);
+    for (const tz of await timeZonesInUse()) {
+      const jobs = LOCAL_JOBS.filter(
+        (j) => zone.isLocalSlot(now, tz, j.hour, j.weekday),
+      );
+      if (jobs.length === 0) continue;
+      const ids = await companyIdsInZone(tz);
+      if (ids.length === 0) continue;
+      const localDay = zone.ymdIn(now, tz);
+      for (const { job } of jobs) {
+        try {
+          await dispatchCompanyJobs(job, ids, localDay);
+        } catch (e) {
+          errors.push(e.message);
+        }
+      }
+    }
+
+    if (errors.length) throw new Error(errors.join(" · "));
   });
 
 // ── L'ouvrier : traite UNE structure (appelé par Cloud Tasks) ───────
@@ -3069,12 +3039,13 @@ exports.onTimeSlotScheduleChange = v2Written("companies/{companyId}/queues/{queu
     return null;
   });
 
-// ── Résumé du matin (7h) — seulement si remplissage du jour ≥ 40 % ──
-// Pour UNE structure (lancé par dayDigestDispatch).
+// ── Résumé du matin (7h locale) — seulement si remplissage ≥ 40 % ───
+// Pour UNE structure (lancé par le chef horloge, localClockDispatch).
 async function dayDigestForCompany(companyId) {
   const now = new Date();
-  const { start, end } = todayBounds(now);
-  const day = ymd(now);
+  const tz = await companyTimeZone(companyId);
+  const { start, end } = zone.todayBounds(now, tz);
+  const day = zone.ymdIn(now, tz);
 
   const companyRef = db.collection("companies").doc(companyId);
   const queuesSnap = await companyRef.collection("queues").get();
@@ -3107,7 +3078,7 @@ async function dayDigestForCompany(companyId) {
     const tsSnap = await queueDoc.ref.collection("timeSlots").get();
     const tsMap = new Map(tsSnap.docs.map((t) => [t.id, t.data()]));
     const peakLabel = rangeLabel(tsMap.get(peakId)) ||
-      `${fmtClock(peak.firstStart)}–${fmtClock(peak.lastEnd)}`;
+      `${zone.fmtClock(peak.firstStart, tz)}–${zone.fmtClock(peak.lastEnd, tz)}`;
     const nPlages = byPlage.size;
 
     await notifyAdminAndStaff(companyId, {
@@ -3123,15 +3094,15 @@ async function dayDigestForCompany(companyId) {
   }
 }
 
-// ── Bilan hebdo (lundi 6h) — plages sous-utilisées sur 14 jours ─────
-// Pour UNE structure (lancé par weeklyReviewDispatch).
+// ── Bilan hebdo (lundi 6h locale) — plages sous-utilisées sur 14 jours
+// Pour UNE structure (lancé par le chef horloge, localClockDispatch).
 async function weeklyReviewForCompany(companyId) {
   const now = new Date();
-  const { start: todayStart } = todayBounds(now);
-  const from = new Date(todayStart);
-  from.setDate(from.getDate() - 14);
+  const tz = await companyTimeZone(companyId);
+  const day = zone.ymdIn(now, tz);
+  const todayStart = zone.dayBounds(day, tz).start;
+  const from = zone.dayBounds(zone.addDays(day, -14), tz).start;
   const cooldownBefore = new Date(now.getTime() - 13 * 24 * 3600 * 1000);
-  const day = ymd(now);
 
   const companyRef = db.collection("companies").doc(companyId);
   const queuesSnap = await companyRef.collection("queues").get();
@@ -3210,6 +3181,7 @@ async function searchDirShardRef(country, companyId) {
 // N'écrit que si un champ affiché dans la recherche a changé. Écriture
 // « fusion » : la popularité (calculée la nuit) n'est pas écrasée, et
 // un champ disparu de la fiche est retiré de la ligne.
+// Tient aussi à jour la liste des fuseaux utilisés (chef horloge).
 exports.syncSearchDirectory = onDocumentWritten(
   { document: "companies/{companyId}", region: DB_REGION },
   async (event) => {
@@ -3236,6 +3208,15 @@ exports.syncSearchDirectory = onDocumentWritten(
       }
       await ref.set(
         { country: op.country, shard, entries: { [companyId]: entry } },
+        { merge: true },
+      );
+    }
+
+    // Nouvelle structure ou fuseau modifié : le chef horloge doit connaître
+    // ce fuseau pour la réveiller à son heure locale.
+    if (after && (!before || before.timeZone !== after.timeZone)) {
+      await timeZonesRef().set(
+        { zones: admin.firestore.FieldValue.arrayUnion(zone.tzOf(after.timeZone)) },
         { merge: true },
       );
     }
@@ -3297,8 +3278,33 @@ exports.rebuildSearchDirectory = onSchedule(
       if (!docs.has(doc.id)) await doc.ref.delete();
     }
 
+    // Fuseaux : une fiche sans `timeZone` valide (créée avant son ajout)
+    // reçoit le fuseau par défaut — le chef horloge interroge les
+    // structures par fuseau — puis la liste des fuseaux est recalculée.
+    const zones = new Set();
+    let batch = db.batch();
+    let pending = 0;
+    let filled = 0;
+    for (const c of companies) {
+      const tz = zone.tzOf(c.data.timeZone);
+      zones.add(tz);
+      if (c.data.timeZone !== tz) {
+        batch.update(db.collection("companies").doc(c.id), { timeZone: tz });
+        filled++;
+        if (++pending >= 400) {
+          await batch.commit();
+          batch = db.batch();
+          pending = 0;
+        }
+      }
+    }
+    if (pending > 0) await batch.commit();
+    await timeZonesRef().set({ zones: [...zones].sort() });
+
     console.log(
       `📇 Annuaire : ${listed.length} structure(s), ` +
-      `${docs.size} document(s) — ${JSON.stringify(shardCounts)}`,
+      `${docs.size} document(s) — ${JSON.stringify(shardCounts)} · ` +
+      `fuseaux : ${[...zones].join(", ")}` +
+      (filled ? ` (${filled} fiche(s) complétée(s))` : ""),
     );
   });
