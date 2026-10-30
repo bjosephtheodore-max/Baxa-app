@@ -780,22 +780,10 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
         cancellationSource: 'company_closure',
       );
 
-      // L'établissement part : l'accès du staff s'arrête tout de suite (le
-      // listener de révocation les déconnecte). En cas de retour dans les
-      // 7 jours, l'admin ré-invite ses membres avec de nouveaux codes.
-      final staffSnap = await _firestore
-          .collection('companies')
-          .doc(companyId)
-          .collection('staff')
-          .where('isActive', isEqualTo: true)
-          .get();
-      if (staffSnap.docs.isNotEmpty) {
-        final staffBatch = _firestore.batch();
-        for (final s in staffSnap.docs) {
-          staffBatch.update(s.reference, {'isActive': false});
-        }
-        await staffBatch.commit();
-      }
+      // L'accès du staff est coupé par la Cloud Function
+      // onDeletionRequestCreated, APRÈS l'envoi de la notif « quitte Baxa »
+      // (le faire ici pourrait les désactiver avant qu'ils soient prévenus).
+      // En cas de retour dans les 7 jours, l'admin ré-invite ses membres.
 
       if (!mounted) return;
       await showDialog<void>(

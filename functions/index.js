@@ -1,11 +1,53 @@
-const functions = require("firebase-functions/v1");
+const {
+  onDocumentCreated, onDocumentUpdated, onDocumentWritten, onDocumentDeleted,
+} = require("firebase-functions/v2/firestore");
+const {onSchedule} = require("firebase-functions/v2/scheduler");
+const {onRequest, onCall, HttpsError} = require("firebase-functions/v2/https");
+const {setGlobalOptions} = require("firebase-functions/v2");
 const admin = require("firebase-admin");
 const {CloudTasksClient} = require("@google-cloud/tasks");
 const wake = require("./wake");
+const searchDir = require("./search_directory");
 admin.initializeApp();
+
+// Plafond d'instances par fonction (2e génération). Par défaut chacune peut
+// monter à 100 instances, ce qui épuise le quota de processeur de la région
+// de Johannesburg dès le déploiement — et laisserait une boucle accidentelle
+// faire grimper la facture. Au-delà du plafond, les événements Firestore
+// attendent et sont relivrés : rien n'est perdu. À relever (avec une
+// demande de quota) quand le trafic le justifiera.
+setGlobalOptions({ maxInstances: 20 });
 
 const db = admin.firestore();
 const tasksClient = new CloudTasksClient();
+
+// Régions des fonctions 2e génération.
+// - DB_REGION : à côté de la base Firestore (Johannesburg) — pour tout ce
+//   qui lit / écrit beaucoup. Les déclencheurs Firestore 2e génération
+//   doivent de toute façon être dans la région de la base.
+// - SCHEDULER_REGION : Cloud Scheduler et Cloud Tasks n'existent pas à
+//   Johannesburg ; les tâches planifiées sont donc lancées depuis l'Europe.
+const DB_REGION = "africa-south1";
+const SCHEDULER_REGION = "europe-west1";
+
+// Adaptateurs 2e génération : le corps des fonctions garde sa signature
+// historique — (snap | change, context) pour les déclencheurs Firestore,
+// (data, context) pour les fonctions appelables — et seule l'enveloppe
+// change. Tous tournent à côté de la base (DB_REGION).
+function triggerOpts(docOrOpts) {
+  const o = typeof docOrOpts === "string" ? { document: docOrOpts } : docOrOpts;
+  return { region: DB_REGION, ...o };
+}
+const asV1 = (handler) => (event) =>
+  handler(event.data, { params: event.params });
+const v2Created = (d, handler) => onDocumentCreated(triggerOpts(d), asV1(handler));
+const v2Updated = (d, handler) => onDocumentUpdated(triggerOpts(d), asV1(handler));
+const v2Written = (d, handler) => onDocumentWritten(triggerOpts(d), asV1(handler));
+const v2Deleted = (d, handler) => onDocumentDeleted(triggerOpts(d), asV1(handler));
+const v2Callable = (handler) => onCall(
+  { region: DB_REGION },
+  (request) => handler(request.data, { auth: request.auth }),
+);
 
 // Projet/région utilisés pour la file Cloud Tasks des notifications de
 // réservation (rappels, validation, créneau passé) — voir FONCTION 7.
@@ -124,490 +166,460 @@ const COMPANY_NOTIF_TTL_HOURS = {
 };
 const COMPANY_NOTIF_DEFAULT_TTL_HOURS = 7 * 24;
 
-exports.cleanOldNotifications = functions.pubsub
-  .schedule("0 2 * * *")
-  .timeZone("Europe/Paris")
-  .onRun(async () => {
-    const now = Date.now();
-    // Rien de plus jeune que 24h ne peut être expiré — pré-filtre grossier.
-    const coarseCutoff = new Date(now - 24 * 3600 * 1000);
-    const sevenDaysAgo = new Date(now - 7 * 24 * 3600 * 1000);
+/** Purge le journal de notifications d'UNE structure (durée de vie par
+ * type). Lancée chaque nuit par la maintenance de nuit. */
+async function cleanCompanyNotifications(companyId) {
+  const companyRef = db.collection("companies").doc(companyId);
+  const now = Date.now();
+  // Rien de plus jeune que 24h ne peut être expiré — pré-filtre grossier.
+  const coarseCutoff = new Date(now - 24 * 3600 * 1000);
+  const sevenDaysAgo = new Date(now - 7 * 24 * 3600 * 1000);
+  let totalDeleted = 0;
 
-    let totalDeleted = 0;
-    const companiesSnap = await db.collection("companies").get();
+  // ── Journal unifié : purge par type ──
+  const journalSnap = await companyRef
+    .collection("companyNotifications")
+    .where("createdAt", "<", coarseCutoff)
+    .get();
 
-    for (const companyDoc of companiesSnap.docs) {
-      // ── Journal unifié : purge par type ──
-      const journalSnap = await companyDoc.ref
-        .collection("companyNotifications")
-        .where("createdAt", "<", coarseCutoff)
-        .get();
+  let batch = db.batch();
+  let count = 0;
+  for (const doc of journalSnap.docs) {
+    const d = doc.data();
+    const created = d.createdAt ? d.createdAt.toDate().getTime() : 0;
+    const ttlH = COMPANY_NOTIF_TTL_HOURS[d.type] ||
+      COMPANY_NOTIF_DEFAULT_TTL_HOURS;
+    if (created && now - created > ttlH * 3600 * 1000) {
+      batch.delete(doc.ref);
+      totalDeleted++;
+      if (++count >= 400) {
+        await batch.commit();
+        batch = db.batch();
+        count = 0;
+      }
+    }
+  }
+  if (count > 0) await batch.commit();
 
-      let batch = db.batch();
-      let count = 0;
-      for (const doc of journalSnap.docs) {
-        const d = doc.data();
-        const created = d.createdAt ? d.createdAt.toDate().getTime() : 0;
-        const ttlH = COMPANY_NOTIF_TTL_HOURS[d.type] ||
-          COMPANY_NOTIF_DEFAULT_TTL_HOURS;
-        if (created && now - created > ttlH * 3600 * 1000) {
-          batch.delete(doc.ref);
-          totalDeleted++;
-          if (++count >= 400) {
-            await batch.commit();
-            batch = db.batch();
-            count = 0;
+  // ── Ancienne collection (transition) : > 7 jours ──
+  const oldNotifs = await companyRef
+    .collection("notificationsHistory")
+    .where("createdAt", "<", sevenDaysAgo)
+    .get();
+  if (!oldNotifs.empty) {
+    let b2 = db.batch();
+    oldNotifs.docs.forEach((doc) => b2.delete(doc.ref));
+    await b2.commit();
+    totalDeleted += oldNotifs.size;
+  }
+  return totalDeleted;
+}
+
+// ====================================================================
+// FONCTION 3 : Génération automatique des créneaux d'UNE structure
+// (lancée chaque nuit par la maintenance de nuit, voir companyJob).
+// ====================================================================
+async function generateSlotsForCompany(companyId) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  // Date limite passée : J-7 (on supprime ce qui est plus vieux)
+  const deleteBeforeDate = new Date(today);
+  deleteBeforeDate.setDate(deleteBeforeDate.getDate() - 7);
+
+  let totalGenerated = 0;
+  let totalDeleted = 0;
+
+  // ── Récupérer les files ──────────────────────────────────────
+  // Toutes les files : les inactives sont ignorées pour la génération
+  // (voir ci-dessous), mais une file inactive avec `deleteAfter` doit
+  // quand même être traitée pour sa suppression programmée.
+  const queuesSnap = await db
+    .collection("companies")
+    .doc(companyId)
+    .collection("queues")
+    .get();
+
+  for (const queueDoc of queuesSnap.docs) {
+    const queueData = queueDoc.data();
+    const queueId = queueDoc.id;
+
+    // Fermeture en cours → on cesse de générer des créneaux pour cette
+    // file (inutile de maintenir un horizon que personne ne peut
+    // réserver, y compris pour une fermeture datée d'un mois ou d'un an).
+    // Exception « préchauffage » : si la réouverture est datée et tombe
+    // dans moins de 48h, on régénère déjà pour que les créneaux du jour
+    // de réouverture existent. Le nettoyage des vieux créneaux, la
+    // promotion des modifs programmées et les suppressions programmées
+    // continuent normalement — seule la génération est suspendue.
+    const genNow = new Date();
+    const closedNow = isQueueClosedNow(
+      queueData.closureStart, queueData.closureEnd, genNow,
+    );
+    let skipGeneration = false;
+    if (closedNow) {
+      const reopenTs = queueData.closureEnd
+        ? queueData.closureEnd.toDate() : null;
+      const reopenSoon = reopenTs !== null &&
+        (reopenTs.getTime() - genNow.getTime()) < 48 * 60 * 60 * 1000;
+      skipGeneration = !reopenSoon;
+    }
+    if (skipGeneration) {
+      console.log(`⏸️ File ${queueId} : fermée, génération suspendue`);
+    }
+
+    // Jours ouvrés : weekdays ou defaultWorkingDays
+    const weekdays = queueData.weekdays
+      || queueData.defaultWorkingDays
+      || [1, 2, 3, 4, 5];
+
+    // ── Récupérer les plages horaires (timeSlots) ────────────────
+    const timeSlotsSnap = await db
+      .collection("companies")
+      .doc(companyId)
+      .collection("queues")
+      .doc(queueId)
+      .collection("timeSlots")
+      .get();
+
+    if (timeSlotsSnap.empty) {
+      console.log(`⚠️ File ${queueId} : aucune plage horaire configurée`);
+      continue;
+    }
+
+    const slotsRef = db
+      .collection("companies")
+      .doc(companyId)
+      .collection("queues")
+      .doc(queueId)
+      .collection("slots");
+
+    const dailyStatsRef = db
+      .collection("companies")
+      .doc(companyId)
+      .collection("queues")
+      .doc(queueId)
+      .collection("dailyStats");
+
+    // ── ÉTAPE 1 : Supprimer les vieux créneaux et dailyStats (< J-7) ──
+    const oldSlotsSnap = await db
+      .collection("companies")
+      .doc(companyId)
+      .collection("queues")
+      .doc(queueId)
+      .collection("slots")
+      .where("start", "<", deleteBeforeDate)
+      .get();
+
+    if (!oldSlotsSnap.empty) {
+      let deleteBatch = db.batch();
+      let deleteCount = 0;
+
+      for (const slotDoc of oldSlotsSnap.docs) {
+        const slotData = slotDoc.data();
+        if ((slotData.reserved || 0) === 0) {
+          deleteBatch.delete(slotDoc.ref);
+          deleteCount++;
+          if (deleteCount >= 500) {
+            await deleteBatch.commit();
+            deleteBatch = db.batch();
+            deleteCount = 0;
           }
         }
       }
-      if (count > 0) await batch.commit();
+      if (deleteCount > 0) await deleteBatch.commit();
+      totalDeleted += deleteCount;
 
-      // ── Ancienne collection (transition) : > 7 jours ──
-      const oldNotifs = await companyDoc.ref
-        .collection("notificationsHistory")
-        .where("createdAt", "<", sevenDaysAgo)
+      // Supprimer les dailyStats obsolètes (< J-7)
+      const oldStatsSnap = await dailyStatsRef
+        .where("date", "<", deleteBeforeDate.toISOString().split("T")[0])
         .get();
-      if (!oldNotifs.empty) {
-        let b2 = db.batch();
-        oldNotifs.docs.forEach((doc) => b2.delete(doc.ref));
-        await b2.commit();
-        totalDeleted += oldNotifs.size;
+      if (!oldStatsSnap.empty) {
+        let statsBatch = db.batch();
+        oldStatsSnap.docs.forEach((d) => statsBatch.delete(d.ref));
+        await statsBatch.commit();
       }
+
+      console.log(`🗑️ File ${queueId}: ${deleteCount} vieux créneaux supprimés`);
     }
 
-    console.log(`🧹 Journal entreprise : ${totalDeleted} notification(s) purgée(s)`);
-    return { success: true, totalDeleted };
-  });
+    // Helper : formater une date en "YYYY-MM-DD"
+    const fmtDate = (d) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
 
-// ====================================================================
-// FONCTION 3 : Génération automatique des créneaux (tous les jours)
-// ====================================================================
-exports.generateSlots = functions.pubsub
-  .schedule("30 2 * * *") // Tous les jours à 2h30 du matin UTC
-  .timeZone("Europe/Paris")
-  .onRun(async (context) => {
-    console.log("📅 Démarrage génération automatique des créneaux...");
+    // Helper : écrire/mettre à jour les dailyStats d'un jour en agrégeant les slots existants
+    const upsertDailyStats = async (targetDate) => {
+      const dayStart = new Date(targetDate);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(dayStart);
+      dayEnd.setDate(dayEnd.getDate() + 1);
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    // Date limite passée : J-7 (on supprime ce qui est plus vieux)
-    const deleteBeforeDate = new Date(today);
-    deleteBeforeDate.setDate(deleteBeforeDate.getDate() - 7);
-
-    // Date limite future : J+14 (on génère jusqu'à là)
-    const generateUntilDate = new Date(today);
-    generateUntilDate.setDate(generateUntilDate.getDate() + 14);
-
-    let totalGenerated = 0;
-    let totalDeleted = 0;
-
-    const companiesSnap = await db.collection("companies").get();
-    console.log(`🏢 ${companiesSnap.size} entreprise(s) à traiter`);
-
-    for (const companyDoc of companiesSnap.docs) {
-      const companyId = companyDoc.id;
-
-      // ── Récupérer les files ──────────────────────────────────────
-      // Toutes les files : les inactives sont ignorées pour la génération
-      // (voir ci-dessous), mais une file inactive avec `deleteAfter` doit
-      // quand même être traitée pour sa suppression programmée.
-      const queuesSnap = await db
-        .collection("companies")
-        .doc(companyId)
-        .collection("queues")
+      const allSlots = await slotsRef
+        .where("start", ">=", dayStart)
+        .where("start", "<", dayEnd)
         .get();
 
-      for (const queueDoc of queuesSnap.docs) {
-        const queueData = queueDoc.data();
-        const queueId = queueDoc.id;
+      // Note : on n'écarte pas le cas "aucun créneau" — une journée vidée
+      // (plage supprimée) doit voir son résumé remis à zéro, pas rester
+      // figée sur d'anciens chiffres.
 
-        // Fermeture en cours → on cesse de générer des créneaux pour cette
-        // file (inutile de maintenir un horizon que personne ne peut
-        // réserver, y compris pour une fermeture datée d'un mois ou d'un an).
-        // Exception « préchauffage » : si la réouverture est datée et tombe
-        // dans moins de 48h, on régénère déjà pour que les créneaux du jour
-        // de réouverture existent. Le nettoyage des vieux créneaux, la
-        // promotion des modifs programmées et les suppressions programmées
-        // continuent normalement — seule la génération est suspendue.
-        const genNow = new Date();
-        const closedNow = isQueueClosedNow(
-          queueData.closureStart, queueData.closureEnd, genNow,
-        );
-        let skipGeneration = false;
-        if (closedNow) {
-          const reopenTs = queueData.closureEnd
-            ? queueData.closureEnd.toDate() : null;
-          const reopenSoon = reopenTs !== null &&
-            (reopenTs.getTime() - genNow.getTime()) < 48 * 60 * 60 * 1000;
-          skipGeneration = !reopenSoon;
+      let totalSlots = 0;
+      let totalCapacity = 0;
+      let reserved = 0;
+      let cancelled = 0;
+
+      for (const s of allSlots.docs) {
+        const sd = s.data();
+        totalSlots++;
+        totalCapacity += sd.capacity || 0;
+        reserved += sd.reserved || 0;
+        cancelled += sd.cancelled || 0;
+      }
+
+      await dailyStatsRef.doc(fmtDate(targetDate)).set({
+        date: fmtDate(targetDate),
+        totalSlots,
+        totalCapacity,
+        available: totalCapacity - reserved,
+        reserved,
+        cancelled,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    };
+
+    // ── ÉTAPE 2 : Générer les créneaux manquants selon maxAdvanceDays ──
+    for (const timeSlotDoc of timeSlotsSnap.docs) {
+      let tsData = timeSlotDoc.data();
+
+      // ── Suppression programmée d'une plage ────────────────────────
+      // Marqueur `deleteAfter` posé par l'app : la plage n'accepte plus
+      // aucune nouvelle réservation (ses créneaux vides futurs ont déjà
+      // été retirés), on ne la régénère donc jamais tant que le marqueur
+      // est présent. Une fois la date atteinte ET toutes les réservations
+      // en cours passées, on supprime définitivement la plage et ses
+      // créneaux restants, puis on recalcule les dailyStats des jours
+      // concernés.
+      if (tsData.deleteAfter) {
+        if (tsData.deleteAfter.toDate() <= today) {
+          const nowTs = new Date();
+          const remainingSnap = await slotsRef
+            .where("timeSlotId", "==", timeSlotDoc.id)
+            .get();
+          const stillToCome = remainingSnap.docs.filter(
+            (d) =>
+              (d.data().reserved || 0) > 0 &&
+              d.data().start.toDate() > nowTs,
+          );
+
+          if (stillToCome.length === 0) {
+            const affectedDays = new Map();
+            let delBatch = db.batch();
+            let delCount = 0;
+            for (const d of remainingSnap.docs) {
+              const day = d.data().start.toDate();
+              affectedDays.set(fmtDate(day), day);
+              delBatch.delete(d.ref);
+              delCount++;
+              if (delCount >= 450) {
+                await delBatch.commit();
+                delBatch = db.batch();
+                delCount = 0;
+              }
+            }
+            if (delCount > 0) await delBatch.commit();
+            await timeSlotDoc.ref.delete();
+            for (const day of affectedDays.values()) {
+              await upsertDailyStats(day);
+            }
+            totalDeleted += remainingSnap.size;
+            console.log(
+              `🗑️ File ${queueId} / plage ${timeSlotDoc.id} : suppression programmée appliquée`,
+            );
+          }
         }
-        if (skipGeneration) {
-          console.log(`⏸️ File ${queueId} : fermée, génération suspendue`);
-        }
+        // Marqueur présent → ne jamais générer pour cette plage.
+        continue;
+      }
 
-        // Jours ouvrés : weekdays ou defaultWorkingDays
-        const weekdays = queueData.weekdays
-          || queueData.defaultWorkingDays
-          || [1, 2, 3, 4, 5];
+      // ── Promotion d'une modification programmée arrivée à échéance ──
+      // "en attente" → "actuelle" dès que la date d'effet est atteinte.
+      // Après promotion, plus aucune branche pending/actuelle à gérer :
+      // tsData reflète directement la nouvelle config.
+      const pendingEffectiveTs = tsData.pendingEffectiveDate;
+      if (pendingEffectiveTs && pendingEffectiveTs.toDate() <= today) {
+        const promoted = {
+          startTime: tsData.pendingStartTime,
+          endTime: tsData.pendingEndTime,
+          serviceDurationMinutes: tsData.pendingServiceDurationMinutes,
+          capacityPerSlot: tsData.pendingCapacityPerSlot,
+          workingDays: tsData.pendingWorkingDays,
+          maxAdvanceDays: tsData.pendingMaxAdvanceDays,
+          reservationDeadlineMinutes: tsData.pendingReservationDeadlineMinutes,
+          pendingStartTime: admin.firestore.FieldValue.delete(),
+          pendingEndTime: admin.firestore.FieldValue.delete(),
+          pendingServiceDurationMinutes: admin.firestore.FieldValue.delete(),
+          pendingCapacityPerSlot: admin.firestore.FieldValue.delete(),
+          pendingWorkingDays: admin.firestore.FieldValue.delete(),
+          pendingMaxAdvanceDays: admin.firestore.FieldValue.delete(),
+          pendingReservationDeadlineMinutes: admin.firestore.FieldValue.delete(),
+          pendingEffectiveDate: admin.firestore.FieldValue.delete(),
+        };
+        await timeSlotDoc.ref.update(promoted);
+        tsData = { ...tsData, ...promoted };
+        // `maxAdvanceDays` est désormais un réglage de la FILE (doc file),
+        // plus de la plage : rien à resynchroniser ici.
+        console.log(`🔄 File ${queueId} / plage ${timeSlotDoc.id} : modification programmée promue`);
+      }
 
-        // ── Récupérer les plages horaires (timeSlots) ────────────────
-        const timeSlotsSnap = await db
-          .collection("companies")
-          .doc(companyId)
-          .collection("queues")
-          .doc(queueId)
-          .collection("timeSlots")
+      // Fermeture en cours (hors préchauffage 48h) : on ne génère pas.
+      if (skipGeneration) continue;
+
+      const currentCfg = {
+        startTime: tsData.startTime || "09:00",
+        endTime: tsData.endTime || "12:00",
+        duration: tsData.serviceDurationMinutes || 15,
+        capacity: tsData.capacityPerSlot || 1,
+        activeDays: tsData.workingDays || weekdays,
+      };
+
+      // Encore en attente (échéance pas encore atteinte) : la période à
+      // partir de la date d'effet suit la config en attente, pas
+      // l'actuelle — nécessaire pour les jours qui n'ont pas encore été
+      // générés à l'avance (au-delà de l'horizon de 7 jours utilisé par
+      // la génération immédiate côté app au moment où c'est programmé).
+      const stillPendingTs = tsData.pendingEffectiveDate;
+      const pendingEffectiveDate = stillPendingTs ? stillPendingTs.toDate() : null;
+      const pendingCfg = pendingEffectiveDate
+        ? {
+            startTime: tsData.pendingStartTime || currentCfg.startTime,
+            endTime: tsData.pendingEndTime || currentCfg.endTime,
+            duration: tsData.pendingServiceDurationMinutes || currentCfg.duration,
+            capacity: tsData.pendingCapacityPerSlot || currentCfg.capacity,
+            activeDays: tsData.pendingWorkingDays || currentCfg.activeDays,
+          }
+        : null;
+
+      // Horizon de génération fixe (8 jours). Ce que le client VOIT est
+      // borné séparément par `maxAdvanceDays` du doc file (filtre d'affichage).
+      for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
+        const targetDate = new Date(today);
+        targetDate.setDate(targetDate.getDate() + dayOffset);
+
+        const cfg = (pendingCfg && targetDate >= pendingEffectiveDate)
+          ? pendingCfg
+          : currentCfg;
+
+        // Vérifier si ce jour est ouvré (1=Lundi, 7=Dimanche)
+        const jsWeekday = targetDate.getDay();
+        const dartWeekday = jsWeekday === 0 ? 7 : jsWeekday;
+        if (!cfg.activeDays.includes(dartWeekday)) continue;
+
+        // Parser les heures
+        const [startH, startM] = cfg.startTime.split(":").map(Number);
+        const [endH, endM] = cfg.endTime.split(":").map(Number);
+
+        const plageStart = new Date(targetDate);
+        plageStart.setHours(startH, startM, 0, 0);
+
+        const plageEnd = new Date(targetDate);
+        plageEnd.setHours(endH, endM, 0, 0);
+
+        // Vérifier si des créneaux existent déjà pour cette plage
+        const existingSnap = await slotsRef
+          .where("start", ">=", plageStart)
+          .where("start", "<", plageEnd)
+          .limit(1)
           .get();
 
-        if (timeSlotsSnap.empty) {
-          console.log(`⚠️ File ${queueId} : aucune plage horaire configurée`);
+        if (!existingSnap.empty) {
+          // Slots déjà générés — créer dailyStats si absent (migration)
+          const statsDoc = await dailyStatsRef.doc(fmtDate(targetDate)).get();
+          if (!statsDoc.exists) {
+            await upsertDailyStats(targetDate);
+            console.log(`📊 File ${queueId}: dailyStats créé (migration) pour ${fmtDate(targetDate)}`);
+          }
           continue;
         }
 
-        const slotsRef = db
-          .collection("companies")
-          .doc(companyId)
-          .collection("queues")
-          .doc(queueId)
-          .collection("slots");
+        // Générer les créneaux pour ce jour
+        let createBatch = db.batch();
+        let createCount = 0;
+        let cursor = new Date(plageStart);
 
-        const dailyStatsRef = db
-          .collection("companies")
-          .doc(companyId)
-          .collection("queues")
-          .doc(queueId)
-          .collection("dailyStats");
+        while (cursor.getTime() + cfg.duration * 60 * 1000 <= plageEnd.getTime()) {
+          const slotEnd = new Date(cursor.getTime() + cfg.duration * 60 * 1000);
 
-        // ── ÉTAPE 1 : Supprimer les vieux créneaux et dailyStats (< J-7) ──
-        const oldSlotsSnap = await db
-          .collection("companies")
-          .doc(companyId)
-          .collection("queues")
-          .doc(queueId)
-          .collection("slots")
-          .where("start", "<", deleteBeforeDate)
-          .get();
-
-        if (!oldSlotsSnap.empty) {
-          let deleteBatch = db.batch();
-          let deleteCount = 0;
-
-          for (const slotDoc of oldSlotsSnap.docs) {
-            const slotData = slotDoc.data();
-            if ((slotData.reserved || 0) === 0) {
-              deleteBatch.delete(slotDoc.ref);
-              deleteCount++;
-              if (deleteCount >= 500) {
-                await deleteBatch.commit();
-                deleteBatch = db.batch();
-                deleteCount = 0;
-              }
-            }
-          }
-          if (deleteCount > 0) await deleteBatch.commit();
-          totalDeleted += deleteCount;
-
-          // Supprimer les dailyStats obsolètes (< J-7)
-          const oldStatsSnap = await dailyStatsRef
-            .where("date", "<", deleteBeforeDate.toISOString().split("T")[0])
-            .get();
-          if (!oldStatsSnap.empty) {
-            let statsBatch = db.batch();
-            oldStatsSnap.docs.forEach((d) => statsBatch.delete(d.ref));
-            await statsBatch.commit();
-          }
-
-          console.log(`🗑️ File ${queueId}: ${deleteCount} vieux créneaux supprimés`);
-        }
-
-        // Helper : formater une date en "YYYY-MM-DD"
-        const fmtDate = (d) => {
-          const y = d.getFullYear();
-          const m = String(d.getMonth() + 1).padStart(2, "0");
-          const day = String(d.getDate()).padStart(2, "0");
-          return `${y}-${m}-${day}`;
-        };
-
-        // Helper : écrire/mettre à jour les dailyStats d'un jour en agrégeant les slots existants
-        const upsertDailyStats = async (targetDate) => {
-          const dayStart = new Date(targetDate);
-          dayStart.setHours(0, 0, 0, 0);
-          const dayEnd = new Date(dayStart);
-          dayEnd.setDate(dayEnd.getDate() + 1);
-
-          const allSlots = await slotsRef
-            .where("start", ">=", dayStart)
-            .where("start", "<", dayEnd)
-            .get();
-
-          // Note : on n'écarte pas le cas "aucun créneau" — une journée vidée
-          // (plage supprimée) doit voir son résumé remis à zéro, pas rester
-          // figée sur d'anciens chiffres.
-
-          let totalSlots = 0;
-          let totalCapacity = 0;
-          let reserved = 0;
-          let cancelled = 0;
-
-          for (const s of allSlots.docs) {
-            const sd = s.data();
-            totalSlots++;
-            totalCapacity += sd.capacity || 0;
-            reserved += sd.reserved || 0;
-            cancelled += sd.cancelled || 0;
-          }
-
-          await dailyStatsRef.doc(fmtDate(targetDate)).set({
-            date: fmtDate(targetDate),
-            totalSlots,
-            totalCapacity,
-            available: totalCapacity - reserved,
-            reserved,
-            cancelled,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          createBatch.set(slotsRef.doc(), {
+            "start": cursor,
+            "end": slotEnd,
+            "capacity": cfg.capacity,
+            "reserved": 0,
+            "cancelled": 0,
+            "status": "open",
+            "duration": cfg.duration,
+            "isLegacy": false,
+            "timeSlotId": timeSlotDoc.id,
           });
-        };
 
-        // ── ÉTAPE 2 : Générer les créneaux manquants selon maxAdvanceDays ──
-        for (const timeSlotDoc of timeSlotsSnap.docs) {
-          let tsData = timeSlotDoc.data();
+          createCount++;
+          cursor = new Date(slotEnd);
 
-          // ── Suppression programmée d'une plage ────────────────────────
-          // Marqueur `deleteAfter` posé par l'app : la plage n'accepte plus
-          // aucune nouvelle réservation (ses créneaux vides futurs ont déjà
-          // été retirés), on ne la régénère donc jamais tant que le marqueur
-          // est présent. Une fois la date atteinte ET toutes les réservations
-          // en cours passées, on supprime définitivement la plage et ses
-          // créneaux restants, puis on recalcule les dailyStats des jours
-          // concernés.
-          if (tsData.deleteAfter) {
-            if (tsData.deleteAfter.toDate() <= today) {
-              const nowTs = new Date();
-              const remainingSnap = await slotsRef
-                .where("timeSlotId", "==", timeSlotDoc.id)
-                .get();
-              const stillToCome = remainingSnap.docs.filter(
-                (d) =>
-                  (d.data().reserved || 0) > 0 &&
-                  d.data().start.toDate() > nowTs,
-              );
-
-              if (stillToCome.length === 0) {
-                const affectedDays = new Map();
-                let delBatch = db.batch();
-                let delCount = 0;
-                for (const d of remainingSnap.docs) {
-                  const day = d.data().start.toDate();
-                  affectedDays.set(fmtDate(day), day);
-                  delBatch.delete(d.ref);
-                  delCount++;
-                  if (delCount >= 450) {
-                    await delBatch.commit();
-                    delBatch = db.batch();
-                    delCount = 0;
-                  }
-                }
-                if (delCount > 0) await delBatch.commit();
-                await timeSlotDoc.ref.delete();
-                for (const day of affectedDays.values()) {
-                  await upsertDailyStats(day);
-                }
-                totalDeleted += remainingSnap.size;
-                console.log(
-                  `🗑️ File ${queueId} / plage ${timeSlotDoc.id} : suppression programmée appliquée`,
-                );
-              }
-            }
-            // Marqueur présent → ne jamais générer pour cette plage.
-            continue;
-          }
-
-          // ── Promotion d'une modification programmée arrivée à échéance ──
-          // "en attente" → "actuelle" dès que la date d'effet est atteinte.
-          // Après promotion, plus aucune branche pending/actuelle à gérer :
-          // tsData reflète directement la nouvelle config.
-          const pendingEffectiveTs = tsData.pendingEffectiveDate;
-          if (pendingEffectiveTs && pendingEffectiveTs.toDate() <= today) {
-            const promoted = {
-              startTime: tsData.pendingStartTime,
-              endTime: tsData.pendingEndTime,
-              serviceDurationMinutes: tsData.pendingServiceDurationMinutes,
-              capacityPerSlot: tsData.pendingCapacityPerSlot,
-              workingDays: tsData.pendingWorkingDays,
-              maxAdvanceDays: tsData.pendingMaxAdvanceDays,
-              reservationDeadlineMinutes: tsData.pendingReservationDeadlineMinutes,
-              pendingStartTime: admin.firestore.FieldValue.delete(),
-              pendingEndTime: admin.firestore.FieldValue.delete(),
-              pendingServiceDurationMinutes: admin.firestore.FieldValue.delete(),
-              pendingCapacityPerSlot: admin.firestore.FieldValue.delete(),
-              pendingWorkingDays: admin.firestore.FieldValue.delete(),
-              pendingMaxAdvanceDays: admin.firestore.FieldValue.delete(),
-              pendingReservationDeadlineMinutes: admin.firestore.FieldValue.delete(),
-              pendingEffectiveDate: admin.firestore.FieldValue.delete(),
-            };
-            await timeSlotDoc.ref.update(promoted);
-            tsData = { ...tsData, ...promoted };
-            // `maxAdvanceDays` est désormais un réglage de la FILE (doc file),
-            // plus de la plage : rien à resynchroniser ici.
-            console.log(`🔄 File ${queueId} / plage ${timeSlotDoc.id} : modification programmée promue`);
-          }
-
-          // Fermeture en cours (hors préchauffage 48h) : on ne génère pas.
-          if (skipGeneration) continue;
-
-          const currentCfg = {
-            startTime: tsData.startTime || "09:00",
-            endTime: tsData.endTime || "12:00",
-            duration: tsData.serviceDurationMinutes || 15,
-            capacity: tsData.capacityPerSlot || 1,
-            activeDays: tsData.workingDays || weekdays,
-          };
-
-          // Encore en attente (échéance pas encore atteinte) : la période à
-          // partir de la date d'effet suit la config en attente, pas
-          // l'actuelle — nécessaire pour les jours qui n'ont pas encore été
-          // générés à l'avance (au-delà de l'horizon de 7 jours utilisé par
-          // la génération immédiate côté app au moment où c'est programmé).
-          const stillPendingTs = tsData.pendingEffectiveDate;
-          const pendingEffectiveDate = stillPendingTs ? stillPendingTs.toDate() : null;
-          const pendingCfg = pendingEffectiveDate
-            ? {
-                startTime: tsData.pendingStartTime || currentCfg.startTime,
-                endTime: tsData.pendingEndTime || currentCfg.endTime,
-                duration: tsData.pendingServiceDurationMinutes || currentCfg.duration,
-                capacity: tsData.pendingCapacityPerSlot || currentCfg.capacity,
-                activeDays: tsData.pendingWorkingDays || currentCfg.activeDays,
-              }
-            : null;
-
-          // Horizon de génération fixe (8 jours). Ce que le client VOIT est
-          // borné séparément par `maxAdvanceDays` du doc file (filtre d'affichage).
-          for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
-            const targetDate = new Date(today);
-            targetDate.setDate(targetDate.getDate() + dayOffset);
-
-            const cfg = (pendingCfg && targetDate >= pendingEffectiveDate)
-              ? pendingCfg
-              : currentCfg;
-
-            // Vérifier si ce jour est ouvré (1=Lundi, 7=Dimanche)
-            const jsWeekday = targetDate.getDay();
-            const dartWeekday = jsWeekday === 0 ? 7 : jsWeekday;
-            if (!cfg.activeDays.includes(dartWeekday)) continue;
-
-            // Parser les heures
-            const [startH, startM] = cfg.startTime.split(":").map(Number);
-            const [endH, endM] = cfg.endTime.split(":").map(Number);
-
-            const plageStart = new Date(targetDate);
-            plageStart.setHours(startH, startM, 0, 0);
-
-            const plageEnd = new Date(targetDate);
-            plageEnd.setHours(endH, endM, 0, 0);
-
-            // Vérifier si des créneaux existent déjà pour cette plage
-            const existingSnap = await slotsRef
-              .where("start", ">=", plageStart)
-              .where("start", "<", plageEnd)
-              .limit(1)
-              .get();
-
-            if (!existingSnap.empty) {
-              // Slots déjà générés — créer dailyStats si absent (migration)
-              const statsDoc = await dailyStatsRef.doc(fmtDate(targetDate)).get();
-              if (!statsDoc.exists) {
-                await upsertDailyStats(targetDate);
-                console.log(`📊 File ${queueId}: dailyStats créé (migration) pour ${fmtDate(targetDate)}`);
-              }
-              continue;
-            }
-
-            // Générer les créneaux pour ce jour
-            let createBatch = db.batch();
-            let createCount = 0;
-            let cursor = new Date(plageStart);
-
-            while (cursor.getTime() + cfg.duration * 60 * 1000 <= plageEnd.getTime()) {
-              const slotEnd = new Date(cursor.getTime() + cfg.duration * 60 * 1000);
-
-              createBatch.set(slotsRef.doc(), {
-                "start": cursor,
-                "end": slotEnd,
-                "capacity": cfg.capacity,
-                "reserved": 0,
-                "cancelled": 0,
-                "status": "open",
-                "duration": cfg.duration,
-                "isLegacy": false,
-                "timeSlotId": timeSlotDoc.id,
-              });
-
-              createCount++;
-              cursor = new Date(slotEnd);
-
-              if (createCount >= 450) {
-                await createBatch.commit();
-                createBatch = db.batch();
-                createCount = 0;
-              }
-            }
-
-            if (createCount > 0) {
-              await createBatch.commit();
-              totalGenerated += createCount;
-              // Écrire dailyStats précis en agrégeant les slots de ce jour
-              await upsertDailyStats(targetDate);
-              console.log(`✅ File ${queueId} / ${fmtDate(targetDate)}: ${createCount} créneaux + dailyStats`);
-            }
+          if (createCount >= 450) {
+            await createBatch.commit();
+            createBatch = db.batch();
+            createCount = 0;
           }
         }
 
-        // ── Suppression programmée de la file (coquille vide) ─────────
-        // L'entreprise a programmé la suppression de toutes les plages ET
-        // choisi de supprimer la file elle-même (marqueur `deleteAfter` sur
-        // le doc file). Dès qu'il ne reste plus aucune plage et que la date
-        // est atteinte, on supprime la file + ses dailyStats.
-        if (queueData.deleteAfter && queueData.deleteAfter.toDate() <= today) {
-          const remainingTs = await db
-            .collection("companies").doc(companyId)
-            .collection("queues").doc(queueId)
-            .collection("timeSlots").limit(1).get();
-          if (remainingTs.empty) {
-            const statsSnap = await dailyStatsRef.get();
-            let sb = db.batch();
-            let sn = 0;
-            for (const d of statsSnap.docs) {
-              sb.delete(d.ref);
-              sn++;
-              if (sn >= 450) { await sb.commit(); sb = db.batch(); sn = 0; }
-            }
-            if (sn > 0) await sb.commit();
-            await queueDoc.ref.delete();
-            console.log(`🗑️ File ${queueId} : suppression programmée appliquée (plus aucune plage)`);
-          }
+        if (createCount > 0) {
+          await createBatch.commit();
+          totalGenerated += createCount;
+          // Écrire dailyStats précis en agrégeant les slots de ce jour
+          await upsertDailyStats(targetDate);
+          console.log(`✅ File ${queueId} / ${fmtDate(targetDate)}: ${createCount} créneaux + dailyStats`);
         }
       }
-
-      // Résumé « recherche » recalculé chaque nuit — rattrape les fermetures
-      // datées qui démarrent / se terminent sans écriture de file.
-      const freshQueues = await db
-        .collection("companies").doc(companyId)
-        .collection("queues").get();
-      await writeCompanySearchSummary(companyId, freshQueues.docs, new Date());
     }
 
-    console.log(`🎉 Génération terminée :`);
-    console.log(`   → ${totalGenerated} créneaux générés`);
-    console.log(`   → ${totalDeleted} vieux créneaux supprimés`);
+    // ── Suppression programmée de la file (coquille vide) ─────────
+    // L'entreprise a programmé la suppression de toutes les plages ET
+    // choisi de supprimer la file elle-même (marqueur `deleteAfter` sur
+    // le doc file). Dès qu'il ne reste plus aucune plage et que la date
+    // est atteinte, on supprime la file + ses dailyStats.
+    if (queueData.deleteAfter && queueData.deleteAfter.toDate() <= today) {
+      const remainingTs = await db
+        .collection("companies").doc(companyId)
+        .collection("queues").doc(queueId)
+        .collection("timeSlots").limit(1).get();
+      if (remainingTs.empty) {
+        const statsSnap = await dailyStatsRef.get();
+        let sb = db.batch();
+        let sn = 0;
+        for (const d of statsSnap.docs) {
+          sb.delete(d.ref);
+          sn++;
+          if (sn >= 450) { await sb.commit(); sb = db.batch(); sn = 0; }
+        }
+        if (sn > 0) await sb.commit();
+        await queueDoc.ref.delete();
+        console.log(`🗑️ File ${queueId} : suppression programmée appliquée (plus aucune plage)`);
+      }
+    }
+  }
 
-    return {
-      success: true,
-      totalGenerated,
-      totalDeleted,
-      timestamp: new Date().toISOString(),
-    };
-  });
+  // Résumé « recherche » recalculé chaque nuit — rattrape les fermetures
+  // datées qui démarrent / se terminent sans écriture de file.
+  const freshQueues = await db
+    .collection("companies").doc(companyId)
+    .collection("queues").get();
+  await writeCompanySearchSummary(companyId, freshQueues.docs, new Date());
+
+  return { generated: totalGenerated, deleted: totalDeleted };
+}
 
 // ====================================================================
 // FONCTION 3bis : Résumé « recherche » de l'entreprise, mis à jour dès
@@ -615,9 +627,7 @@ exports.generateSlots = functions.pubsub
 // recherche client pour masquer / étiqueter les structures sans mesurer
 // leurs files à chaque requête.
 // ====================================================================
-exports.updateCompanySearchSummary = functions.firestore
-  .document("companies/{companyId}/queues/{queueId}")
-  .onWrite(async (change, context) => {
+exports.updateCompanySearchSummary = v2Written("companies/{companyId}/queues/{queueId}", async (change, context) => {
     const companyId = context.params.companyId;
     const queuesSnap = await db
       .collection("companies")
@@ -650,9 +660,7 @@ exports.updateCompanySearchSummary = functions.firestore
 // par réservation. Chaque mise à jour de ce document doit donc renvoyer
 // un nouveau push, pas seulement sa création initiale.
 // ====================================================================
-exports.sendPushOnNotification = functions.firestore
-  .document("customers/{customerId}/notifications/{notificationId}")
-  .onWrite(async (change, context) => {
+exports.sendPushOnNotification = v2Written("customers/{customerId}/notifications/{notificationId}", async (change, context) => {
     if (!change.after.exists) return null; // suppression : rien à pousser
 
     const { customerId } = context.params;
@@ -713,22 +721,16 @@ exports.sendPushOnNotification = functions.firestore
   });
 
 // ====================================================================
-// FONCTION 5 : Compteur reservationCount sur les entreprises
-// Incrémenté à chaque nouvelle réservation confirmée
+// FONCTION 5 : Alerte remplissage à chaque nouvelle réservation
+//
+// L'ancien compteur `reservationCount` (incrémenté ici sur la fiche
+// entreprise) n'est plus écrit : la popularité est recalculée chaque nuit
+// dans l'annuaire de recherche (voir rebuildSearchDirectory). Écrire la
+// fiche à chaque réservation la renvoyait à tous les clients qui
+// écoutaient la recherche.
 // ====================================================================
-exports.onReservationCreated = functions.firestore
-  .document("companies/{companyId}/reservations/{reservationId}")
-  .onCreate(async (snap, context) => {
+exports.onReservationCreated = v2Created("companies/{companyId}/reservations/{reservationId}", async (snap, context) => {
     const { companyId } = context.params;
-
-    try {
-      await db.collection("companies").doc(companyId).update({
-        reservationCount: admin.firestore.FieldValue.increment(1),
-      });
-      console.log(`✅ reservationCount +1 pour ${companyId}`);
-    } catch (e) {
-      console.error(`❌ Erreur reservationCount pour ${companyId}:`, e.message);
-    }
 
     // Alerte remplissage de la plage concernée (plage_full / plage_near_full).
     try {
@@ -754,9 +756,7 @@ exports.onReservationCreated = functions.firestore
 //   et pour les remplacements de créneau (`replacedReservationId`), qui
 //   ne consomment pas le quota.
 // ====================================================================
-exports.notifyDailyQuotaWarning = functions.firestore
-  .document("companies/{companyId}/reservations/{reservationId}")
-  .onCreate(async (snap) => {
+exports.notifyDailyQuotaWarning = v2Created("companies/{companyId}/reservations/{reservationId}", async (snap) => {
     const data = snap.data();
     const customerId = data.customerId;
 
@@ -824,9 +824,7 @@ exports.notifyDailyQuotaWarning = functions.firestore
 // entreprise (context.params.companyId), sans jamais faire confiance à
 // une donnée fournie par le client.
 // ====================================================================
-exports.onReservationCancelledByCompany = functions.firestore
-  .document("companies/{companyId}/reservations/{reservationId}")
-  .onUpdate(async (change, context) => {
+exports.onReservationCancelledByCompany = v2Updated("companies/{companyId}/reservations/{reservationId}", async (change, context) => {
     const before = change.before.data();
     const after = change.after.data();
     const { companyId } = context.params;
@@ -912,9 +910,7 @@ exports.onReservationCancelledByCompany = functions.firestore
 // L'annulation "trop tard" est gérée par FONCTION 6bis
 // (cancellationSource === 'company_block_unresolved').
 // ====================================================================
-exports.onReservationBlockChange = functions.firestore
-  .document("companies/{companyId}/reservations/{reservationId}")
-  .onUpdate(async (change, context) => {
+exports.onReservationBlockChange = v2Updated("companies/{companyId}/reservations/{reservationId}", async (change, context) => {
     const before = change.before.data();
     const after = change.after.data();
     const { companyId } = context.params;
@@ -984,9 +980,7 @@ exports.onReservationBlockChange = functions.firestore
 // FONCTION 6 : Suppression en cascade d'une entreprise
 // Déclenchée quand deletionRequests/{companyId}.status passe à 'approved'
 // ====================================================================
-exports.onDeleteCompanyApproved = functions.firestore
-  .document("deletionRequests/{companyId}")
-  .onUpdate(async (change, context) => {
+exports.onDeleteCompanyApproved = v2Updated("deletionRequests/{companyId}", async (change, context) => {
     const after = change.after.data();
     if (after.status !== "approved") return null;
 
@@ -1067,7 +1061,13 @@ exports.onDeleteCompanyApproved = functions.firestore
         let memberBatch = db.batch();
         let memberCount = 0;
         for (const doc of membersSnap.docs) {
-          memberBatch.update(doc.ref, { isActive: false });
+          // Le motif n'écrase pas celui d'un membre déjà parti ou retiré.
+          memberBatch.update(
+            doc.ref,
+            doc.get("isActive") === true
+              ? { isActive: false, revokedReason: "company_leaving" }
+              : { isActive: false },
+          );
           memberCount++;
           if (memberCount >= 400) {
             await memberBatch.commit();
@@ -1136,9 +1136,7 @@ exports.onDeleteCompanyApproved = functions.firestore
 // le contact et le motif, pour pouvoir joindre l'entreprise pendant le
 // délai de grâce.
 // ====================================================================
-exports.onDeletionRequestCreated = functions.firestore
-  .document("deletionRequests/{companyId}")
-  .onCreate(async (snap, context) => {
+exports.onDeletionRequestCreated = v2Created("deletionRequests/{companyId}", async (snap, context) => {
     const companyId = context.params.companyId;
     const d = snap.data() || {};
     await db.collection("adminAlerts").add({
@@ -1155,17 +1153,28 @@ exports.onDeletionRequestCreated = functions.firestore
     });
     console.log(`🔔 Alerte admin : demande de départ de ${companyId}`);
 
-    // Prévenir chaque membre d'équipe : l'établissement quitte Baxa, leur
-    // accès prend fin (l'app les déconnecte via staff.isActive = false posé
-    // côté client dans _submitLeaveRequest).
+    // Prévenir chaque membre d'équipe que l'établissement quitte Baxa, PUIS
+    // couper son accès — dans cet ordre, ici, pour qu'aucun membre ne soit
+    // désactivé avant d'avoir été prévenu. Le motif posé sur la fiche staff
+    // permet à l'app d'expliquer la déconnexion.
     const name = d.companyName || "L'établissement";
-    await notifyAllActiveStaff(companyId, {
+    const members = await notifyAllActiveStaff(companyId, {
       type: "structure_leaving",
       title: `👋 ${name} quitte Baxa`,
       body:
         "Votre accès à l'espace équipe prend fin. Si l'établissement revient, " +
         "votre responsable vous enverra un nouveau code d'invitation.",
     });
+    if (members.length > 0) {
+      const batch = db.batch();
+      for (const m of members) {
+        batch.update(m.ref, {
+          isActive: false,
+          revokedReason: "company_leaving",
+        });
+      }
+      await batch.commit();
+    }
     return null;
   });
 
@@ -1175,9 +1184,7 @@ exports.onDeletionRequestCreated = functions.firestore
 // alertes admin correspondantes comme annulées pour ne pas les traiter.
 // La réactivation des files se fait côté app (efface `closureStart`).
 // ====================================================================
-exports.onDeletionRequestCancelled = functions.firestore
-  .document("deletionRequests/{companyId}")
-  .onDelete(async (snap, context) => {
+exports.onDeletionRequestCancelled = v2Deleted("deletionRequests/{companyId}", async (snap, context) => {
     const before = snap.data() || {};
     // Ne rien faire si la demande était déjà exécutée / approuvée.
     if (before.status === "approved" || before.status === "completed") return null;
@@ -1207,10 +1214,9 @@ exports.onDeletionRequestCancelled = functions.firestore
 // est écoulé. Passe `status` à "approved", ce qui déclenche la cascade de
 // suppression existante (onDeleteCompanyApproved, FONCTION 6).
 // ====================================================================
-exports.executeScheduledDeletions = functions.pubsub
-  .schedule("0 3 * * *")
-  .timeZone("Europe/Paris")
-  .onRun(async () => {
+exports.executeScheduledDeletions = onSchedule(
+  { schedule: "0 3 * * *", timeZone: "Europe/Paris", region: SCHEDULER_REGION },
+  async () => {
     const now = new Date();
     const snap = await db
       .collection("deletionRequests")
@@ -1294,10 +1300,10 @@ async function getReminderOffsets(customerId) {
   return DEFAULT_REMINDER_OFFSETS_MINUTES;
 }
 
-exports.scheduleReservationTimeline = functions
-  .runWith({ secrets: ["TASK_AUTH_SECRET"] })
-  .firestore.document("companies/{companyId}/reservations/{reservationId}")
-  .onCreate(async (snap, context) => {
+exports.scheduleReservationTimeline = v2Created({
+  document: "companies/{companyId}/reservations/{reservationId}",
+  secrets: ["TASK_AUTH_SECRET"],
+}, async (snap, context) => {
     const data = snap.data();
     const { companyId, reservationId } = context.params;
     const customerId = data.customerId;
@@ -1347,7 +1353,7 @@ exports.scheduleReservationTimeline = functions
     const offsets = await getReminderOffsets(customerId);
 
     const functionUrl =
-      `https://${TASKS_LOCATION}-${PROJECT_ID}.cloudfunctions.net` +
+      `https://${DB_REGION}-${PROJECT_ID}.cloudfunctions.net` +
       `/deliverReservationNotification`;
     const secret = process.env.TASK_AUTH_SECRET;
     const now = Date.now();
@@ -1517,9 +1523,9 @@ function reservationStageContent(
   }
 }
 
-exports.deliverReservationNotification = functions
-  .runWith({ secrets: ["TASK_AUTH_SECRET"] })
-  .https.onRequest(async (req, res) => {
+exports.deliverReservationNotification = onRequest(
+  { region: DB_REGION, secrets: ["TASK_AUTH_SECRET"] },
+  async (req, res) => {
     if (req.get("Authorization") !== `Bearer ${process.env.TASK_AUTH_SECRET}`) {
       res.status(401).send("Unauthorized");
       return;
@@ -1620,9 +1626,7 @@ exports.deliverReservationNotification = functions
 // ce nettoyage est garanti au niveau serveur : aucun chemin client ne
 // peut oublier de l'appeler.
 // ====================================================================
-exports.cancelReservationTimeline = functions.firestore
-  .document("companies/{companyId}/reservations/{reservationId}")
-  .onUpdate(async (change, context) => {
+exports.cancelReservationTimeline = v2Updated("companies/{companyId}/reservations/{reservationId}", async (change, context) => {
     const before = change.before.data();
     const after = change.after.data();
     const { reservationId } = context.params;
@@ -1660,58 +1664,47 @@ exports.cancelReservationTimeline = functions.firestore
 // immédiat ; cette purge est le filet de sécurité automatique qui
 // s'applique à tout le monde, indépendamment du masquage.
 // ====================================================================
-exports.purgeOldReservations = functions.pubsub
-  .schedule("30 2 * * *") // Tous les jours à 2h30 du matin UTC
-  .timeZone("Europe/Paris")
-  .onRun(async (context) => {
-    console.log("🧹 Purge des réservations de plus d'un mois...");
+async function purgeCompanyReservations(companyId) {
+  const oneMonthAgo = new Date();
+  oneMonthAgo.setDate(oneMonthAgo.getDate() - 30);
 
-    const oneMonthAgo = new Date();
-    oneMonthAgo.setDate(oneMonthAgo.getDate() - 30);
+  const oldReservations = await db
+    .collection("companies").doc(companyId)
+    .collection("reservations")
+    .where("slotEnd", "<", oneMonthAgo)
+    .get();
+  if (oldReservations.empty) return 0;
 
-    let totalDeleted = 0;
-    const companiesSnap = await db.collection("companies").get();
+  let totalDeleted = 0;
+  let batch = db.batch();
+  let count = 0;
 
-    for (const companyDoc of companiesSnap.docs) {
-      const oldReservations = await companyDoc.ref
-        .collection("reservations")
-        .where("slotEnd", "<", oneMonthAgo)
-        .get();
-
-      if (oldReservations.empty) continue;
-
-      let batch = db.batch();
-      let count = 0;
-
-      for (const doc of oldReservations.docs) {
-        const data = doc.data();
-        batch.delete(doc.ref);
-        // Purge aussi la notification "timeline" associée (voir FONCTION 7),
-        // sans quoi elle resterait indéfiniment dans l'onglet Notifications
-        // du client alors que la réservation qu'elle décrit n'existe plus.
-        if (data.customerId) {
-          batch.delete(
-            db
-              .collection("customers")
-              .doc(data.customerId)
-              .collection("notifications")
-              .doc(`resa-${doc.id}`),
-          );
-        }
-        count++;
-        totalDeleted++;
-        if (count >= 400) {
-          await batch.commit();
-          batch = db.batch();
-          count = 0;
-        }
-      }
-      if (count > 0) await batch.commit();
+  for (const doc of oldReservations.docs) {
+    const data = doc.data();
+    batch.delete(doc.ref);
+    // Purge aussi la notification "timeline" associée (voir FONCTION 7),
+    // sans quoi elle resterait indéfiniment dans l'onglet Notifications
+    // du client alors que la réservation qu'elle décrit n'existe plus.
+    if (data.customerId) {
+      batch.delete(
+        db
+          .collection("customers")
+          .doc(data.customerId)
+          .collection("notifications")
+          .doc(`resa-${doc.id}`),
+      );
     }
-
-    console.log(`✅ ${totalDeleted} réservation(s) purgée(s)`);
-    return null;
-  });
+    count++;
+    totalDeleted++;
+    if (count >= 400) {
+      await batch.commit();
+      batch = db.batch();
+      count = 0;
+    }
+  }
+  if (count > 0) await batch.commit();
+  return totalDeleted;
+}
 
 // ====================================================================
 // FONCTION 12 : Résolution des suspensions expirées
@@ -1722,53 +1715,47 @@ exports.purgeOldReservations = functions.pubsub
 // re-réserver (via FONCTION 6bis) et que la réservation ne reste pas
 // "suspendue" indéfiniment.
 // ====================================================================
-exports.resolveExpiredSuspensions = functions.pubsub
-  .schedule("15 2 * * *") // Tous les jours à 2h15 du matin UTC
-  .timeZone("Europe/Paris")
-  .onRun(async (context) => {
-    const now = new Date();
-    let total = 0;
-    const companiesSnap = await db.collection("companies").get();
+async function resolveCompanySuspensions(companyId) {
+  const now = new Date();
+  // Seules les réservations suspendues sont lues (avant : toutes les
+  // réservations confirmées de la structure, puis filtre en mémoire).
+  const snap = await db
+    .collection("companies").doc(companyId)
+    .collection("reservations")
+    .where("status", "==", "confirmed")
+    .where("suspended", "==", true)
+    .get();
+  if (snap.empty) return 0;
 
-    for (const companyDoc of companiesSnap.docs) {
-      const snap = await companyDoc.ref
-        .collection("reservations")
-        .where("status", "==", "confirmed")
-        .get();
-      if (snap.empty) continue;
-
-      const expired = snap.docs.filter((d) => {
-        if (d.data().suspended !== true) return false;
-        const se = d.data().slotEnd ? d.data().slotEnd.toDate() : null;
-        return se && se < now;
-      });
-      if (expired.length === 0) continue;
-
-      let batch = db.batch();
-      let count = 0;
-      for (const doc of expired) {
-        batch.update(doc.ref, {
-          status: "cancelled",
-          cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-          cancellationSource: "company_block_unresolved",
-          suspended: admin.firestore.FieldValue.delete(),
-          suspendedReason: admin.firestore.FieldValue.delete(),
-          suspendedAt: admin.firestore.FieldValue.delete(),
-        });
-        count++;
-        total++;
-        if (count >= 400) {
-          await batch.commit();
-          batch = db.batch();
-          count = 0;
-        }
-      }
-      if (count > 0) await batch.commit();
-    }
-
-    console.log(`✅ ${total} suspension(s) expirée(s) résolue(s)`);
-    return null;
+  const expired = snap.docs.filter((d) => {
+    const se = d.data().slotEnd ? d.data().slotEnd.toDate() : null;
+    return se && se < now;
   });
+  if (expired.length === 0) return 0;
+
+  let total = 0;
+  let batch = db.batch();
+  let count = 0;
+  for (const doc of expired) {
+    batch.update(doc.ref, {
+      status: "cancelled",
+      cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+      cancellationSource: "company_block_unresolved",
+      suspended: admin.firestore.FieldValue.delete(),
+      suspendedReason: admin.firestore.FieldValue.delete(),
+      suspendedAt: admin.firestore.FieldValue.delete(),
+    });
+    count++;
+    total++;
+    if (count >= 400) {
+      await batch.commit();
+      batch = db.batch();
+      count = 0;
+    }
+  }
+  if (count > 0) await batch.commit();
+  return total;
+}
 
 // ════════════════════════════════════════════════════════════════════
 // NOTIFICATIONS ENTREPRISE
@@ -1827,7 +1814,10 @@ function fillPct(reservations, capacity) {
   return Math.round((reservations / capacity) * 100);
 }
 
-/** Écrit une entrée dans le journal. Le push suit via sendCompanyPush. */
+/** Écrit une entrée dans le journal. Le push suit via sendCompanyPush.
+ * `opts.docId` (facultatif) : identifiant fixe — si l'entrée existe déjà
+ * (tâche de nuit relancée après une erreur), rien n'est réécrit, donc pas
+ * de doublon ni de second push. */
 async function writeCompanyNotification(companyId, opts) {
   const doc = {
     type: opts.type,
@@ -1838,11 +1828,19 @@ async function writeCompanyNotification(companyId, opts) {
   };
   if (opts.staffId) doc.staffId = opts.staffId;
   if (opts.payload) doc.payload = opts.payload;
-  await db
+  const col = db
     .collection("companies")
     .doc(companyId)
-    .collection("companyNotifications")
-    .add(doc);
+    .collection("companyNotifications");
+  if (!opts.docId) {
+    await col.add(doc);
+    return;
+  }
+  try {
+    await col.doc(opts.docId).create(doc);
+  } catch (e) {
+    if (e.code !== 6) throw e; // 6 = ALREADY_EXISTS : déjà écrite
+  }
 }
 
 const MOIS_FR = [
@@ -1857,7 +1855,8 @@ function fmtDateFr(d) {
 }
 
 /** Écrit la même notification pour chaque membre d'équipe ACTIF
- * (audience "staff", une entrée par staffId → un push par personne). */
+ * (audience "staff", une entrée par staffId → un push par personne).
+ * Retourne les documents staff prévenus. */
 async function notifyAllActiveStaff(companyId, opts) {
   const staffSnap = await db
     .collection("companies")
@@ -1871,10 +1870,22 @@ async function notifyAllActiveStaff(companyId, opts) {
         ...opts,
         audience: "staff",
         staffId: s.id,
+        docId: opts.docId ? `${opts.docId}-${s.id}` : undefined,
       }),
     ),
   );
-  return staffSnap.size;
+  return staffSnap.docs;
+}
+
+/** Notification opérationnelle : l'entrée admin, puis une copie pour chaque
+ * membre actif. `staffBody` remplace le corps côté staff quand celui de
+ * l'admin parle de réglages que le staff ne peut pas faire. */
+async function notifyAdminAndStaff(companyId, opts, staffBody) {
+  await writeCompanyNotification(companyId, { ...opts, audience: "admin" });
+  await notifyAllActiveStaff(companyId, {
+    ...opts,
+    body: staffBody !== undefined ? staffBody : opts.body,
+  });
 }
 
 /** Agrège les créneaux d'une file sur [from, to[, groupés par plage
@@ -1920,9 +1931,7 @@ async function aggregateSlotsByPlage(companyId, queueId, from, to, now) {
 }
 
 // ── Livraison push ──────────────────────────────────────────────────
-exports.sendCompanyPush = functions.firestore
-  .document("companies/{companyId}/companyNotifications/{notifId}")
-  .onCreate(async (snap, context) => {
+exports.sendCompanyPush = v2Created("companies/{companyId}/companyNotifications/{notifId}", async (snap, context) => {
     const { companyId } = context.params;
     const data = snap.data();
 
@@ -1956,9 +1965,7 @@ exports.sendCompanyPush = functions.firestore
 // Se branche sur le résumé companies/{id} maintenu par
 // writeCompanySearchSummary. Dédup naturel : une fermeture multi-files
 // réécrit companies/{id} N fois, mais seule la 1ʳᵉ fait basculer le champ.
-exports.onCompanyStateChange = functions.firestore
-  .document("companies/{companyId}")
-  .onUpdate(async (change, context) => {
+exports.onCompanyStateChange = v2Updated("companies/{companyId}", async (change, context) => {
     const { companyId } = context.params;
     const before = change.before.data() || {};
     const after = change.after.data() || {};
@@ -2021,9 +2028,7 @@ exports.onCompanyStateChange = functions.firestore
   });
 
 // ── Nouveau membre d'équipe → admin ─────────────────────────────────
-exports.onStaffJoined = functions.firestore
-  .document("companies/{companyId}/staff/{staffUid}")
-  .onCreate(async (snap, context) => {
+exports.onStaffJoined = v2Created("companies/{companyId}/staff/{staffUid}", async (snap, context) => {
     const { companyId, staffUid } = context.params;
     const d = snap.data() || {};
     if (d.isActive === false) return null;
@@ -2046,8 +2051,6 @@ exports.onStaffJoined = functions.firestore
 // qui garantit qu'on ne devient membre QU'AVEC un code valide, que la
 // limite MAX_ACTIVE_STAFF est tenue, et qu'un ancien membre (parti ou
 // retiré) peut être réactivé avec un nouveau code.
-
-const {HttpsError} = functions.https;
 
 function normalizeInviteCode(raw) {
   return String(raw || "").trim().toUpperCase();
@@ -2085,7 +2088,7 @@ async function requireActiveInvite(rawCode) {
 // Vérification du code AVANT connexion (1re étape de l'écran staff) :
 // renvoie seulement le nom de l'entreprise. Les invitations ne sont plus
 // lisibles publiquement, cette fonction les remplace.
-exports.checkInviteCode = functions.https.onCall(async (data) => {
+exports.checkInviteCode = v2Callable(async (data) => {
   const invite = await requireActiveInvite(data && data.code);
   const companyId = inviteCompanyId(invite);
   const activeSnap = await db
@@ -2100,7 +2103,7 @@ exports.checkInviteCode = functions.https.onCall(async (data) => {
 });
 
 // Adhésion avec un code : nouveau membre OU ancien membre réactivé.
-exports.joinTeamWithCode = functions.https.onCall(async (data, context) => {
+exports.joinTeamWithCode = v2Callable(async (data, context) => {
   if (!context.auth) {
     throw new HttpsError("unauthenticated", "Connexion requise.");
   }
@@ -2174,7 +2177,9 @@ exports.joinTeamWithCode = functions.https.onCall(async (data, context) => {
     const email = token.email || "";
 
     if (prevStaffRef) {
-      tx.update(prevStaffRef, {isActive: false, leftAt: now});
+      tx.update(prevStaffRef, {
+        isActive: false, leftAt: now, revokedReason: "left",
+      });
     }
 
     if (staffDoc.exists) {
@@ -2185,6 +2190,7 @@ exports.joinTeamWithCode = functions.https.onCall(async (data, context) => {
         rejoinedAt: now,
         lastSeenAt: now,
         leftAt: admin.firestore.FieldValue.delete(),
+        revokedReason: admin.firestore.FieldValue.delete(),
       };
       if (phone) update.phone = phone;
       if (email) update.email = email;
@@ -2216,6 +2222,20 @@ exports.joinTeamWithCode = functions.https.onCall(async (data, context) => {
   // Un nouveau document déclenche onStaffJoined ; une réactivation non,
   // d'où la notification envoyée ici.
   if (result.status === "rejoined") {
+    // Il repart d'une liste vide : ses anciennes notifs (dont un éventuel
+    // « X quitte Baxa ») ne doivent pas réapparaître.
+    const old = await db
+      .collection("companies").doc(companyId)
+      .collection("companyNotifications")
+      .where("staffId", "==", uid)
+      .get();
+    if (!old.empty) {
+      const batch = db.batch();
+      old.docs.slice(0, 400).forEach((n) => batch.delete(n.ref));
+      await batch.commit();
+    }
+
+
     await writeCompanyNotification(companyId, {
       type: "staff_joined",
       title: "👋 Retour dans l'équipe",
@@ -2230,7 +2250,7 @@ exports.joinTeamWithCode = functions.https.onCall(async (data, context) => {
 
 // Départ volontaire (« Quitter l'équipe »). La simple déconnexion, elle,
 // ne touche à rien : le membre reste dans l'équipe.
-exports.leaveTeam = functions.https.onCall(async (data, context) => {
+exports.leaveTeam = v2Callable(async (data, context) => {
   if (!context.auth) {
     throw new HttpsError("unauthenticated", "Connexion requise.");
   }
@@ -2251,7 +2271,9 @@ exports.leaveTeam = functions.https.onCall(async (data, context) => {
   const del = admin.firestore.FieldValue.delete();
 
   const batch = db.batch();
-  if (wasActive) batch.update(staffRef, {isActive: false, leftAt: now});
+  if (wasActive) {
+    batch.update(staffRef, {isActive: false, leftAt: now, revokedReason: "left"});
+  }
   batch.update(userRef, {
     role: del,
     companyId: del,
@@ -2318,16 +2340,19 @@ async function checkPlageFillAfterReservation(companyId, resa) {
 
   if (pct >= 100) {
     if (tsData.fullNotifiedOn === today) return;
-    await writeCompanyNotification(companyId, {
-      type: "plage_full",
-      title: `📈 ${queueName} · plage ${label} complète`,
-      body:
-        "Toutes les places d'aujourd'hui sont réservées. Allongez la plage " +
-        "ou augmentez la capacité d'accueil pour recevoir plus de clients, " +
-        "dans les limites de votre capacité de gestion.",
-      audience: "admin",
-      payload: { queueId, queueName, timeSlotId, range: label },
-    });
+    await notifyAdminAndStaff(
+      companyId,
+      {
+        type: "plage_full",
+        title: `📈 ${queueName} · plage ${label} complète`,
+        body:
+          "Toutes les places d'aujourd'hui sont réservées. Allongez la " +
+          "plage ou augmentez la capacité d'accueil pour recevoir plus de " +
+          "clients, dans les limites de votre capacité de gestion.",
+        payload: { queueId, queueName, timeSlotId, range: label },
+      },
+      "Toutes les places d'aujourd'hui sont réservées sur cette plage.",
+    );
     await tsRef.set(
       { fullNotifiedOn: today, nearFullNotifiedOn: today },
       { merge: true },
@@ -2340,16 +2365,19 @@ async function checkPlageFillAfterReservation(companyId, resa) {
     return;
   }
   const free = g.capacity - g.reservations;
-  await writeCompanyNotification(companyId, {
-    type: "plage_near_full",
-    title: `📈 ${queueName} · plage ${label} bientôt complète`,
-    body:
-      `Il reste ${free} place${free > 1 ? "s" : ""} aujourd'hui. Pensez à ` +
-      "allonger la plage ou augmenter la capacité d'accueil, dans les " +
-      "limites de votre capacité de gestion.",
-    audience: "admin",
-    payload: { queueId, queueName, timeSlotId, range: label },
-  });
+  const freeLabel = `Il reste ${free} place${free > 1 ? "s" : ""} aujourd'hui`;
+  await notifyAdminAndStaff(
+    companyId,
+    {
+      type: "plage_near_full",
+      title: `📈 ${queueName} · plage ${label} bientôt complète`,
+      body:
+        `${freeLabel}. Pensez à allonger la plage ou augmenter la ` +
+        "capacité d'accueil, dans les limites de votre capacité de gestion.",
+      payload: { queueId, queueName, timeSlotId, range: label },
+    },
+    `${freeLabel} sur cette plage.`,
+  );
   await tsRef.set({ nearFullNotifiedOn: today }, { merge: true });
 }
 
@@ -2366,8 +2394,8 @@ async function checkPlageFillAfterReservation(companyId, resa) {
 //                         modifiée) → replanifier au prochain passage
 //   sent                : registre anti-doublon {"recap:<file>": jour, …}
 //
-// - planCompanyDays (00:05) planifie la journée de toutes les structures.
-// - companyWakeTick (toutes les 15 min) ne traite que les structures dont
+// - planDaysDispatch (00:05) planifie la journée de toutes les structures.
+// - wakeTickDispatch (toutes les 15 min) ne traite que les structures dont
 //   `wakeAt` est passé (une seule requête, ~1 lecture si rien à faire),
 //   plus, par sécurité après 1h, celles que la planification de nuit
 //   aurait manquées (`plannedDay` < aujourd'hui).
@@ -2640,9 +2668,11 @@ async function handleCheckinEvent(companyId, ev, now) {
   for (const g of plages.values()) remainingTotal += g.remaining;
   if (remainingTotal < 3) return { sent: false };
 
-  // Aucune autre notif envoyée depuis le début de cette plage ?
+  // Aucune autre notif admin envoyée depuis le début de cette plage ? (les
+  // copies staff partent avec leur entrée admin : pas besoin de les compter)
   const since = await companyRef
     .collection("companyNotifications")
+    .where("audience", "==", "admin")
     .where("createdAt", ">=", admin.firestore.Timestamp.fromMillis(ev.from))
     .limit(1)
     .get();
@@ -2652,11 +2682,10 @@ async function handleCheckinEvent(companyId, ev, now) {
   const per = remainingTotal > 1
     ? "personnes encore à servir"
     : "personne encore à servir";
-  await writeCompanyNotification(companyId, {
+  await notifyAdminAndStaff(companyId, {
     type: "queue_checkin",
     title: `👀 Un coup d'œil sur ${queueName} ?`,
     body: `Votre file tourne — ${remainingTotal} ${per} aujourd'hui.`,
-    audience: "admin",
     payload: { queueId: ev.queueId, queueName, toServe: remainingTotal },
   });
   return { sent: true };
@@ -2782,64 +2811,252 @@ async function processCompanyWake(companyId, now) {
   });
 }
 
-// ── Planification de nuit (00:05) ───────────────────────────────────
-exports.planCompanyDays = functions
-  .runWith({ timeoutSeconds: 540 })
-  .pubsub
-  .schedule("5 0 * * *")
-  .timeZone(WAKE_TZ)
-  .onRun(async () => {
-    const now = new Date();
-    const companiesSnap = await db.collection("companies").select().get();
-    for (const companyDoc of companiesSnap.docs) {
+// ════════════════════════════════════════════════════════════════════
+// TÂCHES PLANIFIÉES : UN CHEF, UN OUVRIER PAR STRUCTURE
+//
+// Avant, chaque tâche planifiée passait sur toutes les structures l'une
+// après l'autre dans une seule exécution (limite de temps → structures
+// de fin de liste jamais traitées quand il y en a beaucoup).
+//
+// Maintenant, à l'heure prévue, un « chef » (Europe : Cloud Scheduler et
+// Cloud Tasks n'existent pas à Johannesburg) dépose une tâche par
+// structure dans la file Cloud Tasks `company-jobs`. Chaque tâche appelle
+// l'ouvrier `companyJob` (Johannesburg, à côté de la base), qui traite
+// UNE structure avec son propre chrono. Une tâche en erreur est
+// réessayée (3 tentatives) : tout ce que fait l'ouvrier peut être rejoué
+// sans doublon (vérifications existantes + notifications à identifiant
+// fixe, voir writeCompanyNotification).
+// ════════════════════════════════════════════════════════════════════
+const COMPANY_JOBS_QUEUE = "company-jobs";
+const COMPANY_JOB_URL =
+  `https://${DB_REGION}-${PROJECT_ID}.cloudfunctions.net/companyJob`;
+
+/** Travail fait par l'ouvrier, par type de tâche. */
+const COMPANY_JOBS = {
+  // Maintenance de nuit (ex-tâches de 2h00 à 2h30, dans le même ordre) :
+  // suspensions expirées → journal de notifs → vieilles réservations →
+  // créneaux. Une étape en erreur n'empêche pas les suivantes ; la tâche
+  // est ensuite réessayée en entier.
+  nightly: async (companyId) => {
+    const steps = [
+      ["suspensions", resolveCompanySuspensions],
+      ["notifications", cleanCompanyNotifications],
+      ["réservations", purgeCompanyReservations],
+      ["créneaux", generateSlotsForCompany],
+    ];
+    const failed = [];
+    for (const [label, step] of steps) {
       try {
-        await planCompanyWake(companyDoc.id, now);
+        await step(companyId);
       } catch (e) {
-        console.error(`❌ planCompanyWake ${companyDoc.id}:`, e.message);
+        console.error(`❌ Nuit ${companyId} / ${label}:`, e.message);
+        failed.push(label);
       }
     }
-    return null;
+    if (failed.length) throw new Error(`étapes en erreur : ${failed.join(", ")}`);
+  },
+  dayDigest: (companyId) => dayDigestForCompany(companyId),
+  weeklyReview: (companyId) => weeklyReviewForCompany(companyId),
+  planDay: (companyId) => planCompanyWake(companyId, new Date()),
+  wake: (companyId) => processCompanyWake(companyId, new Date()),
+};
+
+// File créée au premier passage si elle n'existe pas encore (une fois par
+// instance) : rien à configurer à la main dans la console.
+let companyJobsQueueReady = null;
+function ensureCompanyJobsQueue() {
+  if (!companyJobsQueueReady) {
+    const name = tasksClient.queuePath(
+      PROJECT_ID, SCHEDULER_REGION, COMPANY_JOBS_QUEUE,
+    );
+    companyJobsQueueReady = tasksClient.getQueue({ name })
+      .catch(async (e) => {
+        if (e.code !== 5) throw e; // 5 = NOT_FOUND
+        try {
+          await tasksClient.createQueue({
+            parent: tasksClient.locationPath(PROJECT_ID, SCHEDULER_REGION),
+            queue: {
+              name,
+              // Pas plus de 20 structures traitées en même temps : la base
+              // n'est pas inondée au moment des passages.
+              rateLimits: { maxConcurrentDispatches: 20, maxDispatchesPerSecond: 20 },
+              retryConfig: { maxAttempts: 3, minBackoff: { seconds: 60 } },
+            },
+          });
+          console.log(`🆕 File Cloud Tasks ${COMPANY_JOBS_QUEUE} créée`);
+        } catch (err) {
+          if (err.code !== 6) throw err; // 6 = ALREADY_EXISTS
+        }
+      })
+      .catch((e) => {
+        companyJobsQueueReady = null;
+        throw e;
+      });
+  }
+  return companyJobsQueueReady;
+}
+
+/** Nom de tâche : préfixe haché (Cloud Tasks déconseille les noms
+ * séquentiels) + type + passage + structure. Un même nom ne peut être créé
+ * qu'une fois : un chef relancé ne double pas le travail. */
+function companyJobTaskName(job, runKey, companyId) {
+  const safe = (s) => String(s).replace(/[^A-Za-z0-9_-]/g, "_");
+  const prefix = searchDir.hash32(companyId).toString(16);
+  return `${prefix}-${job}-${safe(runKey)}-${safe(companyId)}`;
+}
+
+/** Le chef : une tâche par structure dans la file. */
+async function dispatchCompanyJobs(job, companyIds, runKey) {
+  await ensureCompanyJobsQueue();
+  const parent = tasksClient.queuePath(
+    PROJECT_ID, SCHEDULER_REGION, COMPANY_JOBS_QUEUE,
+  );
+  const secret = process.env.TASK_AUTH_SECRET;
+  let created = 0;
+  let failed = 0;
+  const CHUNK = 50;
+  for (let i = 0; i < companyIds.length; i += CHUNK) {
+    await Promise.all(companyIds.slice(i, i + CHUNK).map(async (companyId) => {
+      try {
+        await tasksClient.createTask({
+          parent,
+          task: {
+            name: `${parent}/tasks/${companyJobTaskName(job, runKey, companyId)}`,
+            httpRequest: {
+              httpMethod: "POST",
+              url: COMPANY_JOB_URL,
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${secret}`,
+              },
+              body: Buffer.from(JSON.stringify({ job, companyId }))
+                .toString("base64"),
+            },
+          },
+        });
+        created++;
+      } catch (e) {
+        if (e.code === 6) return; // déjà déposée pour ce passage
+        failed++;
+        console.error(`❌ Tâche ${job} ${companyId}:`, e.message);
+      }
+    }));
+  }
+  console.log(
+    `📨 ${job} (${runKey}) : ${created} tâche(s) déposée(s)` +
+    (failed ? `, ${failed} en erreur` : ""),
+  );
+  if (failed) throw new Error(`${failed} tâche(s) ${job} non déposée(s)`);
+}
+
+/** Identifiants de toutes les structures (sans lire leur contenu). */
+async function allCompanyIds() {
+  const snap = await db.collection("companies").select().get();
+  return snap.docs.map((d) => d.id);
+}
+
+// Réglages communs des chefs (fonctions planifiées, 2e génération).
+const DISPATCH_OPTS = {
+  region: SCHEDULER_REGION,
+  secrets: ["TASK_AUTH_SECRET"],
+  timeoutSeconds: 300,
+};
+
+// ── Maintenance de nuit (2h, heure de Paris) ────────────────────────
+exports.nightlyMaintenanceDispatch = onSchedule(
+  { ...DISPATCH_OPTS, schedule: "0 2 * * *", timeZone: FR_TZ },
+  async () => {
+    await dispatchCompanyJobs("nightly", await allCompanyIds(), ymd(new Date()));
+  });
+
+// ── Résumé du matin (7h) ────────────────────────────────────────────
+exports.dayDigestDispatch = onSchedule(
+  { ...DISPATCH_OPTS, schedule: "0 7 * * *", timeZone: FR_TZ },
+  async () => {
+    await dispatchCompanyJobs("dayDigest", await allCompanyIds(), ymd(new Date()));
+  });
+
+// ── Bilan hebdo (lundi 6h) ──────────────────────────────────────────
+exports.weeklyReviewDispatch = onSchedule(
+  { ...DISPATCH_OPTS, schedule: "0 6 * * 1", timeZone: FR_TZ },
+  async () => {
+    await dispatchCompanyJobs("weeklyReview", await allCompanyIds(), ymd(new Date()));
+  });
+
+// ── Planification des réveils du jour (00:05) ───────────────────────
+exports.planDaysDispatch = onSchedule(
+  { ...DISPATCH_OPTS, schedule: "5 0 * * *", timeZone: WAKE_TZ },
+  async () => {
+    await dispatchCompanyJobs("planDay", await allCompanyIds(), ymd(new Date()));
   });
 
 // ── Passage toutes les 15 min : échéances arrivées à terme ──────────
-exports.companyWakeTick = functions
-  .runWith({ timeoutSeconds: 540 })
-  .pubsub
-  .schedule("*/15 * * * *")
-  .timeZone(WAKE_TZ)
-  .onRun(async () => {
+// Le chef ne lit que les réveils dus ; l'ouvrier traite chaque structure.
+exports.wakeTickDispatch = onSchedule(
+  { ...DISPATCH_OPTS, schedule: "*/15 * * * *", timeZone: WAKE_TZ },
+  async () => {
     const now = new Date();
     const today = ymd(now);
     const ids = new Set();
 
     const dueSnap = await db.collection("companyWake")
       .where("wakeAt", "<=", admin.firestore.Timestamp.fromDate(now))
+      .select()
       .get();
     dueSnap.docs.forEach((d) => ids.add(d.id));
 
     // Filet : planification de nuit manquée (laissée tranquille avant 1h,
-    // le temps que planCompanyDays passe).
+    // le temps que planDaysDispatch passe).
     if (now.getHours() >= 1) {
       const staleSnap = await db.collection("companyWake")
         .where("plannedDay", "<", today)
+        .select()
         .get();
       staleSnap.docs.forEach((d) => ids.add(d.id));
     }
+    if (ids.size === 0) return;
 
-    for (const companyId of ids) {
-      try {
-        await processCompanyWake(companyId, now);
-      } catch (e) {
-        console.error(`❌ processCompanyWake ${companyId}:`, e.message);
-      }
+    const hhmm = `${String(now.getHours()).padStart(2, "0")}` +
+      `${String(now.getMinutes()).padStart(2, "0")}`;
+    await dispatchCompanyJobs("wake", [...ids], `${today}-${hhmm}`);
+  });
+
+// ── L'ouvrier : traite UNE structure (appelé par Cloud Tasks) ───────
+// Réponse 200 = terminé ; 500 = Cloud Tasks réessaiera plus tard.
+exports.companyJob = onRequest(
+  {
+    region: DB_REGION,
+    secrets: ["TASK_AUTH_SECRET"],
+    timeoutSeconds: 540,
+    memory: "512MiB",
+    concurrency: 10,
+    // File company-jobs : 20 tâches en parallèle max → 2 instances suffisent.
+    maxInstances: 4,
+  },
+  async (req, res) => {
+    if (req.get("Authorization") !== `Bearer ${process.env.TASK_AUTH_SECRET}`) {
+      res.status(401).send("Unauthorized");
+      return;
     }
-    return null;
+    const { job, companyId } = req.body || {};
+    const handler = COMPANY_JOBS[job];
+    if (!handler || !companyId) {
+      // Tâche invalide : inutile de la réessayer.
+      console.error(`❌ companyJob : tâche invalide (${job}, ${companyId})`);
+      res.status(200).send("Ignorée");
+      return;
+    }
+    try {
+      await handler(companyId);
+      res.status(200).send("OK");
+    } catch (e) {
+      console.error(`❌ companyJob ${job} ${companyId}:`, e.message);
+      res.status(500).send("Erreur");
+    }
   });
 
 // ── Plage créée / modifiée / supprimée → replanifier la journée ─────
-exports.onTimeSlotScheduleChange = functions.firestore
-  .document("companies/{companyId}/queues/{queueId}/timeSlots/{timeSlotId}")
-  .onWrite(async (change, context) => {
+exports.onTimeSlotScheduleChange = v2Written("companies/{companyId}/queues/{queueId}/timeSlots/{timeSlotId}", async (change, context) => {
     // Les marqueurs écrits par les notifs de remplissage / bilan hebdo ne
     // changent pas les horaires : on les ignore (sinon chaque notif
     // « plage complète » relancerait une replanification).
@@ -2853,128 +3070,235 @@ exports.onTimeSlotScheduleChange = functions.firestore
   });
 
 // ── Résumé du matin (7h) — seulement si remplissage du jour ≥ 40 % ──
-exports.companyDayDigest = functions.pubsub
-  .schedule("0 7 * * *")
-  .timeZone(FR_TZ)
-  .onRun(async () => {
-    const now = new Date();
-    const { start, end } = todayBounds(now);
+// Pour UNE structure (lancé par dayDigestDispatch).
+async function dayDigestForCompany(companyId) {
+  const now = new Date();
+  const { start, end } = todayBounds(now);
+  const day = ymd(now);
 
-    const companiesSnap = await db.collection("companies").get();
-    for (const companyDoc of companiesSnap.docs) {
-      const companyId = companyDoc.id;
-      const queuesSnap = await companyDoc.ref.collection("queues").get();
+  const companyRef = db.collection("companies").doc(companyId);
+  const queuesSnap = await companyRef.collection("queues").get();
 
-      for (const queueDoc of queuesSnap.docs) {
-        const queueId = queueDoc.id;
-        const qd = queueDoc.data();
-        if (isQueueClosedNow(qd.closureStart, qd.closureEnd, now)) continue;
-        const queueName = qd.name || "votre file";
+  for (const queueDoc of queuesSnap.docs) {
+    const queueId = queueDoc.id;
+    const qd = queueDoc.data();
+    if (isQueueClosedNow(qd.closureStart, qd.closureEnd, now)) continue;
+    const queueName = qd.name || "votre file";
 
-        const byPlage = await aggregateSlotsByPlage(
-          companyId, queueId, start, end,
-        );
-        if (byPlage.size === 0) continue;
+    const byPlage = await aggregateSlotsByPlage(
+      companyId, queueId, start, end,
+    );
+    if (byPlage.size === 0) continue;
 
-        let totalRes = 0;
-        let totalCap = 0;
-        let peak = null;
-        let peakId = null;
-        for (const [tsId, g] of byPlage.entries()) {
-          totalRes += g.reservations;
-          totalCap += g.capacity;
-          if (!peak || g.reservations > peak.reservations) {
-            peak = g;
-            peakId = tsId;
-          }
-        }
-        if (!totalCap || fillPct(totalRes, totalCap) < 40) continue;
-
-        const tsSnap = await queueDoc.ref.collection("timeSlots").get();
-        const tsMap = new Map(tsSnap.docs.map((t) => [t.id, t.data()]));
-        const peakLabel = rangeLabel(tsMap.get(peakId)) ||
-          `${fmtClock(peak.firstStart)}–${fmtClock(peak.lastEnd)}`;
-        const nPlages = byPlage.size;
-
-        await writeCompanyNotification(companyId, {
-          type: "day_digest",
-          title: `☀️ Votre journée · ${queueName}`,
-          body:
-            `${totalRes} réservations aujourd'hui` +
-            (nPlages > 1 ? `, réparties sur ${nPlages} plages` : "") +
-            `. Pointe : ${peakLabel} (${peak.reservations}).`,
-          audience: "admin",
-          payload: { queueId, queueName },
-        });
+    let totalRes = 0;
+    let totalCap = 0;
+    let peak = null;
+    let peakId = null;
+    for (const [tsId, g] of byPlage.entries()) {
+      totalRes += g.reservations;
+      totalCap += g.capacity;
+      if (!peak || g.reservations > peak.reservations) {
+        peak = g;
+        peakId = tsId;
       }
+    }
+    if (!totalCap || fillPct(totalRes, totalCap) < 40) continue;
+
+    const tsSnap = await queueDoc.ref.collection("timeSlots").get();
+    const tsMap = new Map(tsSnap.docs.map((t) => [t.id, t.data()]));
+    const peakLabel = rangeLabel(tsMap.get(peakId)) ||
+      `${fmtClock(peak.firstStart)}–${fmtClock(peak.lastEnd)}`;
+    const nPlages = byPlage.size;
+
+    await notifyAdminAndStaff(companyId, {
+      type: "day_digest",
+      title: `☀️ Votre journée · ${queueName}`,
+      body:
+        `${totalRes} réservations aujourd'hui` +
+        (nPlages > 1 ? `, réparties sur ${nPlages} plages` : "") +
+        `. Pointe : ${peakLabel} (${peak.reservations}).`,
+      payload: { queueId, queueName },
+      docId: `day_digest-${queueId}-${day}`,
+    });
+  }
+}
+
+// ── Bilan hebdo (lundi 6h) — plages sous-utilisées sur 14 jours ─────
+// Pour UNE structure (lancé par weeklyReviewDispatch).
+async function weeklyReviewForCompany(companyId) {
+  const now = new Date();
+  const { start: todayStart } = todayBounds(now);
+  const from = new Date(todayStart);
+  from.setDate(from.getDate() - 14);
+  const cooldownBefore = new Date(now.getTime() - 13 * 24 * 3600 * 1000);
+  const day = ymd(now);
+
+  const companyRef = db.collection("companies").doc(companyId);
+  const queuesSnap = await companyRef.collection("queues").get();
+
+  for (const queueDoc of queuesSnap.docs) {
+    const queueId = queueDoc.id;
+    const queueName = queueDoc.data().name || "votre file";
+
+    const byPlage = await aggregateSlotsByPlage(
+      companyId, queueId, from, todayStart,
+    );
+    if (byPlage.size === 0) continue;
+
+    const tsSnap = await queueDoc.ref.collection("timeSlots").get();
+    for (const tsDoc of tsSnap.docs) {
+      const tsData = tsDoc.data();
+      if (tsData.deleteAfter) continue;
+      if (
+        tsData.underusedNotifiedAt &&
+        tsData.underusedNotifiedAt.toDate() > cooldownBefore
+      ) {
+        continue;
+      }
+
+      const g = byPlage.get(tsDoc.id);
+      if (!g || !g.capacity) continue;
+      // Plage trop jeune : pas de créneau près du début de la fenêtre.
+      if (
+        !g.firstStart ||
+        g.firstStart.getTime() > from.getTime() + 36 * 3600 * 1000
+      ) {
+        continue;
+      }
+      if (fillPct(g.reservations, g.capacity) >= UNDERUSED_PCT) continue;
+
+      const label = rangeLabel(tsData) || "une plage";
+      await writeCompanyNotification(companyId, {
+        type: "plage_underused",
+        title: `📉 ${queueName} · plage ${label} peu réservée`,
+        body:
+          "Moins de 10 % des places ont été réservées ces 2 dernières " +
+          "semaines. Vous pouvez la raccourcir, la décaler à un meilleur " +
+          "horaire, ou réduire la capacité.",
+        audience: "admin",
+        payload: { queueId, queueName, timeSlotId: tsDoc.id, range: label },
+        docId: `plage_underused-${tsDoc.id}-${day}`,
+      });
+      await tsDoc.ref.set(
+        { underusedNotifiedAt: admin.firestore.FieldValue.serverTimestamp() },
+        { merge: true },
+      );
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// ANNUAIRE DE RECHERCHE PAR PAYS (logique pure : search_directory.js)
+// ════════════════════════════════════════════════════════════════════
+const SEARCH_DIR_COLLECTION = "searchDirectory";
+const searchDirMetaRef = () =>
+  db.collection("searchDirectoryMeta").doc("shards");
+
+/** Document d'annuaire qui porte une structure dans un pays. */
+async function searchDirShardRef(country, companyId) {
+  const meta = await searchDirMetaRef().get();
+  const count = (meta.exists && meta.get(country)) || 1;
+  const shard = searchDir.shardIndex(companyId, count);
+  return {
+    ref: db.collection(SEARCH_DIR_COLLECTION)
+      .doc(searchDir.shardDocId(country, shard)),
+    shard,
+  };
+}
+
+// ── Fiche structure écrite → ligne d'annuaire à jour ────────────────
+// N'écrit que si un champ affiché dans la recherche a changé. Écriture
+// « fusion » : la popularité (calculée la nuit) n'est pas écrasée, et
+// un champ disparu de la fiche est retiré de la ligne.
+exports.syncSearchDirectory = onDocumentWritten(
+  { document: "companies/{companyId}", region: DB_REGION },
+  async (event) => {
+    const companyId = event.params.companyId;
+    const before = event.data.before.exists ? event.data.before.data() : null;
+    const after = event.data.after.exists ? event.data.after.data() : null;
+
+    for (const op of searchDir.syncOps(before, after)) {
+      const { ref, shard } = await searchDirShardRef(op.country, companyId);
+      if (op.op === "remove") {
+        try {
+          await ref.update(
+            new admin.firestore.FieldPath("entries", companyId),
+            admin.firestore.FieldValue.delete(),
+          );
+        } catch (e) {
+          if (e.code !== 5) throw e; // 5 = NOT_FOUND : rien à retirer
+        }
+        continue;
+      }
+      const entry = {};
+      for (const [k, v] of Object.entries(op.entry)) {
+        entry[k] = v === null ? admin.firestore.FieldValue.delete() : v;
+      }
+      await ref.set(
+        { country: op.country, shard, entries: { [companyId]: entry } },
+        { merge: true },
+      );
     }
     return null;
   });
 
-// ── Bilan hebdo (lundi 6h) — plages sous-utilisées sur 14 jours ─────
-exports.companyWeeklyReview = functions.pubsub
-  .schedule("0 6 * * 1")
-  .timeZone(FR_TZ)
-  .onRun(async () => {
-    const now = new Date();
-    const { start: todayStart } = todayBounds(now);
-    const from = new Date(todayStart);
-    from.setDate(from.getDate() - 14);
-    const cooldownBefore = new Date(now.getTime() - 13 * 24 * 3600 * 1000);
-
+// ── Reconstruction de nuit (popularité + filet de sécurité) ─────────
+// Relit toutes les fiches, compte les réservations confirmées de chaque
+// structure (la purge ne garde que ~30 jours → popularité récente), puis
+// réécrit l'annuaire complet et supprime les documents devenus inutiles.
+// Sert aussi au premier remplissage : « Forcer l'exécution » dans Cloud
+// Scheduler (console Google Cloud).
+exports.rebuildSearchDirectory = onSchedule(
+  {
+    schedule: "45 3 * * *",
+    timeZone: "Africa/Dakar",
+    region: SCHEDULER_REGION,
+    timeoutSeconds: 540,
+    memory: "512MiB",
+  },
+  async () => {
     const companiesSnap = await db.collection("companies").get();
-    for (const companyDoc of companiesSnap.docs) {
-      const companyId = companyDoc.id;
-      const queuesSnap = await companyDoc.ref.collection("queues").get();
+    const companies = companiesSnap.docs.map((d) => ({
+      id: d.id, data: d.data(), popularity: 0,
+    }));
 
-      for (const queueDoc of queuesSnap.docs) {
-        const queueId = queueDoc.id;
-        const queueName = queueDoc.data().name || "votre file";
-
-        const byPlage = await aggregateSlotsByPlage(
-          companyId, queueId, from, todayStart,
-        );
-        if (byPlage.size === 0) continue;
-
-        const tsSnap = await queueDoc.ref.collection("timeSlots").get();
-        for (const tsDoc of tsSnap.docs) {
-          const tsData = tsDoc.data();
-          if (tsData.deleteAfter) continue;
-          if (
-            tsData.underusedNotifiedAt &&
-            tsData.underusedNotifiedAt.toDate() > cooldownBefore
-          ) {
-            continue;
-          }
-
-          const g = byPlage.get(tsDoc.id);
-          if (!g || !g.capacity) continue;
-          // Plage trop jeune : pas de créneau près du début de la fenêtre.
-          if (
-            !g.firstStart ||
-            g.firstStart.getTime() > from.getTime() + 36 * 3600 * 1000
-          ) {
-            continue;
-          }
-          if (fillPct(g.reservations, g.capacity) >= UNDERUSED_PCT) continue;
-
-          const label = rangeLabel(tsData) || "une plage";
-          await writeCompanyNotification(companyId, {
-            type: "plage_underused",
-            title: `📉 ${queueName} · plage ${label} peu réservée`,
-            body:
-              "Moins de 10 % des places ont été réservées ces 2 dernières " +
-              "semaines. Vous pouvez la raccourcir, la décaler à un meilleur " +
-              "horaire, ou réduire la capacité.",
-            audience: "admin",
-            payload: { queueId, queueName, timeSlotId: tsDoc.id, range: label },
-          });
-          await tsDoc.ref.set(
-            { underusedNotifiedAt: admin.firestore.FieldValue.serverTimestamp() },
-            { merge: true },
-          );
+    // Comptages en parallèle, par paquets (1 lecture par tranche de
+    // 1 000 réservations comptées).
+    const listed = companies.filter((c) => searchDir.isListed(c.data));
+    const CHUNK = 50;
+    for (let i = 0; i < listed.length; i += CHUNK) {
+      await Promise.all(listed.slice(i, i + CHUNK).map(async (c) => {
+        try {
+          const agg = await db.collection("companies").doc(c.id)
+            .collection("reservations")
+            .where("status", "==", "confirmed")
+            .count().get();
+          c.popularity = agg.data().count;
+        } catch (e) {
+          console.error(`❌ popularité ${c.id}:`, e.message);
         }
-      }
+      }));
     }
-    return null;
+
+    const { docs, shardCounts } = searchDir.planDirectory(companies);
+    const now = admin.firestore.FieldValue.serverTimestamp();
+
+    // Méta d'abord : une mise à jour en direct pendant la reconstruction
+    // vise déjà la bonne répartition.
+    await searchDirMetaRef().set(shardCounts);
+    for (const [docId, d] of docs) {
+      await db.collection(SEARCH_DIR_COLLECTION).doc(docId)
+        .set({ ...d, updatedAt: now });
+    }
+
+    const existing = await db.collection(SEARCH_DIR_COLLECTION)
+      .select().get();
+    for (const doc of existing.docs) {
+      if (!docs.has(doc.id)) await doc.ref.delete();
+    }
+
+    console.log(
+      `📇 Annuaire : ${listed.length} structure(s), ` +
+      `${docs.size} document(s) — ${JSON.stringify(shardCounts)}`,
+    );
   });

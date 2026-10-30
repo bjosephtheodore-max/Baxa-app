@@ -10,6 +10,7 @@ import 'package:baxa/services/favorites_service.dart';
 import 'package:baxa/services/geo_address_service.dart';
 import 'package:baxa/services/locale_service.dart';
 import 'package:baxa/services/location_service.dart';
+import 'package:baxa/services/search_directory_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -56,7 +57,9 @@ class _SearchPageState extends State<SearchPage> {
   bool _historyLoaded = false;
   static const String _cacheKeyPrefix = 'recent_companies_';
 
-  late Stream<QuerySnapshot> _entreprisesStream;
+  // Annuaire de recherche du pays du client — recréé seulement quand ce
+  // pays change (voir _setUserCountry).
+  late Stream<List<CompanySearchEntry>> _entreprisesStream;
 
   // Empêche un double/triple tap sur une carte de déclencher plusieurs
   // navigations en parallèle (chacune finirait par empiler sa propre page
@@ -222,7 +225,7 @@ class _SearchPageState extends State<SearchPage> {
           !_countryResolvedFromGps &&
           code != _userCountryCode &&
           mounted) {
-        setState(() => _userCountryCode = code);
+        _setUserCountry(code);
       }
     } catch (_) {}
   }
@@ -239,8 +242,16 @@ class _SearchPageState extends State<SearchPage> {
     if (code == null || code.isEmpty) return;
     _countryResolvedFromGps = true;
     if (code != _userCountryCode && mounted) {
-      setState(() => _userCountryCode = code);
+      _setUserCountry(code);
     }
+  }
+
+  // Nouveau pays → on écoute l'annuaire de ce pays à la place.
+  void _setUserCountry(String code) {
+    setState(() {
+      _userCountryCode = code;
+      _entreprisesStream = _getEntreprisesStream();
+    });
   }
 
   // Idem : point d'entrée non-protected pour fixer le texte de recherche
@@ -586,14 +597,14 @@ class _SearchPageState extends State<SearchPage> {
           _buildHeader(),
           _buildFilters(),
           Expanded(
-            child: StreamBuilder<QuerySnapshot>(
+            child: StreamBuilder<List<CompanySearchEntry>>(
               stream: _entreprisesStream,
               builder: (ctx, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting ||
                     !_historyLoaded) {
                   return _buildSkeleton();
                 }
-                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                if (!snapshot.hasData || snapshot.data!.isEmpty) {
                   return _buildEmptyState(
                     icon: Icons.business_outlined,
                     title: 'Aucune structure',
@@ -602,9 +613,9 @@ class _SearchPageState extends State<SearchPage> {
                 }
 
                 final myCountry = _userCountryCode;
-                final docs = snapshot.data!.docs.where((d) {
-                  final data = d.data() as Map<String, dynamic>;
-                  if (data['status'] == 'deleted') return false;
+                final docs = snapshot.data!.where((d) {
+                  final data = d.data;
+                  if (!_matchesSelectedType(data)) return false;
 
                   // Filtre pays : n'exclut une structure que si son pays
                   // ET celui du client sont connus et différents. Une
@@ -767,7 +778,6 @@ class _SearchPageState extends State<SearchPage> {
                         if (mounted) {
                           setState(() {
                             typeSelectionne = type == 'Tous' ? null : type;
-                            _entreprisesStream = _getEntreprisesStream();
                           });
                         }
                         _centerChip(_typeChipKeys[type]!);
@@ -867,7 +877,7 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   // ── État vide : historique + populaires (30 max) ──────────────────────────
-  Widget _buildDefaultState(List<DocumentSnapshot> allDocs) {
+  Widget _buildDefaultState(List<CompanySearchEntry> allDocs) {
     final allDocMap = {for (final d in allDocs) d.id: d};
 
     final historyDocs = _recentCompanies
@@ -877,7 +887,7 @@ class _SearchPageState extends State<SearchPage> {
         // aucune file.
         .where(
           (e) => !_companyHasNoQueue(
-            allDocMap[e['id'] as String]!.data() as Map<String, dynamic>,
+            allDocMap[e['id'] as String]!.data,
           ),
         )
         .take(15)
@@ -934,7 +944,7 @@ class _SearchPageState extends State<SearchPage> {
       for (int i = 0; i < historyDocs.length; i++) {
         final entry = historyDocs[i];
         final doc = allDocMap[entry['id'] as String]!;
-        final data = doc.data() as Map<String, dynamic>;
+        final data = doc.data;
         items.add(
           _buildAnimatedCard(
             _buildCompanyCard(
@@ -978,7 +988,7 @@ class _SearchPageState extends State<SearchPage> {
       );
       for (int i = 0; i < popularDocs.length; i++) {
         final doc = popularDocs[i];
-        final data = doc.data() as Map<String, dynamic>;
+        final data = doc.data;
         items.add(
           _buildAnimatedCard(
             _buildCompanyCard(
@@ -1009,13 +1019,13 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   // ── Résultats de recherche ────────────────────────────────────────────────
-  Widget _buildSearchResults(List<DocumentSnapshot> docs) {
+  Widget _buildSearchResults(List<CompanySearchEntry> docs) {
     final detectedCity = _detectCity(docs, searchText);
 
     var scored =
         docs
             .map((d) {
-              final data = d.data() as Map<String, dynamic>;
+              final data = d.data;
               var score = _scoreMatch(data, searchText);
 
               // Filtre strict par ville si une ville est détectée dans la saisie
@@ -1034,10 +1044,10 @@ class _SearchPageState extends State<SearchPage> {
             // correspondance de nom forte.
             final sa =
                 a.score -
-                _searchStatePenalty(a.doc.data() as Map<String, dynamic>);
+                _searchStatePenalty(a.doc.data);
             final sb =
                 b.score -
-                _searchStatePenalty(b.doc.data() as Map<String, dynamic>);
+                _searchStatePenalty(b.doc.data);
             return sb.compareTo(sa);
           });
 
@@ -1070,7 +1080,7 @@ class _SearchPageState extends State<SearchPage> {
         }
         final offset = hasCityCard ? 1 : 0;
         final item = scored[i - offset];
-        final data = item.doc.data() as Map<String, dynamic>;
+        final data = item.doc.data;
         return _buildAnimatedCard(
           _buildCompanyCard(
             doc: item.doc,

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:baxa/page%20b-acceuil/customer/customer_page.dart';
 import 'package:flutter/material.dart';
 import 'package:baxa/services/firebase/auth.dart';
+import 'package:baxa/services/firebase/otp_cooldown.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -294,6 +295,11 @@ class _SigninePageState extends State<SigninePage> {
       _setError('Entrez votre numéro de téléphone.');
       return;
     }
+    final wait = OtpCooldown.secondsLeft(phone);
+    if (wait > 0) {
+      _setError(OtpCooldown.waitMessage(wait));
+      return;
+    }
     setState(() => _isLoadingPhone = true);
     await FirebaseAuth.instance.verifyPhoneNumber(
       phoneNumber: phone,
@@ -308,6 +314,7 @@ class _SigninePageState extends State<SigninePage> {
         }
       },
       codeSent: (String verificationId, int? resendToken) {
+        OtpCooldown.markSent(phone);
         if (mounted) {
           setState(() {
             _verificationId = verificationId;

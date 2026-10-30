@@ -58,8 +58,8 @@ extension _SearchScoring on _SearchPageState {
 
   // Score textuel enrichi par la popularité et la proximité
   double _scoreMatch(Map<String, dynamic> data, String query) {
-    final reservationCount = (data['reservationCount'] as num?)?.toInt() ?? 0;
-    final popularityBonus = math.log(reservationCount + 1) * 0.2;
+    final popularity = (data['popularity'] as num?)?.toInt() ?? 0;
+    final popularityBonus = math.log(popularity + 1) * 0.2;
     final distanceBonus = _distanceBonusFor(data);
 
     if (query.isEmpty) return 1.0 + popularityBonus + distanceBonus;
@@ -108,12 +108,12 @@ extension _SearchScoring on _SearchPageState {
   }
 
   // Détecte si la saisie correspond à une ville connue (mot unique, ≥4 chars)
-  String? _detectCity(List<DocumentSnapshot> docs, String query) {
+  String? _detectCity(List<CompanySearchEntry> docs, String query) {
     final q = query.trim();
     if (q.length < 4 || q.contains(' ')) return null;
     final qNorm = _normalize(q);
     for (final doc in docs) {
-      final data = doc.data() as Map<String, dynamic>;
+      final data = doc.data;
       final ville = data['ville'] as String? ?? '';
       if (ville.isEmpty) continue;
       final villeNorm = _normalize(ville);
@@ -148,23 +148,23 @@ extension _SearchScoring on _SearchPageState {
   // Exclut les structures sans file et les structures fermées : elles ne
   // doivent pas encombrer les recommandations (mais restent trouvables
   // par une recherche explicite).
-  List<DocumentSnapshot> _getDiversePopular(
-    List<DocumentSnapshot> allDocs,
+  List<CompanySearchEntry> _getDiversePopular(
+    List<CompanySearchEntry> allDocs,
     Set<String> excludeIds,
     int count,
   ) {
     if (count <= 0) return [];
     final candidates = allDocs.where((d) {
       if (excludeIds.contains(d.id)) return false;
-      final data = d.data() as Map<String, dynamic>;
+      final data = d.data;
       if (_companyHasNoQueue(data)) return false;
       if (_companyClosedNow(data)) return false;
       return true;
     }).toList();
 
     candidates.sort((a, b) {
-      final da = a.data() as Map<String, dynamic>;
-      final db = b.data() as Map<String, dynamic>;
+      final da = a.data;
+      final db = b.data;
 
       final distA = _distanceKmFor(da);
       final distB = _distanceKmFor(db);
@@ -172,23 +172,23 @@ extension _SearchScoring on _SearchPageState {
       if (distA != null) return -1;
       if (distB != null) return 1;
 
-      final ra = (da['reservationCount'] as num?)?.toInt() ?? 0;
-      final rb = (db['reservationCount'] as num?)?.toInt() ?? 0;
+      final ra = (da['popularity'] as num?)?.toInt() ?? 0;
+      final rb = (db['popularity'] as num?)?.toInt() ?? 0;
       return rb.compareTo(ra);
     });
 
     if (candidates.length <= count) return candidates;
 
     // Grouper par type (ordre = tri ci-dessus conservé dans chaque groupe)
-    final Map<String, List<DocumentSnapshot>> byType = {};
+    final Map<String, List<CompanySearchEntry>> byType = {};
     for (final doc in candidates) {
       final type =
-          (doc.data() as Map<String, dynamic>)['type'] as String? ?? 'Autre';
+          doc.data['type'] as String? ?? 'Autre';
       byType.putIfAbsent(type, () => []).add(doc);
     }
 
     // Round-robin : 1 par type à tour de rôle
-    final result = <DocumentSnapshot>[];
+    final result = <CompanySearchEntry>[];
     while (result.length < count) {
       bool anyLeft = false;
       for (final list in byType.values) {
@@ -203,15 +203,17 @@ extension _SearchScoring on _SearchPageState {
     return result;
   }
 
-  Stream<QuerySnapshot> _getEntreprisesStream() {
-    Query q = FirebaseFirestore.instance.collection("companies");
-    if (typeSelectionne != null && typeSelectionne != 'Tous') {
-      if (typeSelectionne == 'Autre') {
-        q = q.where("typeCategorie", isEqualTo: 'Autre');
-      } else {
-        q = q.where("type", isEqualTo: typeSelectionne);
-      }
-    }
-    return q.snapshots();
+  // Annuaire du pays du client (une poignée de documents, quel que soit le
+  // nombre de structures) — voir SearchDirectoryService.
+  Stream<List<CompanySearchEntry>> _getEntreprisesStream() =>
+      SearchDirectoryService.watch(_userCountryCode);
+
+  // Filtre du chip de type, appliqué sur l'annuaire déjà chargé (avant :
+  // une nouvelle requête Firestore à chaque chip).
+  bool _matchesSelectedType(Map<String, dynamic> data) {
+    final t = typeSelectionne;
+    if (t == null || t == 'Tous') return true;
+    if (t == 'Autre') return data['typeCategorie'] == 'Autre';
+    return data['type'] == t;
   }
 }

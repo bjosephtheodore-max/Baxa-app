@@ -383,6 +383,11 @@ class _SlotsPageState extends State<SlotsPage>
       _queueUnavailable = false;
       _queueClosed = isQueueClosedNow(closureStart, closureEnd);
       _queueClosureEnd = closureEnd;
+      // Fermeture (en cours ou programmée) : les jours concernés
+      // s'affichent « Fermé » — même règle que le serveur (booking.js,
+      // isSlotInClosure), qui refuse toute réservation sur ces jours.
+      _closureStart = closureStart?.toLocal();
+      _closureEnd = closureEnd?.toLocal();
       _liveQueueName = data['name'] as String? ?? _liveQueueName;
       _maxAdvanceDays = (data['maxAdvanceDays'] as int?) ?? 2;
       _reservationDeadlineMinutes =
@@ -408,9 +413,9 @@ class _SlotsPageState extends State<SlotsPage>
     super.dispose();
   }
 
-  // La config de la file (nom, maxAdvanceDays, weekdays, cutoff…) est suivie
-  // en temps réel par _onQueueSnapshot. Ici on ne lit que le doc entreprise
-  // (fermetures, statut supprimé).
+  // La config de la file (nom, maxAdvanceDays, weekdays, cutoff, fermeture…)
+  // est suivie en temps réel par _onQueueSnapshot. Ici on ne lit que le doc
+  // entreprise (statut supprimé).
   Future<void> _loadCompanyConfig() async {
     try {
       final companyDoc = await _fs
@@ -423,10 +428,6 @@ class _SlotsPageState extends State<SlotsPage>
       if (companyDoc.exists) {
         final cd = companyDoc.data()!;
         setState(() {
-          _closureStart = (cd['closureStart'] as Timestamp?)
-              ?.toDate()
-              .toLocal();
-          _closureEnd = (cd['closureEnd'] as Timestamp?)?.toDate().toLocal();
           _companyDeleted = cd['status'] == 'deleted';
         });
       }
@@ -436,6 +437,18 @@ class _SlotsPageState extends State<SlotsPage>
   }
 
   // ── Helpers ───────────────────────────────────────────────────
+
+  // Jour couvert par la fermeture de la file : du jour de début au jour de
+  // fin inclus (closureEnd = veille de la réouverture), ou sans limite si la
+  // fermeture n'a pas de date de fin.
+  bool _isInClosurePeriod(DateTime day) {
+    final start = _closureStart;
+    if (start == null) return false;
+    final d = _dateOnly(day);
+    if (d.isBefore(_dateOnly(start))) return false;
+    final end = _closureEnd;
+    return end == null || !d.isAfter(_dateOnly(end));
+  }
 
   DateTime _dateOnly(DateTime dt) => DateTime(dt.year, dt.month, dt.day);
 
@@ -549,11 +562,7 @@ class _SlotsPageState extends State<SlotsPage>
         _reservationCutoffDate != null &&
         _dateOnly(_selectedDate).isAfter(_dateOnly(_reservationCutoffDate!));
     final selectedDay = _dateOnly(_selectedDate);
-    final isClosurePeriodDay =
-        _closureStart != null &&
-        _closureEnd != null &&
-        !selectedDay.isBefore(_dateOnly(_closureStart!)) &&
-        !selectedDay.isAfter(_dateOnly(_closureEnd!));
+    final isClosurePeriodDay = _isInClosurePeriod(selectedDay);
 
     // Le jour sélectionné est-il encore en cours de chargement (fenêtre pas
     // encore assez large, ou tout premier chargement) ?
@@ -723,9 +732,14 @@ class _SlotsPageState extends State<SlotsPage>
                     final day = availableDays[i];
                     final isSelected = _isSameDay(day, _selectedDate);
                     final isClosedChip =
-                        _openWeekdays != null &&
-                        !_openWeekdays!.contains(day.weekday);
-                    final hasSlots = (_dailyAvailable[_ymd(day)] ?? 0) > 0;
+                        (_openWeekdays != null &&
+                            !_openWeekdays!.contains(day.weekday)) ||
+                        _isInClosurePeriod(day);
+                    // Pas de pastille verte un jour de fermeture, même si des
+                    // créneaux générés avant la fermeture existent encore.
+                    final hasSlots =
+                        !isClosedChip &&
+                        (_dailyAvailable[_ymd(day)] ?? 0) > 0;
 
                     final Color labelColor = isSelected
                         ? Colors.white
@@ -2161,6 +2175,11 @@ class _SlotsPageState extends State<SlotsPage>
 
       if (!mounted) return;
 
+      // Messager de l'app entière, pris maintenant : la page peut revenir en
+      // arrière juste après (retour auto après réservation) sans que le
+      // message « Ajouté aux favoris » disparaisse avec elle.
+      final messenger = ScaffoldMessenger.of(context);
+
       // Écriture réelle du favori + retour visuel — succès ET échec (fini le
       // catch silencieux : si ça rate, l'utilisateur en est informé).
       Future<void> addFavoriteNow() async {
@@ -2170,87 +2189,84 @@ class _SlotsPageState extends State<SlotsPage>
             nom: resolvedNom,
             type: companyType,
           );
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: const Row(
-                  children: [
-                    Icon(Icons.star_rounded, color: Colors.white, size: 16),
-                    SizedBox(width: 8),
-                    Text('Ajouté aux favoris'),
-                  ],
-                ),
-                backgroundColor: widget.primaryGreen,
-                behavior: SnackBarBehavior.floating,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
+          messenger.showSnackBar(
+            SnackBar(
+              content: const Row(
+                children: [
+                  Icon(Icons.star_rounded, color: Colors.white, size: 16),
+                  SizedBox(width: 8),
+                  Text('Ajouté aux favoris'),
+                ],
               ),
-            );
-          }
+              backgroundColor: widget.primaryGreen,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+          );
         } catch (e) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Impossible d\'ajouter aux favoris : $e'),
-                backgroundColor: Colors.red.shade600,
-                behavior: SnackBarBehavior.floating,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
+          messenger.showSnackBar(
+            SnackBar(
+              content: Text('Impossible d\'ajouter aux favoris : $e'),
+              backgroundColor: Colors.red.shade600,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
               ),
-            );
-          }
+            ),
+          );
         }
       }
 
-      await showModalBottomSheet(
+      // La feuille ne fait que rendre le choix du client ; la suite (ajout,
+      // ou inscription d'abord) est ATTENDUE ici, avant que l'appelant ne
+      // revienne en arrière. Avant, l'ajout partait après la fermeture de
+      // la page : pas de message, et l'invitation à s'inscrire des comptes
+      // anonymes ne s'ouvrait jamais.
+      final wantsFavorite = await showModalBottomSheet<bool>(
         context: context,
         backgroundColor: Colors.transparent,
         isDismissible: true,
         builder: (ctx) => _FavoritePromptSheet(
-          onAddFavorite: () async {
-            Navigator.pop(ctx);
-            final currentUser = FirebaseAuth.instance.currentUser;
-            if (currentUser == null) return;
-
-            if (currentUser.isAnonymous) {
-              // Widget C : l'utilisateur doit d'abord s'inscrire — même
-              // parcours que le favori posé par appui long (search_page) :
-              // une fois l'inscription terminée, le favori est ajouté
-              // directement, sans que le client ait à refaire le geste.
-              if (!mounted) return;
-              await showModalBottomSheet(
-                context: context,
-                backgroundColor: Colors.transparent,
-                isDismissible: true,
-                builder: (ctx2) => _RegistrationNeededSheet(
-                  onRegister: () async {
-                    Navigator.pop(ctx2);
-                    if (!mounted) return;
-                    await Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => const SigninePage()),
-                    );
-                    if (!mounted) return;
-                    final u = FirebaseAuth.instance.currentUser;
-                    if (u != null && !u.isAnonymous) {
-                      await addFavoriteNow();
-                    }
-                  },
-                  onLater: () => Navigator.pop(ctx2),
-                ),
-              );
-            } else {
-              await addFavoriteNow();
-            }
-          },
-          onDismiss: () => Navigator.pop(ctx),
+          onAddFavorite: () => Navigator.pop(ctx, true),
+          onDismiss: () => Navigator.pop(ctx, false),
         ),
       );
 
       // Marquer comme montré (qu'il ait ajouté ou annulé)
       await prefs.setBool(promptedKey, true);
+
+      if (wantsFavorite != true || !mounted) return;
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser == null) return;
+
+      if (!currentUser.isAnonymous) {
+        await addFavoriteNow();
+        return;
+      }
+
+      // Widget C : l'utilisateur doit d'abord s'inscrire — même parcours que
+      // le favori posé par appui long (search_page) : une fois l'inscription
+      // terminée, le favori est ajouté directement, sans refaire le geste.
+      final wantsRegister = await showModalBottomSheet<bool>(
+        context: context,
+        backgroundColor: Colors.transparent,
+        isDismissible: true,
+        builder: (ctx2) => _RegistrationNeededSheet(
+          onRegister: () => Navigator.pop(ctx2, true),
+          onLater: () => Navigator.pop(ctx2, false),
+        ),
+      );
+      if (wantsRegister != true || !mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const SigninePage()),
+      );
+      final u = FirebaseAuth.instance.currentUser;
+      if (u != null && !u.isAnonymous) {
+        await addFavoriteNow();
+      }
     } catch (_) {}
   }
 
@@ -2380,17 +2396,22 @@ class _SlotsPageState extends State<SlotsPage>
   // ── États vides ───────────────────────────────────────────────
 
   Widget _buildClosurePeriodDayState() {
-    // _closureEnd est stocké à la veille de la réouverture (23:59:59).
-    final end = _closureEnd!.add(const Duration(seconds: 1));
-    final dd = end.day.toString().padLeft(2, '0');
-    final mm = end.month.toString().padLeft(2, '0');
+    final String reopenLine;
+    if (_closureEnd != null) {
+      // _closureEnd est stocké à la veille de la réouverture (23:59:59).
+      final end = _closureEnd!.add(const Duration(seconds: 1));
+      final dd = end.day.toString().padLeft(2, '0');
+      final mm = end.month.toString().padLeft(2, '0');
+      reopenLine = 'Réouverture prévue le $dd/$mm/${end.year}.';
+    } else {
+      reopenLine = 'Pas encore de date de réouverture.';
+    }
     return _buildStateView(
       icon: Icons.block_rounded,
       iconColor: Colors.red.shade400,
       bgColor: Colors.red.shade50,
       title: 'Fermeture temporaire',
-      subtitle:
-          'L\'établissement est fermé ce jour-là.\nRéouverture prévue le $dd/$mm/${end.year}.',
+      subtitle: 'L\'établissement est fermé ce jour-là.\n$reopenLine',
     );
   }
 

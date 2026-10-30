@@ -193,7 +193,8 @@ class _TeamPageState extends State<TeamPage> {
           .doc(_companyId)
           .collection('staff')
           .doc(uid)
-          .update({'isActive': false});
+          // Le motif permet à l'app du membre d'expliquer sa déconnexion.
+          .update({'isActive': false, 'revokedReason': 'removed'});
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

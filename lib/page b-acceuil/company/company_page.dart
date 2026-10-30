@@ -26,16 +26,14 @@ class CompanyPageState extends State<CompanyPage> {
   late final String _companyId =
       FirebaseAuth.instance.currentUser?.uid ?? '_';
 
-  // Flux stable des notifications récentes de l'entreprise — alimente la
-  // pastille de non-lus (barre de nav + icône de l'app). L'admin a
+  // Flux stable des notifications récentes adressées à l'admin — alimente
+  // la pastille de non-lus (barre de nav + icône de l'app). L'admin a
   // uid == companyId.
-  late final Query<Map<String, dynamic>> _recentNotifs = FirebaseFirestore
-      .instance
-      .collection('companies')
-      .doc(_companyId)
-      .collection('companyNotifications')
-      .orderBy('createdAt', descending: true)
-      .limit(50);
+  late final Query<Map<String, dynamic>> _recentNotifs =
+      CompanyNotificationsPage.queryFor(
+        companyId: _companyId,
+        audience: 'admin',
+      ).limit(50);
 
   // null = normal · 'scheduled' = départ en cours (délai de grâce) ·
   // 'gone' = compte déjà supprimé.

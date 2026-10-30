@@ -62,6 +62,19 @@ function isQueueClosedNow(closureStart, closureEnd, now) {
   return true;
 }
 
+/** Vrai si un créneau commençant à `slotStart` tombe dans la fermeture de
+ * la file : à partir de `closureStart`, jusqu'à `closureEnd` inclus (fixé
+ * par l'app à la veille de la réouverture, 23:59:59), ou sans fin si la
+ * fermeture n'est pas datée. Couvre aussi les fermetures PROGRAMMÉES, que
+ * isQueueClosedNow ne voit pas tant qu'elles n'ont pas commencé. */
+function isSlotInClosure(closureStart, closureEnd, slotStart) {
+  const cs = toDate(closureStart);
+  if (!cs || !slotStart) return false;
+  if (slotStart < cs) return false;
+  const ce = toDate(closureEnd);
+  return !ce || slotStart <= ce;
+}
+
 function fullName(userData) {
   const prenom = String(userData.prenom || "").trim();
   const nom = String(userData.nom || "").trim();
@@ -156,6 +169,10 @@ async function loadTargetSlot(tx, db, target, now) {
 
   const start = toDate(slot.start);
   const end = toDate(slot.end);
+  if (isSlotInClosure(queue.closureStart, queue.closureEnd, start)) {
+    throw refuse("closedOnDay",
+      "La structure est fermée ce jour-là. Choisissez une autre date.");
+  }
   if (start - now < MINUTE) {
     throw refuse("slotAlreadyStarted",
       "Ce créneau a déjà commencé et ne peut plus être réservé.");
@@ -439,5 +456,5 @@ const booking = onCall({region: REGION}, async (request) => {
 module.exports = {
   booking,
   // Exposés pour les tests (émulateur).
-  reserve, replace, cancel, ymd, MAX_DAILY_RESERVATIONS,
+  reserve, replace, cancel, ymd, MAX_DAILY_RESERVATIONS, isSlotInClosure,
 };

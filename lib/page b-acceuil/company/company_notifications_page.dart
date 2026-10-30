@@ -11,7 +11,8 @@ import 'package:baxa/page%20b-acceuil/company/team_page.dart';
 ///
 /// Source unique : `companies/{companyId}/companyNotifications`, écrite
 /// uniquement côté serveur (Cloud Functions). Le filtrage par destinataire se
-/// fait EN MÉMOIRE sur un flux plafonné — aucun index Firestore composite.
+/// fait DANS LA REQUÊTE ([queryFor]) : les règles Firestore n'autorisent
+/// chacun qu'à lire ses propres entrées.
 ///
 /// Deux tailles de carte (récap riche / alerte compacte), regroupement par
 /// période, et un code couleur à trois familles : vert (demande / positif),
@@ -32,6 +33,25 @@ class CompanyNotificationsPage extends StatefulWidget {
   /// Requis quand [audience] vaut `'staff'` : ne garder que ses notifs.
   final String? staffId;
 
+  /// Notifications adressées à ce destinataire, plus récentes d'abord. Seule
+  /// forme de requête acceptée par les règles (`audience` côté admin,
+  /// `staffId` côté staff — index composites dans firestore.indexes.json).
+  /// Partagée avec la pastille de non-lus des barres de navigation.
+  static Query<Map<String, dynamic>> queryFor({
+    required String companyId,
+    required String audience,
+    String? staffId,
+  }) {
+    final coll = FirebaseFirestore.instance
+        .collection('companies')
+        .doc(companyId)
+        .collection('companyNotifications');
+    final filtered = audience == 'staff'
+        ? coll.where('staffId', isEqualTo: staffId)
+        : coll.where('audience', isEqualTo: 'admin');
+    return filtered.orderBy('createdAt', descending: true);
+  }
+
   @override
   State<CompanyNotificationsPage> createState() =>
       _CompanyNotificationsPageState();
@@ -42,20 +62,16 @@ class _CompanyNotificationsPageState extends State<CompanyNotificationsPage> {
   static const _dark = Color(0xFF1A1C2E);
   static const _ground = Color(0xFFF7F8F6);
 
-  late final Query<Map<String, dynamic>> _stream = FirebaseFirestore.instance
-      .collection('companies')
-      .doc(widget.companyId)
-      .collection('companyNotifications')
-      .orderBy('createdAt', descending: true)
-      .limit(50);
+  late final Query<Map<String, dynamic>> _mine =
+      CompanyNotificationsPage.queryFor(
+        companyId: widget.companyId,
+        audience: widget.audience,
+        staffId: widget.staffId,
+      );
 
-  bool _isForMe(Map<String, dynamic> d) {
-    final aud = (d['audience'] as String?) ?? 'admin';
-    if (widget.audience == 'staff') {
-      return aud == 'staff' && d['staffId'] == widget.staffId;
-    }
-    return aud == 'admin';
-  }
+  late final Query<Map<String, dynamic>> _stream = _mine.limit(50);
+
+  bool get _isStaff => widget.audience == 'staff';
 
   @override
   Widget build(BuildContext context) {
@@ -97,9 +113,7 @@ class _CompanyNotificationsPageState extends State<CompanyNotificationsPage> {
               child: CircularProgressIndicator(color: _green, strokeWidth: 2),
             );
           }
-          final docs = (snap.data?.docs ?? [])
-              .where((d) => _isForMe(d.data()))
-              .toList();
+          final docs = snap.data?.docs ?? const [];
           if (docs.isEmpty) return const _EmptyState();
 
           final groups = _groupByPeriod(docs);
@@ -116,6 +130,7 @@ class _CompanyNotificationsPageState extends State<CompanyNotificationsPage> {
                     id: doc.id,
                     data: doc.data(),
                     companyId: widget.companyId,
+                    showActions: !_isStaff,
                     onDelete: () => _delete(doc.id),
                   ),
               ],
@@ -201,18 +216,11 @@ class _CompanyNotificationsPageState extends State<CompanyNotificationsPage> {
     );
     if (ok != true) return;
 
-    final coll = FirebaseFirestore.instance
-        .collection('companies')
-        .doc(widget.companyId)
-        .collection('companyNotifications');
     try {
-      final snap = await coll.orderBy('createdAt', descending: true).get();
+      final snap = await _mine.limit(400).get();
       final batch = FirebaseFirestore.instance.batch();
-      var n = 0;
       for (final d in snap.docs) {
-        if (!_isForMe(d.data())) continue;
         batch.delete(d.reference);
-        if (++n >= 400) break;
       }
       await batch.commit();
     } catch (e) {
@@ -326,12 +334,17 @@ class _NotifCard extends StatelessWidget {
     required this.id,
     required this.data,
     required this.companyId,
+    required this.showActions,
     required this.onDelete,
   });
 
   final String id;
   final Map<String, dynamic> data;
   final String companyId;
+
+  /// Boutons d'action (« Ajuster cette plage », « Voir l'équipe ») : ils
+  /// mènent à des réglages réservés à l'admin — jamais affichés au staff.
+  final bool showActions;
   final VoidCallback onDelete;
 
   @override
@@ -474,7 +487,8 @@ class _NotifCard extends StatelessWidget {
                                 const SizedBox(height: 8),
                                 _Pill(style.label, pal),
                               ],
-                              ..._buildAction(context, type, payload, pal),
+                              if (showActions)
+                                ..._buildAction(context, type, payload, pal),
                             ],
                           ),
                         ),

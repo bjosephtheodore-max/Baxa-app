@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cloud_functions/cloud_functions.dart';
+import 'package:baxa/services/firebase/cloud_functions_region.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
@@ -278,7 +278,7 @@ class _StaffSettingsPageState extends State<StaffSettingsPage> {
 
     setState(() => _isLeaving = true);
     try {
-      await FirebaseFunctions.instance.httpsCallable('leaveTeam').call();
+      await baxaFunctions.httpsCallable('leaveTeam').call();
     } catch (_) {
       if (!mounted) return;
       setState(() => _isLeaving = false);

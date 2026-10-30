@@ -35,18 +35,14 @@ class _StaffPageState extends State<StaffPage> with WidgetsBindingObserver {
 
   late final String _uid = FirebaseAuth.instance.currentUser?.uid ?? '_';
 
-  // Flux stable des notifications récentes de l'entreprise — le filtrage
-  // « adressées à ce membre » se fait en mémoire (unreadWhere / _isForMe).
-  late final Query<Map<String, dynamic>> _recentNotifs = FirebaseFirestore
-      .instance
-      .collection('companies')
-      .doc(widget.companyId)
-      .collection('companyNotifications')
-      .orderBy('createdAt', descending: true)
-      .limit(50);
-
-  bool _staffNotif(Map<String, dynamic> d) =>
-      d['audience'] == 'staff' && d['staffId'] == _uid;
+  // Flux stable des notifications récentes adressées à CE membre — alimente
+  // la pastille de non-lus (barre de nav + icône de l'app).
+  late final Query<Map<String, dynamic>> _recentNotifs =
+      CompanyNotificationsPage.queryFor(
+        companyId: widget.companyId,
+        audience: 'staff',
+        staffId: _uid,
+      ).limit(50);
 
   Future<void> _touchLastSeen() async {
     final now = DateTime.now();
@@ -142,7 +138,6 @@ class _StaffPageState extends State<StaffPage> with WidgetsBindingObserver {
           NavigationDestination(
             icon: NotificationsNavIcon(
               recentNotifications: _recentNotifs,
-              unreadWhere: _staffNotif,
               selected: _pageIndex == 2,
             ),
             label: 'Notifications',

@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'booking_constants.dart';
+import 'firebase/cloud_functions_region.dart';
 
 /// ============================================================
 /// RÉSULTAT D'UNE VÉRIFICATION DE RÈGLE
@@ -56,7 +57,7 @@ enum RuleViolation {
 class ReservationRulesService {
   /// Région de la fonction `booking` : à côté de la base Firestore
   /// (Johannesburg), voir functions/booking.js.
-  static const String bookingRegion = 'africa-south1';
+  static const String bookingRegion = kFunctionsRegion;
 
   // Injectables pour les tests (base et session simulées) ; l'app utilise
   // toujours les instances Firebase réelles.

@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:baxa/services/firebase/cloud_functions_region.dart';
+import 'package:baxa/services/firebase/otp_cooldown.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:baxa/page b-acceuil/company/staff_page.dart';
+import 'package:baxa/page b-acceuil/company/staff_revocation.dart';
 import 'package:baxa/services/booking_constants.dart';
 import 'package:baxa/services/firebase/auth.dart';
 
@@ -60,7 +63,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
   }
 
   HttpsCallable _callable(String name) =>
-      FirebaseFunctions.instance.httpsCallable(name);
+      baxaFunctions.httpsCallable(name);
 
   // Message lisible pour une erreur renvoyée par les fonctions d'équipe.
   String _teamErrorMessage(FirebaseFunctionsException e) {
@@ -152,6 +155,12 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
 
     final formatted = phone.startsWith('+') ? phone : '+221$phone';
 
+    final wait = OtpCooldown.secondsLeft(formatted);
+    if (wait > 0) {
+      _setError(OtpCooldown.waitMessage(wait));
+      return;
+    }
+
     setState(() => _isLoading = true);
     try {
       await FirebaseAuth.instance.verifyPhoneNumber(
@@ -171,6 +180,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           if (mounted) setState(() => _isLoading = false);
         },
         codeSent: (String verificationId, int? resendToken) {
+          OtpCooldown.markSent(formatted);
           if (mounted) {
             setState(() {
               _verificationId = verificationId;
@@ -315,6 +325,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
       final companyId = data['companyId'] as String?;
 
       var isActiveMember = false;
+      StaffRevocation? revocation;
       if (data['role'] == 'staff' && companyId != null) {
         final staffDoc = await db
             .collection('companies')
@@ -323,10 +334,22 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
             .doc(uid)
             .get();
         isActiveMember = staffDoc.data()?['isActive'] == true;
+        if (!isActiveMember) {
+          revocation = StaffRevocation.of(
+            staffDoc.data()?['revokedReason'] as String?,
+            data['companyName'] as String? ?? '',
+          );
+        }
       }
 
       if (!isActiveMember) {
         await _abortSession();
+        // Accès coupé par l'établissement : on dit pourquoi plutôt que le
+        // message générique « aucune équipe ».
+        if (revocation != null) {
+          _setError('${revocation.title}. ${revocation.body}');
+          return;
+        }
         _setError(
           'Ce compte ne fait partie d\'aucune equipe. Verifiez que vous '
           'utilisez le meme numero ou compte Google qu\'a votre premiere '

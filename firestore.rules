@@ -139,8 +139,15 @@ service cloud.firestore {
       // Journal unifié des notifications entreprise (admin + staff). Écrit
       // UNIQUEMENT côté serveur (Cloud Functions, Admin SDK). L'app peut lire
       // et supprimer (glisser pour effacer / tout supprimer), jamais créer.
+      // Chacun ne voit QUE ses entrées : l'admin celles d'audience "admin",
+      // un membre celles qui portent son staffId. Les requêtes de l'app
+      // filtrent donc sur ces champs (sinon Firestore les refuse).
       match /companyNotifications/{notifId} {
-        allow read, delete: if hasAccess(companyId);
+        allow read, delete: if
+          (isAdmin(companyId) && resource.data.audience == 'admin')
+          || (signedIn()
+              && resource.data.get('staffId', '') == request.auth.uid
+              && isStaff(companyId));
         allow create, update: if false;
       }
 
@@ -209,6 +216,15 @@ service cloud.firestore {
     // `approved` / `completed` est fait côté serveur uniquement (Admin SDK).
     match /deletionRequests/{companyId} {
       allow read, create, delete: if isAdmin(companyId);
+    }
+
+    // Annuaire de recherche par pays : copie des champs publics de
+    // `companies` (déjà lisibles par tous), tenue à jour uniquement par
+    // les Cloud Functions. `searchDirectoryMeta` n'a aucune règle →
+    // inaccessible aux clients.
+    match /searchDirectory/{docId} {
+      allow read: if true;
+      allow write: if false;
     }
 
     // Alertes internes plateforme (demandes de départ, etc.) — écrites

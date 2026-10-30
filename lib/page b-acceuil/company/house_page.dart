@@ -19,6 +19,7 @@ import 'package:baxa/services/onboarding_service.dart';
 import 'package:baxa/widgets/onboarding_widgets.dart';
 import 'package:baxa/widgets/baxa_date_picker_theme.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
+import 'package:baxa/page%20b-acceuil/company/staff_revocation.dart';
 
 part 'house_widgets.dart';
 part 'house_dialogs.dart';
@@ -70,6 +71,10 @@ class _HousePageState extends State<HousePage>
   // (l'utilisateur cherche un créneau plus loin), revient quand on défile
   // vers le haut. Purement visuel — aucun impact sur l'ajout de client.
   bool _fabVisible = true;
+
+  // Fin d'accès staff traitée (message + redirection) : le build peut
+  // repasser plusieurs fois par l'état « révoqué », on n'agit qu'une fois.
+  bool _revocationHandled = false;
 
   bool _handleUserScroll(UserScrollNotification n) {
     // Le défilement horizontal du PageView (entre files) ne compte pas.
@@ -197,16 +202,16 @@ class _HousePageState extends State<HousePage>
       listenable: Listenable.merge([_n, OnboardingService()]),
       builder: (context, _) {
         // Staff retiré de l'équipe (détecté à l'ouverture ou en direct) :
-        // déconnexion déjà faite côté notifier, il ne reste qu'à renvoyer
-        // vers l'écran de choix, en vidant toute la pile de navigation.
+        // déconnexion déjà faite côté notifier. On explique pourquoi (sauf
+        // départ volontaire), puis on renvoie vers l'écran de choix en
+        // vidant toute la pile de navigation.
         if (_n.revoked) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            Navigator.of(context).pushAndRemoveUntil(
-              MaterialPageRoute(builder: (_) => const ChoosePage()),
-              (route) => false,
+          if (!_revocationHandled) {
+            _revocationHandled = true;
+            WidgetsBinding.instance.addPostFrameCallback(
+              (_) => _leaveAfterRevocation(),
             );
-          });
+          }
           return const Scaffold(
             backgroundColor: Colors.white,
             body: Center(child: CircularProgressIndicator(color: _green)),
@@ -214,6 +219,39 @@ class _HousePageState extends State<HousePage>
         }
         return _buildScaffold();
       },
+    );
+  }
+
+  Future<void> _leaveAfterRevocation() async {
+    if (!mounted) return;
+    final msg = StaffRevocation.of(_n.revokedReason, _n.companyName);
+    if (msg != null) {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          title: Text(msg.title),
+          content: Text(msg.body),
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _green,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Compris'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+    }
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const ChoosePage()),
+      (route) => false,
     );
   }
 

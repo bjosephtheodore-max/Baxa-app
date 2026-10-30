@@ -63,6 +63,7 @@ dependencies:
   firebase_remote_config: ^6.7.0
   firebase_performance: ^0.11.6
   cloud_functions: ^6.5.0
+  firebase_app_check: ^0.4.8
 
 dev_dependencies:
   flutter_test:

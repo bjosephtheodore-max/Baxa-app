@@ -67,6 +67,7 @@ class _HouseNotifier extends ChangeNotifier {
   bool _disposed = false;
   bool _initialized = false;
   bool _revoked = false;
+  String? _revokedReason;
 
   // ── Cache local (session) ─────────────────────────────────────────────────
   static const _kCompanyId = 'hn_company_id';
@@ -122,6 +123,10 @@ class _HouseNotifier extends ChangeNotifier {
   bool get loadFailed => _loadFailed;
   bool get isStaff => _isStaff;
   bool get revoked => _revoked;
+
+  /// Motif de fin d'accès (`revokedReason` de la fiche staff) — voir
+  /// StaffRevocation.
+  String? get revokedReason => _revokedReason;
   bool isLoadingMore(String qid) => _isLoadingMore[qid] == true;
   bool hasMore(String qid) => _hasMoreSlots[qid] == true;
   AgendaService get agenda => _agenda;
@@ -1125,7 +1130,7 @@ class _HouseNotifier extends ChangeNotifier {
                 (doc.data()?['displayName'] as String?)?.trim() ?? '';
             final isActive = doc.data()?['isActive'] as bool? ?? false;
             if (!isActive) {
-              _handleRevocation();
+              _handleRevocation(doc.data()?['revokedReason'] as String?);
             }
             if (!completer.isCompleted) completer.complete();
           },
@@ -1138,12 +1143,28 @@ class _HouseNotifier extends ChangeNotifier {
     await completer.future;
   }
 
-  Future<void> _handleRevocation() async {
+  Future<void> _handleRevocation(String? reason) async {
     if (_revoked) return;
     _revoked = true;
+    _revokedReason = reason;
     _staffStatusSub?.cancel();
     _sub?.cancel();
     _cancelLiveSlotSubs();
+    // Le message de fin d'accès nomme l'établissement : à la détection au
+    // démarrage, le nom n'est pas encore chargé. La fiche entreprise est
+    // publique — on la lit avant la déconnexion, sans jamais la bloquer.
+    if (_companyName.isEmpty && reason != null && reason != 'left') {
+      try {
+        final doc = await _db
+            .collection('companies')
+            .doc(_companyId)
+            .get()
+            .timeout(const Duration(seconds: 3));
+        _companyName = doc.data()?['nom'] as String? ?? '';
+      } catch (_) {
+        // Message générique sans le nom.
+      }
+    }
     await Auth().logout();
     _notify();
   }

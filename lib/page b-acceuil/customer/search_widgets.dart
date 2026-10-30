@@ -190,14 +190,14 @@ extension _SearchWidgets on _SearchPageState {
 
   // ── Carte entreprise ──────────────────────────────────────────────────────
   Widget _buildCompanyCard({
-    required DocumentSnapshot doc,
+    required CompanySearchEntry doc,
     required String nom,
     String? type,
     String? ville,
     bool isHistory = false,
   }) {
     final isFav = _favoriteIds.contains(doc.id);
-    final data = doc.data() as Map<String, dynamic>;
+    final data = doc.data;
     final distKm = _distanceKmFor(data);
     final adresse = data['adresse'] as String?;
     // La distance s'affiche à côté du type (jamais avec la ville, pour ne

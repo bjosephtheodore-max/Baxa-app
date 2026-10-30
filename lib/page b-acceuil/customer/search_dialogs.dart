@@ -4,7 +4,7 @@ part of 'search_page.dart';
 extension _SearchDialogs on _SearchPageState {
   // ── Favoris bottom sheet ──────────────────────────────────────────────────
   Future<void> _showFavoriteSheet(
-    DocumentSnapshot doc,
+    CompanySearchEntry doc,
     String nom,
     String? type,
   ) async {
@@ -13,7 +13,7 @@ extension _SearchDialogs on _SearchPageState {
 
     final companyId = doc.id;
     final isFav = _favoriteIds.contains(companyId);
-    final data = doc.data() as Map<String, dynamic>;
+    final data = doc.data;
     final ville = data['ville'] as String?;
 
     await showModalBottomSheet(

@@ -7,6 +7,7 @@ import 'package:baxa/page%20d-d%C3%A9but/splash_screen.dart';
 import 'package:baxa/services/firebase/remote_config_service.dart';
 import 'package:baxa/services/notifications/notification_service.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -28,6 +29,7 @@ Future<void> main() async {
   //    tôt possible afin qu'il capte aussi les erreurs de démarrage. ───────
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   _setupCrashlytics();
+  await _activateAppCheck();
 
   // ── 2. Orientation portrait uniquement ──────────────────────────────────
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
@@ -55,6 +57,38 @@ Future<void> main() async {
     FlutterNativeSplash.remove();
     _initDeferredServices();
   });
+}
+
+/// App Check : chaque requête Firebase (base, fonctions, SMS de connexion)
+/// porte une preuve qu'elle vient de la vraie app installée — Play Integrity
+/// (Android) / DeviceCheck (iOS) — et pas d'un robot qui utiliserait la clé
+/// publique du projet.
+///
+/// Tant que l'application n'est pas « appliquée » dans la console Firebase
+/// (App Check → API), rien n'est bloqué : on observe seulement la part de
+/// requêtes vérifiées.
+///
+/// En debug, fournisseur « debug » : au premier lancement, un jeton est
+/// écrit dans les logs (« Enter this debug secret into the allow list… ») ;
+/// il faut l'enregistrer dans la console (App Check → Applications →
+/// Gérer les jetons de débogage) pour que le téléphone de test reste
+/// accepté une fois l'application activée.
+Future<void> _activateAppCheck() async {
+  if (kIsWeb) return;
+  try {
+    await FirebaseAppCheck.instance.activate(
+      providerAndroid: kDebugMode
+          ? const AndroidDebugProvider()
+          : const AndroidPlayIntegrityProvider(),
+      providerApple: kDebugMode
+          ? const AppleDebugProvider()
+          : const AppleDeviceCheckProvider(),
+    );
+  } catch (e) {
+    // Jamais bloquant au démarrage : sans App Check, l'app fonctionne
+    // comme avant tant que l'application n'est pas activée côté console.
+    debugPrint('⚠️ App Check non activé : $e');
+  }
 }
 
 /// Branche Crashlytics sur les erreurs Flutter et Dart non interceptées.

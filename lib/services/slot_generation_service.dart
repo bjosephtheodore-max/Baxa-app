@@ -12,7 +12,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 //    immédiatement » / « Revenir sur Baxa »).
 //
 // Génère les créneaux pour [startFrom] (par défaut aujourd'hui) + 7 jours
-// (horizon fixe). La Cloud Function `generateSlots` prolonge l'horizon
+// (horizon fixe). La maintenance de nuit (Cloud Function `companyJob`, tâche `nightly`) prolonge l'horizon
 // chaque nuit, nettoie les vieux créneaux et recompte les `dailyStats`
 // depuis les vrais créneaux (filet de sécurité contre toute dérive).
 // ════════════════════════════════════════════════════════════════════
