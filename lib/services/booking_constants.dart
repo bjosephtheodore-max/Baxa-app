@@ -39,3 +39,18 @@ bool isQueueClosedNow(
   if (closureEnd != null && n.isAfter(closureEnd)) return false; // terminée
   return true;
 }
+
+/// Vrai si un créneau commençant à [slotStart] tombe dans la fermeture de
+/// la file — en cours OU programmée : à partir de [closureStart], jusqu'à
+/// [closureEnd] inclus (veille de la réouverture, 23:59:59), ou sans fin.
+/// MIROIR de `isSlotInClosure` (functions/booking.js), qui refuse ces
+/// réservations côté serveur.
+bool isSlotInClosure(
+  DateTime? closureStart,
+  DateTime? closureEnd,
+  DateTime slotStart,
+) {
+  if (closureStart == null) return false;
+  if (slotStart.isBefore(closureStart)) return false;
+  return closureEnd == null || !slotStart.isAfter(closureEnd);
+}

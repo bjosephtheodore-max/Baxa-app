@@ -42,4 +42,32 @@ void main() {
       expect(isQueueClosedNow(start, now, now: now), isTrue);
     });
   });
+
+  // Fermeture PROGRAMMÉE : un créneau qui tombe dans la période est refusé
+  // même si la file est encore ouverte aujourd'hui (miroir de booking.js).
+  group('Créneau dans une fermeture', () {
+    final start = DateTime(2026, 10, 25);
+    final end = DateTime(2026, 10, 27, 23, 59, 59); // veille de réouverture
+
+    test('aucune fermeture → créneau autorisé', () {
+      expect(isSlotInClosure(null, null, DateTime(2026, 10, 26, 9)), isFalse);
+    });
+
+    test('créneau avant le début → autorisé', () {
+      expect(isSlotInClosure(start, end, DateTime(2026, 10, 24, 15)), isFalse);
+    });
+
+    test('créneau dans la période → refusé', () {
+      expect(isSlotInClosure(start, end, DateTime(2026, 10, 25)), isTrue);
+      expect(isSlotInClosure(start, end, DateTime(2026, 10, 27, 18)), isTrue);
+    });
+
+    test('jour de réouverture → autorisé', () {
+      expect(isSlotInClosure(start, end, DateTime(2026, 10, 28, 8)), isFalse);
+    });
+
+    test('fermeture sans fin → tout créneau après le début est refusé', () {
+      expect(isSlotInClosure(start, null, DateTime(2027, 3, 1, 8)), isTrue);
+    });
+  });
 }

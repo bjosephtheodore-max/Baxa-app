@@ -422,11 +422,15 @@ class _HouseNotifier extends ChangeNotifier {
       // n'accepte plus AUCUNE nouvelle réservation, manuelle comprise.
       final queueDoc = await queuePath.get();
       final qd = queueDoc.data();
-      if (isQueueClosedNow(
-        (qd?['closureStart'] as Timestamp?)?.toDate(),
-        (qd?['closureEnd'] as Timestamp?)?.toDate(),
-      )) {
+      final closureStart = (qd?['closureStart'] as Timestamp?)?.toDate();
+      final closureEnd = (qd?['closureEnd'] as Timestamp?)?.toDate();
+      if (isQueueClosedNow(closureStart, closureEnd)) {
         return 'Cette file est fermée aux réservations.';
+      }
+      // Fermeture PROGRAMMÉE qui couvre le jour de ce créneau (même règle
+      // que les réservations client, refusées côté serveur).
+      if (isSlotInClosure(closureStart, closureEnd, slot.start)) {
+        return 'La structure est fermée ce jour-là.';
       }
       if (slot.timeSlotId.isNotEmpty) {
         final tsDoc = await queuePath
