@@ -145,7 +145,10 @@ beforeEach(async () => {
     seed(`${A}/reservations/mOut`, {source: "company_manual",
       customerId: "manual_booking", createdBy: STAFF_OUT,
       createdByRole: "staff"}),
-    seed(`${A}/companyNotifications/n1`, {type: "staff_joined"}),
+    seed(`${A}/companyNotifications/n1`, {type: "staff_joined",
+      audience: "admin"}),
+    seed(`${A}/companyNotifications/n2`, {type: "slot_full",
+      audience: "staff", staffId: STAFF}),
     seed(`${A}/notificationsHistory/h1`, {title: "ancien"}),
     seed(`${A}/prereception/p1`, {x: 1}),
     seed("customers/cust1/notifications/cn1", {title: "Annulation"}),
@@ -373,11 +376,29 @@ describe("Équipe et codes d'invitation", () => {
 });
 
 // ============================================================
+// Chacun ne voit que SES entrées (resserrement du 12/10) : l'admin celles
+// d'audience "admin", un membre celles qui portent son staffId. Les
+// requêtes doivent donc filtrer sur ces champs.
 describe("Notifications de l'entreprise", () => {
   const N = `${A}/companyNotifications`;
-  it("l'admin les lit", () => allowed(op.list(N, ADMIN)));
-  it("un membre actif les lit", () => allowed(op.list(N, STAFF)));
+  const NC = "companyNotifications";
+  it("l'admin lit les siennes", () =>
+    allowed(op.query(A, NC, ["audience", "admin"], ADMIN)));
+  it("l'admin ne lit pas tout le journal sans filtre", () =>
+    denied(op.list(N, ADMIN)));
+  it("l'admin ne lit pas celle d'un membre", () =>
+    denied(op.get(`${N}/n2`, ADMIN)));
+  it("un membre actif lit les siennes", () =>
+    allowed(op.query(A, NC, ["staffId", STAFF], STAFF)));
+  it("un membre ne lit pas celles d'un autre membre", () =>
+    denied(op.query(A, NC, ["staffId", STAFF], STAFF_2)));
+  it("un membre retiré ne lit plus les siennes", () =>
+    denied(op.get(`${N}/n2`, STAFF_OUT)));
   it("l'admin en supprime une", () => allowed(op.del(`${N}/n1`, ADMIN)));
+  it("un membre supprime la sienne", () =>
+    allowed(op.del(`${N}/n2`, STAFF)));
+  it("un membre ne supprime pas celle de l'admin", () =>
+    denied(op.del(`${N}/n1`, STAFF)));
   it("un client ne peut pas en supprimer", () =>
     denied(op.del(`${N}/n1`, CLIENT)));
   it("un client ne peut pas en créer", () =>

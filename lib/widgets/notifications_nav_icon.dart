@@ -161,9 +161,9 @@ class _NotificationsNavIconState extends State<NotificationsNavIcon> {
     if (mounted && count != _unread) {
       setState(() => _unread = count);
     }
-    try {
-      AppBadgePlus.updateBadge(count);
-    } catch (_) {}
+    // Passe par setAppBadge : il ne touche pas à la pastille sur les
+    // lanceurs qui ne la gèrent pas (sinon une erreur native à chaque appel).
+    NotificationsNavIcon.setAppBadge(count);
   }
 
   @override
