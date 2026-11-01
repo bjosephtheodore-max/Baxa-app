@@ -865,6 +865,14 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
               g.queueNames.add(d['name'] as String? ?? 'File');
             }
 
+            // Une seule fermeture par file : celles qui en portent déjà une
+            // (en cours, à venir, ou « Stopper ») ne sont plus planifiables.
+            final options = [
+              for (final q in queues) _closureOption(q, now),
+            ];
+            final allTaken =
+                options.isNotEmpty && options.every((o) => o.takenLabel != null);
+
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -902,9 +910,9 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: queues.isEmpty
+                    onPressed: queues.isEmpty || allTaken
                         ? null
-                        : () => _openPlanClosureSheet(queues),
+                        : () => _openPlanClosureSheet(options),
                     icon: const Icon(
                       Icons.event_busy_rounded,
                       color: Colors.white,
@@ -925,11 +933,41 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                     ),
                   ),
                 ),
+                if (allTaken) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    queues.length == 1
+                        ? 'Votre file a déjà une fermeture. Annulez-la pour en '
+                              'planifier une autre.'
+                        : 'Toutes les files ont déjà une fermeture. Annulez-en '
+                              'une pour en planifier une autre.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                ],
               ],
             );
           },
         ),
       ],
+    );
+  }
+
+  /// File proposée dans le formulaire de fermeture, avec la raison pour
+  /// laquelle elle n'est plus planifiable (null = libre).
+  _ClosureQueueOption _closureOption(QueryDocumentSnapshot q, DateTime now) {
+    final d = q.data() as Map<String, dynamic>;
+    final cs = (d['closureStart'] as Timestamp?)?.toDate();
+    final ce = (d['closureEnd'] as Timestamp?)?.toDate();
+    String? taken;
+    if (hasClosureScheduled(cs, ce, now: now)) {
+      taken = isQueueClosedNow(cs, ce, now: now)
+          ? 'Fermée'
+          : 'Fermeture prévue le ${_formatDate(cs!)}';
+    }
+    return _ClosureQueueOption(
+      id: q.id,
+      name: d['name'] as String? ?? 'File',
+      takenLabel: taken,
     );
   }
 
@@ -1095,24 +1133,14 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     }
   }
 
-  Future<void> _openPlanClosureSheet(List<QueryDocumentSnapshot> queues) async {
+  Future<void> _openPlanClosureSheet(List<_ClosureQueueOption> queues) async {
     if (_companyId == null) return;
     final result = await showModalBottomSheet<_ClosurePlan>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _PlanClosureSheet(
-        companyId: _companyId!,
-        queues: [
-          for (final q in queues)
-            (
-              id: q.id,
-              name:
-                  (q.data() as Map<String, dynamic>)['name'] as String? ??
-                  'File',
-            ),
-        ],
-      ),
+      builder: (_) =>
+          _PlanClosureSheet(companyId: _companyId!, queues: queues),
     );
     if (result == null || !mounted) return;
     await _applyClosure(result);
@@ -1121,15 +1149,43 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
   Future<void> _applyClosure(_ClosurePlan p) async {
     if (_companyId == null) return;
     try {
+      final queuesRef = _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('queues');
+
+      // 0. Relecture : une file qui a reçu une fermeture entre-temps (autre
+      // appareil connecté au même compte) n'est jamais écrasée.
+      final fresh = await Future.wait(
+        p.queueIds.map((id) => queuesRef.doc(id).get()),
+      );
+      final now = DateTime.now();
+      final alreadyTaken = fresh.any((s) {
+        final d = s.data();
+        if (d == null) return false;
+        return hasClosureScheduled(
+          (d['closureStart'] as Timestamp?)?.toDate(),
+          (d['closureEnd'] as Timestamp?)?.toDate(),
+          now: now,
+        );
+      });
+      if (alreadyTaken) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Une des files a déjà une fermeture. Rien n\'a été modifié.',
+            ),
+          ),
+        );
+        return;
+      }
+
       // 1. Poser la fermeture sur les files ciblées.
       final batch = _firestore.batch();
       for (final id in p.queueIds) {
         batch.update(
-          _firestore
-              .collection('companies')
-              .doc(_companyId)
-              .collection('queues')
-              .doc(id),
+          queuesRef.doc(id),
           {
             'closureStart': Timestamp.fromDate(p.start),
             'closureEnd': p.end != null
@@ -2518,9 +2574,24 @@ class _ClosurePlan {
   });
 }
 
+/// Une file dans le formulaire de fermeture. [takenLabel] non nul = elle
+/// porte déjà une fermeture (« Fermée » / « Fermeture prévue le … ») et
+/// n'est pas sélectionnable.
+class _ClosureQueueOption {
+  final String id;
+  final String name;
+  final String? takenLabel;
+  const _ClosureQueueOption({
+    required this.id,
+    required this.name,
+    this.takenLabel,
+  });
+  bool get isFree => takenLabel == null;
+}
+
 class _PlanClosureSheet extends StatefulWidget {
   final String companyId;
-  final List<({String id, String name})> queues;
+  final List<_ClosureQueueOption> queues;
   const _PlanClosureSheet({required this.companyId, required this.queues});
 
   @override
@@ -2540,10 +2611,20 @@ class _PlanClosureSheetState extends State<_PlanClosureSheet> {
   bool _loading = true;
   List<QueryDocumentSnapshot> _reservations = [];
 
+  /// Files encore sans fermeture : les seules planifiables.
+  List<_ClosureQueueOption> get _free =>
+      widget.queues.where((q) => q.isFree).toList();
+
+  /// « Toute la structure » n'a de sens que si aucune file n'a déjà une
+  /// fermeture — sinon on écraserait la sienne.
+  bool get _allFree => _free.length == widget.queues.length;
+
   @override
   void initState() {
     super.initState();
-    if (widget.queues.length == 1) _selected.add(widget.queues.first.id);
+    _scopeAll = _allFree;
+    final free = _free;
+    if (free.length == 1) _selected.add(free.first.id);
     _load();
   }
 
@@ -2568,8 +2649,9 @@ class _PlanClosureSheetState extends State<_PlanClosureSheet> {
     });
   }
 
-  List<String> get _scopeIds =>
-      _scopeAll ? widget.queues.map((q) => q.id).toList() : _selected.toList();
+  List<String> get _scopeIds => _scopeAll && _allFree
+      ? widget.queues.map((q) => q.id).toList()
+      : _selected.toList();
 
   DateTime get _tomorrow {
     final n = DateTime.now();
@@ -2727,17 +2809,34 @@ class _PlanClosureSheetState extends State<_PlanClosureSheet> {
                   spacing: 8,
                   runSpacing: 8,
                   children: [
-                    _chip('Toute la structure', _scopeAll, () {
+                    _chip(
+                      'Toute la structure',
+                      _scopeAll,
+                      _allFree
+                          ? () {
+                              setState(() {
+                                _scopeAll = true;
+                                _start = _minStart;
+                              });
+                            }
+                          : null,
+                    ),
+                    _chip('Certaines files', !_scopeAll, () {
                       setState(() {
-                        _scopeAll = true;
+                        _scopeAll = false;
                         _start = _minStart;
                       });
                     }),
-                    _chip('Certaines files', !_scopeAll, () {
-                      setState(() => _scopeAll = false);
-                    }),
                   ],
                 ),
+                if (!_allFree) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Une file a déjà une fermeture. Annulez-la pour fermer '
+                    'toute la structure.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                ],
                 if (!_scopeAll) ...[
                   const SizedBox(height: 10),
                   Text(
@@ -2750,16 +2849,19 @@ class _PlanClosureSheetState extends State<_PlanClosureSheet> {
                     runSpacing: 8,
                     children: [
                       for (final q in widget.queues)
-                        _chip(q.name, _selected.contains(q.id), () {
-                          setState(() {
-                            if (_selected.contains(q.id)) {
-                              _selected.remove(q.id);
-                            } else {
-                              _selected.add(q.id);
-                            }
-                            _start = _minStart;
-                          });
-                        }),
+                        if (q.isFree)
+                          _chip(q.name, _selected.contains(q.id), () {
+                            setState(() {
+                              if (_selected.contains(q.id)) {
+                                _selected.remove(q.id);
+                              } else {
+                                _selected.add(q.id);
+                              }
+                              _start = _minStart;
+                            });
+                          })
+                        else
+                          _takenChip(q.name, q.takenLabel!),
                     ],
                   ),
                 ],
@@ -2917,24 +3019,34 @@ class _PlanClosureSheetState extends State<_PlanClosureSheet> {
     ),
   );
 
-  Widget _chip(String label, bool selected, VoidCallback onTap) {
+  /// Puce de choix. [onTap] nul = indisponible (grisée, non cliquable).
+  Widget _chip(String label, bool selected, VoidCallback? onTap) {
+    final disabled = onTap == null;
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 140),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
-          color: selected ? _indigo : Colors.white,
+          color: disabled
+              ? Colors.grey.shade100
+              : selected
+              ? _indigo
+              : Colors.white,
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
-            color: selected ? _indigo : Colors.grey.shade300,
+            color: disabled
+                ? Colors.grey.shade200
+                : selected
+                ? _indigo
+                : Colors.grey.shade300,
             width: 1.5,
           ),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (selected) ...[
+            if (selected && !disabled) ...[
               const Icon(Icons.check_rounded, size: 15, color: Colors.white),
               const SizedBox(width: 5),
             ],
@@ -2942,12 +3054,48 @@ class _PlanClosureSheetState extends State<_PlanClosureSheet> {
               label,
               style: TextStyle(
                 fontSize: 13,
-                color: selected ? Colors.white : Colors.grey.shade800,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                color: disabled
+                    ? Colors.grey.shade400
+                    : selected
+                    ? Colors.white
+                    : Colors.grey.shade800,
+                fontWeight: selected && !disabled
+                    ? FontWeight.w700
+                    : FontWeight.w500,
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// File qui porte déjà une fermeture : grisée, avec sa mention.
+  Widget _takenChip(String name, String takenLabel) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.grey.shade200, width: 1.5),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            name,
+            style: TextStyle(
+              fontSize: 13,
+              color: Colors.grey.shade400,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          Text(
+            takenLabel,
+            style: TextStyle(fontSize: 10.5, color: Colors.grey.shade500),
+          ),
+        ],
       ),
     );
   }

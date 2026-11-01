@@ -306,10 +306,13 @@ class _SettingsPageState extends State<SettingsPage> {
 
   void _showQueueActions(String queueId, Map<String, dynamic> queueData) {
     final name = queueData['name'] ?? 'File';
-    final closedNow = isQueueClosedNow(
-      (queueData['closureStart'] as Timestamp?)?.toDate(),
-      (queueData['closureEnd'] as Timestamp?)?.toDate(),
-    );
+    final closureStart = (queueData['closureStart'] as Timestamp?)?.toDate();
+    final closureEnd = (queueData['closureEnd'] as Timestamp?)?.toDate();
+    final closedNow = isQueueClosedNow(closureStart, closureEnd);
+    // Fermeture programmée, pas encore commencée : « Stopper » l'écraserait
+    // (une file n'a qu'une fermeture) → on renvoie vers Paramètres.
+    final closurePlanned =
+        !closedNow && hasClosureScheduled(closureStart, closureEnd);
 
     showModalBottomSheet(
       context: context,
@@ -372,7 +375,9 @@ class _SettingsPageState extends State<SettingsPage> {
               ],
             ),
             const SizedBox(height: 18),
-            if (!closedNow)
+            if (closurePlanned)
+              _plannedClosureInfo(closureStart!)
+            else if (!closedNow)
               _actionTile(
                 icon: Icons.pause_circle_outline_rounded,
                 label: 'Stopper les réservations',
@@ -1113,6 +1118,38 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Ligne d'information (non cliquable) à la place de « Stopper les
+  /// réservations » quand une fermeture est déjà programmée sur la file.
+  Widget _plannedClosureInfo(DateTime closureStart) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.nightlight_round_outlined,
+            color: Colors.grey.shade500,
+            size: 22,
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Text(
+              'Fermeture prévue le '
+              '${DateFormat('d MMM', 'fr_FR').format(closureStart)}. '
+              'Gérez-la dans Paramètres › Fermetures.',
+              style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+            ),
+          ),
+        ],
       ),
     );
   }

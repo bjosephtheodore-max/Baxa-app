@@ -70,4 +70,34 @@ void main() {
       expect(isSlotInClosure(start, null, DateTime(2027, 3, 1, 8)), isTrue);
     });
   });
+
+  // Une seule fermeture par file : tant qu'elle en porte une (en cours ou à
+  // venir), on ne peut pas lui en planifier une autre.
+  group('File déjà prise par une fermeture', () {
+    test('aucune fermeture → libre', () {
+      expect(hasClosureScheduled(null, null, now: now), isFalse);
+    });
+
+    test('fermeture à venir → prise', () {
+      final start = now.add(const Duration(days: 5));
+      final end = now.add(const Duration(days: 8));
+      expect(hasClosureScheduled(start, end, now: now), isTrue);
+    });
+
+    test('« Stopper les réservations » (sans fin) → prise', () {
+      expect(hasClosureScheduled(now, null, now: now), isTrue);
+    });
+
+    test('fermeture en cours → prise', () {
+      final start = now.subtract(const Duration(days: 1));
+      final end = now.add(const Duration(days: 1));
+      expect(hasClosureScheduled(start, end, now: now), isTrue);
+    });
+
+    test('fermeture terminée → libre à nouveau', () {
+      final start = now.subtract(const Duration(days: 3));
+      final end = now.subtract(const Duration(seconds: 1));
+      expect(hasClosureScheduled(start, end, now: now), isFalse);
+    });
+  });
 }

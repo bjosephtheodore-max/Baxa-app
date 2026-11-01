@@ -54,3 +54,17 @@ bool isSlotInClosure(
   if (slotStart.isBefore(closureStart)) return false;
   return closureEnd == null || !slotStart.isAfter(closureEnd);
 }
+
+/// Vrai si la file porte déjà une fermeture en cours OU à venir (y compris
+/// « Stopper les réservations », sans date de fin). Une file n'a qu'UNE
+/// fermeture : tant que c'est vrai, on ne lui en planifie pas d'autre —
+/// l'admin annule d'abord celle-ci. Une fermeture terminée ne compte plus.
+bool hasClosureScheduled(
+  DateTime? closureStart,
+  DateTime? closureEnd, {
+  DateTime? now,
+}) {
+  if (closureStart == null) return false;
+  final n = now ?? DateTime.now();
+  return closureEnd == null || !n.isAfter(closureEnd);
+}
