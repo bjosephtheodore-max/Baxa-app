@@ -185,15 +185,15 @@ class _CompanyDayPreviewPageState extends State<CompanyDayPreviewPage> {
                                   : const Duration(milliseconds: 420),
                               transitionBuilder: (child, anim) =>
                                   FadeTransition(
-                                opacity: anim,
-                                child: SlideTransition(
-                                  position: Tween(
-                                    begin: const Offset(0, 0.04),
-                                    end: Offset.zero,
-                                  ).animate(anim),
-                                  child: child,
-                                ),
-                              ),
+                                    opacity: anim,
+                                    child: SlideTransition(
+                                      position: Tween(
+                                        begin: const Offset(0, 0.04),
+                                        end: Offset.zero,
+                                      ).animate(anim),
+                                      child: child,
+                                    ),
+                                  ),
                               child: _buildStage(),
                             ),
                           ),
@@ -655,8 +655,9 @@ class _SlotCard extends StatelessWidget {
                   reserved == 0 ? 'Disponible' : '$reserved résa',
                   style: TextStyle(
                     fontSize: 12.5,
-                    fontWeight:
-                        reserved > 0 ? FontWeight.w500 : FontWeight.w400,
+                    fontWeight: reserved > 0
+                        ? FontWeight.w500
+                        : FontWeight.w400,
                     color: reserved > 0
                         ? _green.withValues(alpha: 0.85)
                         : Colors.grey.shade600,
@@ -815,11 +816,17 @@ class _SummaryScene extends StatelessWidget {
         const SizedBox(height: 14),
         const Row(
           children: [
-            Expanded(child: _SummaryStat(value: '16', label: 'créneaux')),
+            Expanded(
+              child: _SummaryStat(value: '16', label: 'créneaux'),
+            ),
             SizedBox(width: 8),
-            Expanded(child: _SummaryStat(value: '32', label: 'places')),
+            Expanded(
+              child: _SummaryStat(value: '32', label: 'places'),
+            ),
             SizedBox(width: 8),
-            Expanded(child: _SummaryStat(value: '0', label: 'en file')),
+            Expanded(
+              child: _SummaryStat(value: '0', label: 'en file'),
+            ),
           ],
         ),
         const SizedBox(height: 14),

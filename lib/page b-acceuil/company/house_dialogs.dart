@@ -4,145 +4,156 @@ part of 'house_page.dart';
 // HOUSE DIALOGS — Dialogs et bottom sheets extraits de house_page
 // ============================================================
 
-// ── Dialog modification durée / capacité ─────────────────────────────────────
-Future<_ModifResult?> _showModifDialog(
+// ── Dialog modification durée / capacité (pour le jour affiché) ──────────────
+// L'accueil ne fait que des modifs du jour : la plage elle-même se modifie
+// durablement dans la page des plages, accessible par le lien du dialogue.
+// Renvoie true si l'utilisateur confirme.
+Future<bool> _showModifDialog(
   BuildContext context, {
   required String title,
   required String preview,
+  required String dayLabel,
+  required VoidCallback onOpenPlages,
   bool hasReservations = false,
   bool isCapacity = false,
-  bool todayDone = false,
 }) async {
-  ModificationType type =
-      todayDone ? ModificationType.permanente : ModificationType.ponctuelle;
-  return showDialog<_ModifResult>(
+  var openPlages = false;
+  final confirmed = await showDialog<bool>(
     context: context,
-    builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setD) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: _green.withValues(alpha: 0.06),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: _green.withValues(alpha: 0.3)),
-              ),
-              child: Text(
-                preview,
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-              ),
+    builder: (ctx) => AlertDialog(
+      // Petits écrans : le contenu défile au lieu de déborder.
+      scrollable: true,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: _green.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: _green.withValues(alpha: 0.3)),
             ),
-
-            if (hasReservations) ...[
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: _green.withValues(alpha: 0.06),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: _green.withValues(alpha: 0.25)),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  preview,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                const SizedBox(height: 4),
+                Row(
                   children: [
-                    Icon(Icons.check_circle_rounded, color: _green, size: 18),
-                    const SizedBox(width: 8),
+                    Icon(
+                      Icons.today_rounded,
+                      size: 14,
+                      color: Colors.grey.shade600,
+                    ),
+                    const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        isCapacity
-                            ? 'Seules les places libres seront ajustées. '
-                                'Les réservations existantes sont préservées, '
-                                'vos clients ne sont pas impactés.'
-                            : 'Seuls les créneaux libres seront recalculés. '
-                                'Les créneaux déjà réservés gardent leur '
-                                'heure — vos clients ne sont pas impactés.',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF2E5E3E),
+                        dayLabel,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          color: Colors.grey.shade700,
                         ),
                       ),
                     ),
                   ],
                 ),
-              ),
-            ],
+              ],
+            ),
+          ),
 
-            const SizedBox(height: 16),
-            RadioGroup<ModificationType>(
-              groupValue: type,
-              onChanged: (v) => setD(() => type = v!),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
+          if (hasReservations) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: _green.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: _green.withValues(alpha: 0.25)),
+              ),
+              child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Opacity(
-                    opacity: todayDone ? 0.4 : 1.0,
-                    child: RadioListTile<ModificationType>(
-                      title: const Text("Juste pour aujourd'hui"),
-                      subtitle: const Text(
-                        'Les paramètres reviendront à la normale demain',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                      value: ModificationType.ponctuelle,
-                      enabled: !todayDone,
-                      activeColor: _green,
-                      contentPadding: EdgeInsets.zero,
-                    ),
-                  ),
-                  if (todayDone)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 12, bottom: 4),
-                      child: Text(
-                        'Tous les créneaux d\'aujourd\'hui sont terminés',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey.shade500,
-                        ),
+                  Icon(Icons.check_circle_rounded, color: _green, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      isCapacity
+                          ? 'Seules les places libres seront ajustées. '
+                              'Les réservations existantes sont préservées, '
+                              'vos clients ne sont pas impactés.'
+                          : 'Seuls les créneaux libres seront recalculés. '
+                              'Les créneaux déjà réservés gardent leur '
+                              'heure — vos clients ne sont pas impactés.',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF2E5E3E),
                       ),
                     ),
-                  const RadioListTile<ModificationType>(
-                    title: Text('Permanente'),
-                    subtitle: Text(
-                      'Met à jour les paramètres globaux de la file',
-                      style: TextStyle(fontSize: 12),
-                    ),
-                    value: ModificationType.permanente,
-                    activeColor: _green,
-                    contentPadding: EdgeInsets.zero,
                   ),
                 ],
               ),
             ),
           ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Annuler'),
+
+          const SizedBox(height: 14),
+          Text(
+            'Les autres jours ne changent pas. Pour modifier la plage '
+            'durablement, passez par la page des plages.',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
           ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, _ModifResult(type: type)),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _green,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-              ),
+          const SizedBox(height: 2),
+          TextButton.icon(
+            onPressed: () {
+              openPlages = true;
+              Navigator.pop(ctx, false);
+            },
+            style: TextButton.styleFrom(
+              foregroundColor: _green,
+              padding: EdgeInsets.zero,
+              visualDensity: VisualDensity.compact,
             ),
-            child: const Text(
-              'Confirmer',
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            icon: const Icon(Icons.edit_calendar_rounded, size: 16),
+            label: const Text(
+              'Modifier durablement → page des plages',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
             ),
           ),
         ],
       ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('Annuler'),
+        ),
+        ElevatedButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _green,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+          child: const Text(
+            'Confirmer',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          ),
+        ),
+      ],
     ),
   );
+  // Navigation lancée APRÈS la fermeture du dialogue.
+  if (openPlages) onOpenPlages();
+  return confirmed == true;
 }
 
 // ── Bottom sheet : ajout rapide via FAB — carousel des créneaux disponibles ───

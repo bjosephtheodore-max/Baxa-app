@@ -19,6 +19,15 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
   bool _guideDismissed = false;
   bool _hasSlots = false;
 
+  // Créneaux bloqués de la file (incident posé depuis l'accueil), tenus à
+  // jour en direct. Une plage bloquée un jour ne reçoit AUCUNE modif ce
+  // jour-là (voir _activeBlockedDaysIn) : la carte et le menu le signalent
+  // pour que la structure ne s'attende pas à un changement ce jour-là.
+  // Requête sur le seul statut (pas d'index composite) ; les vieux créneaux
+  // sont purgés chaque nuit, la liste reste courte.
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _blockedSub;
+  List<SlotLite> _blockedSlots = const [];
+
   void _dismissGuide() => setState(() => _guideDismissed = true);
 
   @override
@@ -32,11 +41,48 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
     _slotsStream = queueRef.collection('timeSlots').snapshots();
     _capacityStream = _buildCapacityStream(queueRef);
     _queueStream = queueRef.snapshots();
+    _blockedSub = queueRef
+        .collection('slots')
+        .where('status', isEqualTo: 'blocked')
+        .snapshots()
+        .listen(
+          (snap) {
+            if (!mounted) return;
+            setState(() {
+              _blockedSlots = snap.docs
+                  .map((d) => slotLiteFromData(d.data()))
+                  .nonNulls
+                  .toList();
+            });
+          },
+          // Simple information : en cas d'erreur, la page reste utilisable.
+          onError: (_) {},
+        );
     if (widget.autoOpenSlotDialog) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _showTimeSlotDialog();
       });
     }
+  }
+
+  @override
+  void dispose() {
+    _blockedSub?.cancel();
+    super.dispose();
+  }
+
+  /// Jours (triés) où la plage [timeSlotId] est encore bloquée.
+  List<DateTime> _blockedDaysOf(String timeSlotId) =>
+      activeBlockedDays(_blockedSlots, timeSlotId, DateTime.now()).toList()
+        ..sort();
+
+  /// « le lun. 2 nov. » / « le lun. 2 nov. et 1 autre jour ».
+  String _blockedDaysText(List<DateTime> days) {
+    final first = DateFormat('EEE d MMM', 'fr_FR').format(days.first);
+    final others = days.length - 1;
+    if (others == 0) return 'le $first';
+    return 'le $first et $others autre${others > 1 ? 's' : ''} '
+        'jour${others > 1 ? 's' : ''}';
   }
 
   Stream<List<_DayCapacity>> _buildCapacityStream(
@@ -126,7 +172,13 @@ class _QueueTimeSlotsPageState extends State<QueueTimeSlotsPage> {
         child: StreamBuilder<QuerySnapshot>(
           stream: _slotsStream,
           builder: (context, snapshot) {
-            final slots = snapshot.data?.docs ?? [];
+            // Ordre horaire de la journée (Firestore rend les plages dans
+            // l'ordre de leurs identifiants, c.-à-d. au hasard).
+            final slots = sortedByPlageStart(
+              snapshot.data?.docs ?? const <QueryDocumentSnapshot>[],
+              (doc) => (doc.data() as Map<String, dynamic>?)?['startTime']
+                  as String?,
+            );
             final hasSlots = slots.isNotEmpty;
             if (_hasSlots != hasSlots) {
               WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -800,6 +852,7 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
     final pendingEffectiveDate =
         (slotData['pendingEffectiveDate'] as Timestamp?)?.toDate();
     final deleteAfter = (slotData['deleteAfter'] as Timestamp?)?.toDate();
+    final blockedDays = _blockedDaysOf(slotId);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -925,6 +978,41 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
           ),
         ),
       ),
+          // Plage bloquée (incident posé depuis l'accueil) : ces jours-là,
+          // une modification de la plage ne s'applique pas.
+          if (blockedDays.isNotEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                borderRadius: const BorderRadius.vertical(
+                  bottom: Radius.circular(14),
+                ),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.lock_clock_outlined,
+                    size: 14,
+                    color: Colors.orange.shade800,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Bloquée ${_blockedDaysText(blockedDays)} — une '
+                      'modification ne s\'appliquera pas ce jour-là',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.orange.shade800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           if (pendingEffectiveDate != null)
             Container(
               width: double.infinity,
@@ -990,6 +1078,7 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
   void _showSlotActions(String slotId, Map<String, dynamic> slotData) {
     final start = slotData['startTime'] ?? '??:??';
     final end = slotData['endTime'] ?? '??:??';
+    final blockedDays = _blockedDaysOf(slotId);
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -1018,6 +1107,41 @@ extension _QueueTimeSlotsUI on _QueueTimeSlotsPageState {
                   color: Colors.black87,
                 ),
               ),
+              // Rappel avant de modifier : les jours bloqués ne changent pas.
+              if (blockedDays.isNotEmpty && slotData['deleteAfter'] == null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.orange.shade200),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.lock_clock_outlined,
+                        size: 16,
+                        color: Colors.orange.shade800,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Plage bloquée ${_blockedDaysText(blockedDays)}. '
+                          'Une modification s\'appliquera aux autres jours ; '
+                          'ce jour-là garde ses réglages actuels.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.orange.shade900,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               const SizedBox(height: 16),
               if (slotData['deleteAfter'] == null) ...[
                 _slotActionTile(

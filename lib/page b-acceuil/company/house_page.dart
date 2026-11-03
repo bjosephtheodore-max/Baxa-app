@@ -10,6 +10,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/agenda_service.dart';
 import 'package:baxa/services/booking_constants.dart';
+import 'package:baxa/services/plage_rules.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:baxa/page b-acceuil/company/team_page.dart';
 import 'package:baxa/page b-acceuil/company/settings_page.dart'
@@ -982,10 +983,16 @@ class _HousePageState extends State<HousePage>
       onCapacityChanged: (delta) => _onCapacityChanged(queue, delta),
       onBlock: () => _onBlockRequest(queue),
       onUnblock: () => _onUnblock(queue),
+      // Journée terminée (aujourd'hui, tous les créneaux passés) traitée
+      // comme un jour passé : plus rien à modifier ni à bloquer. Le
+      // minuteur de fin de créneau du notifier fait la bascule en direct.
       isPastDay:
           selectedDay.isBefore(today) ||
           (queue.weekdays.isNotEmpty &&
-              !queue.weekdays.contains(_n.selectedDate.weekday)),
+              !queue.weekdays.contains(_n.selectedDate.weekday)) ||
+          (selectedDay == today &&
+              queue.slots.isNotEmpty &&
+              queue.slots.every((s) => !s.end.isAfter(now))),
       isExpanded: isExpanded,
       onToggle: () => setState(() => _headerExpanded[queue.id] = !isExpanded),
       readOnly: _n.isStaff,
@@ -1338,10 +1345,17 @@ class _HousePageState extends State<HousePage>
     try {
       if (_n.companyId == null) return;
       final timeslots = await _n.fetchTimeSlots(queue.id);
-      if (timeslots.isEmpty) {
+      final now = DateTime.now();
+      final anyBlockable = timeslots.any(
+        (ts) =>
+            _plageDayState(ts, queue.slots, now) == _PlageDayState.available,
+      );
+      if (!anyBlockable) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Aucun créneau à bloquer')),
+            const SnackBar(
+              content: Text('Aucune plage à bloquer pour le moment'),
+            ),
           );
         }
         return;
@@ -1382,49 +1396,83 @@ class _HousePageState extends State<HousePage>
   }
 
   Future<void> _onUnblock(_QueueAgenda queue) async {
-    final result = await _n.unblockPlage(queue.id);
-    if (result.success) _logQuickEdit('unblock');
-    if (mounted) _snackBar(result);
+    if (!_liveEditBusyQueueIds.add(queue.id)) return;
+    try {
+      final result = await _n.unblockPlage(queue.id);
+      if (result.success) _logQuickEdit('unblock');
+      if (mounted) _snackBar(result);
+    } finally {
+      _liveEditBusyQueueIds.remove(queue.id);
+    }
+  }
+
+  // ── Modifs du jour : éléments communs ─────────────────────
+  // L'accueil ne modifie que le jour affiché. Les valeurs de départ des
+  // boutons +/− sont celles du jour (voir _HouseNotifier.dayValuesFor) ;
+  // la plage elle-même se modifie durablement dans la page des plages.
+
+  /// « Pour aujourd'hui uniquement » / « Pour le mardi 4 nov. uniquement ».
+  String _modifDayLabel() {
+    final now = DateTime.now();
+    final sel = _n.selectedDate;
+    if (plageDayOf(sel) == plageDayOf(now)) {
+      return 'Pour aujourd\'hui uniquement';
+    }
+    return 'Pour le ${DateFormat('EEEE d MMM', 'fr_FR').format(sel)} '
+        'uniquement';
+  }
+
+  /// Créneaux à venir de la plage ce jour-là (ceux qu'une modif touche).
+  List<AgendaSlot> _upcomingSlotsOf(_QueueAgenda queue, String timeSlotId) {
+    final now = DateTime.now();
+    return queue.slots
+        .where((s) => s.timeSlotId == timeSlotId && s.end.isAfter(now))
+        .toList();
+  }
+
+  /// Ouvre la page des plages de cette file (modifs durables).
+  void _openPlagesPage(_QueueAgenda queue) {
+    final companyId = _n.companyId;
+    if (companyId == null || !mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => QueueTimeSlotsPage(
+          companyId: companyId,
+          queueId: queue.id,
+          queueName: queue.name,
+        ),
+      ),
+    );
   }
 
   // ── Modification durée ────────────────────────────────────
   Future<void> _onDurationChanged(_QueueAgenda queue, int delta) async {
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
     try {
-      final tsInfo = await _selectTimeSlot(queue);
+      final tsInfo = await _selectTimeSlot(queue, forDuration: true);
       // La page a pu être quittée pendant le choix de la plage.
       if (tsInfo == null || !mounted) return;
 
-      final newDuration = (tsInfo.duration + delta).clamp(5, 120);
-      if (newDuration == tsInfo.duration) return;
+      final current = tsInfo.effectiveDuration;
+      final newDuration = (current + delta).clamp(5, 120);
+      if (newDuration == current) return;
 
       final plageStart = _parseTimeString(tsInfo.startTime, _n.selectedDate);
       final plageEnd = _parseTimeString(tsInfo.endTime, _n.selectedDate);
-      final slotsInRange = queue.slots
-          .where(
-            (s) => !s.start.isBefore(plageStart) && !s.end.isAfter(plageEnd),
-          )
-          .toList();
 
-      final now = DateTime.now();
-      final isViewingToday =
-          _n.selectedDate.year == now.year &&
-          _n.selectedDate.month == now.month &&
-          _n.selectedDate.day == now.day;
-      final todayDone =
-          isViewingToday &&
-          (slotsInRange.isEmpty ||
-              slotsInRange.every((s) => s.end.isBefore(now)));
-
-      final res = await _showModifDialog(
+      final confirmed = await _showModifDialog(
         context,
         title: 'Modifier la durée',
-        preview: 'Durée : ${tsInfo.duration} min → $newDuration min',
-        hasReservations: _n.hasReservationsInSlots(slotsInRange),
+        preview: 'Durée : $current min → $newDuration min',
+        dayLabel: _modifDayLabel(),
+        hasReservations: _n.hasReservationsInSlots(
+          _upcomingSlotsOf(queue, tsInfo.id),
+        ),
         isCapacity: false,
-        todayDone: todayDone,
+        onOpenPlages: () => _openPlagesPage(queue),
       );
-      if (res == null) return;
+      if (!confirmed) return;
 
       _n.setQueueLoading(queue.id);
       final result = await _n.applyDurationChange(
@@ -1433,7 +1481,6 @@ class _HousePageState extends State<HousePage>
         plageStart: plageStart,
         plageEnd: plageEnd,
         newDuration: newDuration,
-        type: res.type,
       );
       if (result.success) {
         _logQuickEdit(delta > 0 ? 'duration_increase' : 'duration_decrease');
@@ -1487,47 +1534,32 @@ class _HousePageState extends State<HousePage>
   Future<void> _onCapacityChanged(_QueueAgenda queue, int delta) async {
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
     try {
-      final tsInfo = await _selectTimeSlot(queue);
+      final tsInfo = await _selectTimeSlot(queue, forDuration: false);
       // La page a pu être quittée pendant le choix de la plage.
       if (tsInfo == null || !mounted) return;
 
-      final newCapacity = (tsInfo.capacity + delta).clamp(1, 50);
-      if (newCapacity == tsInfo.capacity) return;
+      final current = tsInfo.effectiveCapacity;
+      final newCapacity = (current + delta).clamp(1, 50);
+      if (newCapacity == current) return;
 
-      final plageStart = _parseTimeString(tsInfo.startTime, _n.selectedDate);
-      final plageEnd = _parseTimeString(tsInfo.endTime, _n.selectedDate);
-      final slotsInRange = queue.slots
-          .where(
-            (s) => !s.start.isBefore(plageStart) && !s.end.isAfter(plageEnd),
-          )
-          .toList();
-
-      final now = DateTime.now();
-      final isViewingToday =
-          _n.selectedDate.year == now.year &&
-          _n.selectedDate.month == now.month &&
-          _n.selectedDate.day == now.day;
-      final todayDone =
-          isViewingToday &&
-          (slotsInRange.isEmpty ||
-              slotsInRange.every((s) => s.end.isBefore(now)));
-
-      final res = await _showModifDialog(
+      final confirmed = await _showModifDialog(
         context,
         title: 'Modifier la capacité',
-        preview: 'Capacité : ${tsInfo.capacity} pers. → $newCapacity pers.',
-        hasReservations: _n.hasReservationsInSlots(slotsInRange),
+        preview: 'Capacité : $current pers. → $newCapacity pers.',
+        dayLabel: _modifDayLabel(),
+        hasReservations: _n.hasReservationsInSlots(
+          _upcomingSlotsOf(queue, tsInfo.id),
+        ),
         isCapacity: true,
-        todayDone: todayDone,
+        onOpenPlages: () => _openPlagesPage(queue),
       );
-      if (res == null) return;
+      if (!confirmed) return;
 
       _n.setQueueLoading(queue.id);
       final result = await _n.agenda.modifySlotCapacity(
         queueId: queue.id,
         date: _n.selectedDate,
         newCapacity: newCapacity,
-        type: res.type,
         timeSlotId: tsInfo.id,
       );
       if (result.success) {
@@ -1543,35 +1575,53 @@ class _HousePageState extends State<HousePage>
   }
 
   // ── Sélecteur de plage horaire (bottom sheet) ────────────
-  Future<_TimeSlotInfo?> _selectTimeSlot(_QueueAgenda queue) async {
-    final timeslots = await _n.fetchTimeSlots(queue.id);
-    if (timeslots.isEmpty) return null;
+  // Plages triées, avec leurs valeurs DU JOUR. Une plage non modifiable
+  // apparaît grisée avec sa raison : bloquée, terminée, suppression
+  // programmée, sans créneau ce jour, ou — pour la durée seulement — sans
+  // créneau libre à recalculer (tous les créneaux restants sont réservés).
+  Future<_TimeSlotInfo?> _selectTimeSlot(
+    _QueueAgenda queue, {
+    required bool forDuration,
+  }) async {
+    final fetched = await _n.fetchTimeSlots(queue.id);
+    if (fetched.isEmpty || !mounted) return null;
 
-    // Les plages en cours de suppression programmée ne sont pas modifiables.
-    final editable = timeslots.where((ts) => ts.deleteAfter == null).toList();
-    if (editable.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Toutes les plages de cette file sont en cours de suppression.',
-            ),
+    final now = DateTime.now();
+    final entries = [
+      for (final ts in fetched)
+        () {
+          final info = _n.withDayValues(queue, ts);
+          final state = _plageDayState(info, queue.slots, now);
+          String? disabledReason = _plageDayStateLabel(state, info);
+          if (disabledReason == null && forDuration && !info.hasFreeSlot) {
+            disabledReason = 'Aucun créneau libre à modifier';
+          }
+          return (ts: info, disabledReason: disabledReason);
+        }(),
+    ];
+
+    // Une seule plage : choix direct, ou explication si elle n'est pas
+    // modifiable (au lieu de ne rien faire).
+    if (entries.length == 1) {
+      final only = entries.first;
+      if (only.disabledReason == null) return only.ts;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Modification impossible pour le moment : '
+            '${only.disabledReason!.toLowerCase()}.',
           ),
-        );
-      }
+        ),
+      );
       return null;
     }
-    // Sélection directe uniquement si la file n'a qu'une plage (et qu'elle
-    // est modifiable) ; sinon on montre le sélecteur, où les plages en
-    // suppression apparaissent grisées.
-    if (timeslots.length == 1) return editable.first;
-    if (!mounted) return null;
+
     return showModalBottomSheet<_TimeSlotInfo>(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
       builder: (_) => _TimeslotPickerSheet(
-        timeslots: timeslots,
+        entries: entries,
         title: 'Quelle plage modifier ?',
       ),
     );
@@ -2120,7 +2170,18 @@ class _QueueAgenda {
   final String id;
   final String name;
   final List<AgendaSlot> slots;
+
+  /// Tout ce qui reste à venir ce jour est bloqué (ou, journée terminée :
+  /// tous ses créneaux l'ont été). Masque durée/capacité, badge « Bloquée ».
   final bool isBlocked;
+
+  /// Au moins un créneau bloqué n'est pas encore terminé : le bouton de la
+  /// carte devient « Débloquer » (qui rouvre tout ce qui est bloqué).
+  final bool hasActiveBlock;
+
+  /// Plages bloquées en partie de journée (« 08:00–12:00 »), null si aucune
+  /// ou si tout est bloqué.
+  final String? blockedPlagesLabel;
   final String? blockReason;
   final QueueStats stats;
   final List<int> weekdays;
@@ -2133,6 +2194,8 @@ class _QueueAgenda {
     required this.name,
     required this.slots,
     this.isBlocked = false,
+    this.hasActiveBlock = false,
+    this.blockedPlagesLabel,
     this.blockReason,
     required this.stats,
     this.weekdays = const [],
@@ -2140,6 +2203,33 @@ class _QueueAgenda {
     this.closureStart,
     this.closureEnd,
   });
+
+  /// Même file, créneaux [newSlots] (ou les mêmes) : l'état de blocage et
+  /// les stats sont recalculés pour l'instant [now] — ils dépendent de
+  /// l'heure (un blocage se termine avec son dernier créneau).
+  _QueueAgenda rebuiltAt(
+    DateTime now, {
+    List<AgendaSlot>? newSlots,
+    QueueStats? newStats,
+    int? newTimeSlotCount,
+  }) {
+    final s = newSlots ?? slots;
+    final block = _blockStateOf(s, now);
+    return _QueueAgenda(
+      id: id,
+      name: name,
+      slots: s,
+      isBlocked: block.isBlocked,
+      hasActiveBlock: block.hasActiveBlock,
+      blockedPlagesLabel: block.blockedPlagesLabel,
+      blockReason: block.reason,
+      stats: newStats ?? AgendaService().computeStats(s, now: now),
+      weekdays: weekdays,
+      timeSlotCount: newTimeSlotCount ?? timeSlotCount,
+      closureStart: closureStart,
+      closureEnd: closureEnd,
+    );
+  }
 
   bool get isClosedNow => isQueueClosedNow(closureStart, closureEnd);
 
@@ -2151,15 +2241,133 @@ class _QueueAgenda {
   }
 }
 
-class _ModifResult {
-  final ModificationType type;
-  _ModifResult({required this.type});
+/// État d'une plage pour la journée affichée, vu des boutons de l'accueil.
+enum _PlageDayState {
+  /// Modifiable / blocable.
+  available,
+
+  /// Tous ses créneaux du jour sont terminés.
+  ended,
+
+  /// Bloquée (incident en cours) : aucune modif ce jour-là.
+  blocked,
+
+  /// Suppression programmée : verrouillée.
+  deferred,
+
+  /// Aucun créneau ce jour (jour non travaillé pour cette plage).
+  noSlots,
+}
+
+_PlageDayState _plageDayState(
+  _TimeSlotInfo ts,
+  List<AgendaSlot> daySlots,
+  DateTime now,
+) {
+  if (ts.deleteAfter != null) return _PlageDayState.deferred;
+  final plage = daySlots.where((s) => s.timeSlotId == ts.id).toList();
+  if (plage.isEmpty) return _PlageDayState.noSlots;
+  final remaining = plage.where((s) => s.end.isAfter(now)).toList();
+  if (remaining.isEmpty) return _PlageDayState.ended;
+  if (remaining.any((s) => s.isBlocked)) return _PlageDayState.blocked;
+  return _PlageDayState.available;
+}
+
+/// Mention affichée sous / à côté d'une plage non disponible.
+String? _plageDayStateLabel(_PlageDayState state, _TimeSlotInfo ts) {
+  switch (state) {
+    case _PlageDayState.available:
+      return null;
+    case _PlageDayState.ended:
+      return 'Terminée';
+    case _PlageDayState.blocked:
+      return 'Bloquée';
+    case _PlageDayState.deferred:
+      return 'Suppression programmée le '
+          '${DateFormat('d MMM', 'fr_FR').format(ts.deleteAfter!)}';
+    case _PlageDayState.noSlots:
+      return 'Pas de créneau ce jour';
+  }
+}
+
+/// État de blocage d'une file pour la journée affichée, à l'instant [now].
+///
+/// Un blocage n'est « en cours » que tant qu'un créneau bloqué n'est pas
+/// terminé : quand la plage bloquée se termine, la carte repasse sur
+/// « Bloquer » (la structure peut bloquer la plage suivante). Les clients
+/// de ces créneaux sont prévenus côté serveur à la fin de chaque créneau.
+({
+  bool isBlocked,
+  bool hasActiveBlock,
+  String? reason,
+  String? blockedPlagesLabel,
+})
+_blockStateOf(List<AgendaSlot> slots, DateTime now) {
+  final remaining = slots.where((s) => s.end.isAfter(now)).toList();
+  final activeBlocked = remaining.where((s) => s.isBlocked).toList();
+  final hasActiveBlock = activeBlocked.isNotEmpty;
+
+  // Journée terminée : on garde la lecture historique (tout a été bloqué).
+  final isBlocked = remaining.isNotEmpty
+      ? remaining.every((s) => s.isBlocked)
+      : slots.isNotEmpty && slots.every((s) => s.isBlocked);
+
+  final reasonSource = hasActiveBlock
+      ? activeBlocked
+      : (isBlocked ? slots : const <AgendaSlot>[]);
+  String? reason;
+  for (final s in reasonSource) {
+    final r = s.blockReason?.trim();
+    if (r != null && r.isNotEmpty) {
+      reason = r;
+      break;
+    }
+  }
+
+  // Blocage partiel : quelles plages ? (bornes de la plage ce jour-là)
+  String? label;
+  if (hasActiveBlock && !isBlocked) {
+    final fmt = DateFormat('HH:mm');
+    final ranges = <({DateTime start, DateTime end})>[];
+    for (final tsId in activeBlocked.map((s) => s.timeSlotId).toSet()) {
+      final plage = slots.where((s) => s.timeSlotId == tsId).toList();
+      if (plage.isEmpty) continue;
+      var start = plage.first.start;
+      var end = plage.first.end;
+      for (final s in plage) {
+        if (s.start.isBefore(start)) start = s.start;
+        if (s.end.isAfter(end)) end = s.end;
+      }
+      ranges.add((start: start, end: end));
+    }
+    ranges.sort((a, b) => a.start.compareTo(b.start));
+    // Fin à minuit pile (plage « jusqu'à 24:00 ») : affichée 24:00.
+    String endText(DateTime start, DateTime end) =>
+        end.day != start.day && end.hour == 0 && end.minute == 0
+        ? '24:00'
+        : fmt.format(end);
+    if (ranges.isNotEmpty) {
+      label = ranges
+          .map((r) => '${fmt.format(r.start)}–${endText(r.start, r.end)}')
+          .join(', ');
+    }
+  }
+
+  return (
+    isBlocked: isBlocked,
+    hasActiveBlock: hasActiveBlock,
+    reason: reason,
+    blockedPlagesLabel: label,
+  );
 }
 
 class _TimeSlotInfo {
   final String id;
   final String startTime;
   final String endTime;
+
+  /// Valeurs HABITUELLES de la plage (document timeSlot) : ne changent que
+  /// par une modif durable, faite dans la page des plages.
   final int capacity;
   final int duration;
   final List<int> workingDays;
@@ -2171,6 +2379,16 @@ class _TimeSlotInfo {
   /// suppression n'est pas restituée).
   final DateTime? deleteAfter;
 
+  /// Valeurs RÉELLES du jour affiché, lues sur ses créneaux (elles diffèrent
+  /// des habituelles après une modif du jour faite depuis l'accueil). Null
+  /// tant qu'elles n'ont pas été calculées, ou faute de créneau à lire.
+  final int? dayDuration;
+  final int? dayCapacity;
+
+  /// Il reste au moins un créneau à venir, ouvert et sans réservation : la
+  /// durée du jour est modifiable (seuls ces créneaux sont recalculés).
+  final bool hasFreeSlot;
+
   _TimeSlotInfo({
     required this.id,
     required this.startTime,
@@ -2181,5 +2399,33 @@ class _TimeSlotInfo {
     this.maxAdvanceDays = 3,
     this.reservationDeadlineMinutes = 10,
     this.deleteAfter,
+    this.dayDuration,
+    this.dayCapacity,
+    this.hasFreeSlot = true,
   });
+
+  /// Durée en vigueur ce jour-là (repli : la durée habituelle).
+  int get effectiveDuration => dayDuration ?? duration;
+
+  /// Capacité en vigueur ce jour-là (repli : la capacité habituelle).
+  int get effectiveCapacity => dayCapacity ?? capacity;
+
+  _TimeSlotInfo withDayValues({
+    required int? dayDuration,
+    required int? dayCapacity,
+    required bool hasFreeSlot,
+  }) => _TimeSlotInfo(
+    id: id,
+    startTime: startTime,
+    endTime: endTime,
+    capacity: capacity,
+    duration: duration,
+    workingDays: workingDays,
+    maxAdvanceDays: maxAdvanceDays,
+    reservationDeadlineMinutes: reservationDeadlineMinutes,
+    deleteAfter: deleteAfter,
+    dayDuration: dayDuration,
+    dayCapacity: dayCapacity,
+    hasFreeSlot: hasFreeSlot,
+  );
 }

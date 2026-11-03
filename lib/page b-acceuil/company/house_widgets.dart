@@ -501,6 +501,12 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
 
   @override
   Widget build(BuildContext context) {
+    final q = widget.queue;
+    // Blocage en partie de journée : une ou plusieurs plages bloquées, les
+    // autres ouvertes.
+    final partialBlock = q.hasActiveBlock && !q.isBlocked;
+    final showBlockBanner =
+        (q.isBlocked && q.blockReason != null) || partialBlock;
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
@@ -522,22 +528,29 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  widget.queue.name,
-                  style: const TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.black87,
+                Flexible(
+                  child: Text(
+                    widget.queue.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.black87,
+                    ),
                   ),
                 ),
+                const SizedBox(width: 8),
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 10,
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: widget.queue.isBlocked
+                    color: q.isBlocked
                         ? Colors.grey.shade100
+                        : partialBlock
+                        ? Colors.orange.shade50
                         : const Color(0xFFE8F5ED),
                     borderRadius: BorderRadius.circular(20),
                   ),
@@ -548,20 +561,28 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                         width: 7,
                         height: 7,
                         decoration: BoxDecoration(
-                          color: widget.queue.isBlocked
+                          color: q.isBlocked
                               ? Colors.grey.shade500
+                              : partialBlock
+                              ? Colors.orange.shade600
                               : _green,
                           shape: BoxShape.circle,
                         ),
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        widget.queue.isBlocked ? 'Bloquée' : 'Active',
+                        q.isBlocked
+                            ? 'Bloquée'
+                            : partialBlock
+                            ? 'Bloquée en partie'
+                            : 'Active',
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
-                          color: widget.queue.isBlocked
+                          color: q.isBlocked
                               ? Colors.grey.shade600
+                              : partialBlock
+                              ? Colors.orange.shade800
                               : _green,
                         ),
                       ),
@@ -571,8 +592,8 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
               ],
             ),
 
-            // ── Raison du blocage ───────────────────────────────────
-            if (widget.queue.isBlocked && widget.queue.blockReason != null) ...[
+            // ── Raison du blocage (et plages concernées si partiel) ─
+            if (showBlockBanner) ...[
               const SizedBox(height: 10),
               Container(
                 width: double.infinity,
@@ -603,21 +624,26 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Réservations suspendues',
+                            partialBlock && q.blockedPlagesLabel != null
+                                ? 'Réservations suspendues · '
+                                      '${q.blockedPlagesLabel}'
+                                : 'Réservations suspendues',
                             style: TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.w700,
                               color: Colors.orange.shade800,
                             ),
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            widget.queue.blockReason!,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Colors.orange.shade700,
+                          if (q.blockReason != null) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              q.blockReason!,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.orange.shade700,
+                              ),
                             ),
-                          ),
+                          ],
                         ],
                       ),
                     ),
@@ -703,8 +729,11 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                         const SizedBox(height: 20),
                       ],
 
+                      // Un seul bouton qui bascule : « Débloquer » tant
+                      // qu'un créneau bloqué est encore à venir (rouvre
+                      // tout ce qui est bloqué), sinon « Bloquer ».
                       GestureDetector(
-                        onTap: widget.queue.isBlocked
+                        onTap: q.hasActiveBlock
                             ? widget.onUnblock
                             : widget.onBlock,
                         child: Container(
@@ -717,7 +746,7 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(10),
                             border: Border.all(
-                              color: widget.queue.isBlocked
+                              color: q.hasActiveBlock
                                   ? _green
                                   : Colors.red.shade300,
                               width: 1.5,
@@ -727,21 +756,21 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               Icon(
-                                widget.queue.isBlocked
+                                q.hasActiveBlock
                                     ? Icons.lock_open_rounded
                                     : Icons.lock_outline_rounded,
                                 size: 16,
-                                color: widget.queue.isBlocked
+                                color: q.hasActiveBlock
                                     ? _green
                                     : Colors.red.shade400,
                               ),
                               const SizedBox(width: 8),
                               Text(
-                                widget.queue.isBlocked
+                                q.hasActiveBlock
                                     ? 'Débloquer la plage'
                                     : 'Bloquer la plage',
                                 style: TextStyle(
-                                  color: widget.queue.isBlocked
+                                  color: q.hasActiveBlock
                                       ? _green
                                       : Colors.red.shade600,
                                   fontWeight: FontWeight.w600,
@@ -1265,10 +1294,24 @@ class _TimeslotSeparator extends StatelessWidget {
 
 // ── Sélecteur de plage horaire (bottom sheet) ─────────────────────────────────
 class _TimeslotPickerSheet extends StatelessWidget {
-  final List<_TimeSlotInfo> timeslots;
+  /// Plages (triées, avec leurs valeurs du jour) et, pour celles qui ne
+  /// sont pas modifiables, la raison affichée à la place des valeurs.
+  final List<({_TimeSlotInfo ts, String? disabledReason})> entries;
   final String title;
 
-  const _TimeslotPickerSheet({required this.timeslots, required this.title});
+  const _TimeslotPickerSheet({required this.entries, required this.title});
+
+  /// « 15 min · 3 pers./créneau », suivi des valeurs habituelles quand
+  /// celles du jour en diffèrent (modif du jour faite depuis l'accueil).
+  static String _valuesLine(_TimeSlotInfo ts) {
+    final line =
+        '${ts.effectiveDuration} min · ${ts.effectiveCapacity} pers./créneau';
+    final usual = <String>[
+      if (ts.effectiveDuration != ts.duration) '${ts.duration} min',
+      if (ts.effectiveCapacity != ts.capacity) '${ts.capacity} pers.',
+    ];
+    return usual.isEmpty ? line : '$line\nHabituellement ${usual.join(' · ')}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1319,8 +1362,9 @@ class _TimeslotPickerSheet extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 16),
-          ...timeslots.map((ts) {
-            final deferred = ts.deleteAfter != null;
+          ...entries.map((entry) {
+            final ts = entry.ts;
+            final deferred = entry.disabledReason != null;
             return Container(
               margin: const EdgeInsets.only(bottom: 10),
               decoration: BoxDecoration(
@@ -1336,6 +1380,10 @@ class _TimeslotPickerSheet extends StatelessWidget {
               ),
               child: ListTile(
                 enabled: !deferred,
+                // Sous-titre sur 2 lignes quand les valeurs du jour
+                // diffèrent des habituelles (« Habituellement … »).
+                isThreeLine:
+                    !deferred && _valuesLine(ts).contains('\n'),
                 leading: Container(
                   width: 40,
                   height: 40,
@@ -1347,8 +1395,10 @@ class _TimeslotPickerSheet extends StatelessWidget {
                   ),
                   child: Center(
                     child: Icon(
-                      deferred
+                      ts.deleteAfter != null
                           ? Icons.auto_delete_outlined
+                          : deferred
+                          ? Icons.lock_clock_outlined
                           : Icons.access_time_rounded,
                       color: deferred ? Colors.grey.shade500 : _green,
                       size: 20,
@@ -1363,10 +1413,7 @@ class _TimeslotPickerSheet extends StatelessWidget {
                   ),
                 ),
                 subtitle: Text(
-                  deferred
-                      ? 'Suppression programmée le '
-                            '${DateFormat('d MMM', 'fr_FR').format(ts.deleteAfter!)}'
-                      : '${ts.duration} min · ${ts.capacity} pers./créneau',
+                  entry.disabledReason ?? _valuesLine(ts),
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                 ),
                 trailing: deferred
@@ -1422,23 +1469,39 @@ class _BlockSheetState extends State<_BlockSheet> {
   bool _loading = false;
   bool _showReasonError = false;
 
-  // La cible sélectionnée a-t-elle des réservations aujourd'hui ?
-  // "Toutes" (_selectedId == null) : dès qu'une seule plage a des
-  // réservations, la raison devient obligatoire (pas de cas mixte).
-  bool get _reasonRequired => _selectedId == null
-      ? widget.daySlots.any((s) => s.reserved > 0)
-      : widget.daySlots.any(
-          (s) => s.timeSlotId == _selectedId && s.reserved > 0,
-        );
+  // État de chaque plage ce jour-là (figé à l'ouverture de la feuille) :
+  // seules les plages en cours ou à venir, non bloquées et sans
+  // suppression programmée, sont sélectionnables.
+  late final Map<String, _PlageDayState> _states;
+  late final DateTime _openedAt;
+
+  bool _isAvailable(_TimeSlotInfo ts) =>
+      _states[ts.id] == _PlageDayState.available;
+
+  bool get _anyAvailable => widget.timeslots.any(_isAvailable);
+
+  // La cible a-t-elle des réservations sur les créneaux qui vont être
+  // bloqués (à venir, pas déjà bloqués) ? « Toutes » (_selectedId == null) :
+  // dès qu'une seule en a, la raison devient obligatoire (pas de cas mixte).
+  bool get _reasonRequired => widget.daySlots.any(
+    (s) =>
+        (_selectedId == null || s.timeSlotId == _selectedId) &&
+        !s.isBlocked &&
+        s.end.isAfter(_openedAt) &&
+        s.reserved > 0,
+  );
 
   @override
   void initState() {
     super.initState();
-    // Ne pas présélectionner une plage en cours de suppression programmée.
-    if (widget.timeslots.length == 1 &&
-        widget.timeslots.first.deleteAfter == null) {
-      _selectedId = widget.timeslots.first.id;
-    }
+    _openedAt = DateTime.now();
+    _states = {
+      for (final ts in widget.timeslots)
+        ts.id: _plageDayState(ts, widget.daySlots, _openedAt),
+    };
+    // Une seule plage encore blocable : présélectionnée.
+    final available = widget.timeslots.where(_isAvailable).toList();
+    if (available.length == 1) _selectedId = available.first.id;
   }
 
   @override
@@ -1575,23 +1638,31 @@ class _BlockSheetState extends State<_BlockSheet> {
               runSpacing: 8,
               children: [
                 ...widget.timeslots.map((ts) {
-                  final deferred = ts.deleteAfter != null;
+                  final state = _states[ts.id]!;
+                  final mention = switch (state) {
+                    _PlageDayState.available => null,
+                    _PlageDayState.ended => 'terminée',
+                    _PlageDayState.blocked => 'bloquée',
+                    _PlageDayState.deferred => 'suppr. programmée',
+                    _PlageDayState.noSlots => 'pas de créneau',
+                  };
                   return _selectChip(
-                    label: deferred
-                        ? '${ts.startTime}–${ts.endTime} · suppr. programmée'
-                        : '${ts.startTime}–${ts.endTime}',
+                    label: mention == null
+                        ? '${ts.startTime}–${ts.endTime}'
+                        : '${ts.startTime}–${ts.endTime} · $mention',
                     selected: _selectedId == ts.id,
-                    disabled: deferred,
+                    disabled: !_isAvailable(ts),
                     onTap: () => setState(() {
                       _selectedId = ts.id;
                       _showReasonError = false;
                     }),
                   );
                 }),
+                // « Toutes » = toutes les plages encore blocables.
                 _selectChip(
                   label: 'Toutes les plages',
-                  selected: _selectedId == null,
-                  disabled: false,
+                  selected: _selectedId == null && _anyAvailable,
+                  disabled: !_anyAvailable,
                   onTap: () => setState(() {
                     _selectedId = null;
                     _showReasonError = false;
@@ -1668,7 +1739,7 @@ class _BlockSheetState extends State<_BlockSheet> {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed: _loading
+              onPressed: _loading || !_anyAvailable
                   ? null
                   : () async {
                       final reason = _reasonController.text.trim();

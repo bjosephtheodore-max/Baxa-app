@@ -9,6 +9,7 @@ const {CloudTasksClient} = require("@google-cloud/tasks");
 const wake = require("./wake");
 const searchDir = require("./search_directory");
 const zone = require("./zone");
+const suspension = require("./suspension");
 admin.initializeApp();
 
 // Plafond d'instances par fonction (2e génération). Par défaut chacune peut
@@ -1563,6 +1564,34 @@ exports.deliverReservationNotification = onRequest(
         .collection("reservations")
         .doc(reservationId)
         .get();
+
+      // Fin du créneau alors que la plage est toujours bloquée : le client
+      // ne peut plus être servi → on annule sa réservation maintenant (même
+      // effet qu'un « Débloquer » de l'entreprise), au lieu d'attendre le
+      // filet de sécurité de nuit. FONCTION 6bis envoie la notification.
+      // Transaction : si l'entreprise débloque au même instant, un seul des
+      // deux agit (le second voit la réservation déjà résolue).
+      if (suspension.shouldResolveAtSlotEnd(kind, resDoc.data())) {
+        const resolved = await db.runTransaction(async (tx) => {
+          const fresh = await tx.get(resDoc.ref);
+          if (!suspension.isStillSuspended(fresh.data())) return false;
+          tx.update(
+            resDoc.ref,
+            suspension.unresolvedSuspensionUpdate(
+              admin.firestore.FieldValue,
+            ),
+          );
+          return true;
+        });
+        console.log(
+          resolved ?
+            `⏹️ Suspension non résolue → réservation ${reservationId} annulée` :
+            `Réservation ${reservationId} déjà résolue`,
+        );
+        res.status(200).send(resolved ? "Suspension résolue" : "Déjà résolue");
+        return;
+      }
+
       if (
         !resDoc.exists ||
         resDoc.data().status !== "confirmed" ||
@@ -1729,14 +1758,10 @@ async function resolveCompanySuspensions(companyId) {
   let batch = db.batch();
   let count = 0;
   for (const doc of expired) {
-    batch.update(doc.ref, {
-      status: "cancelled",
-      cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-      cancellationSource: "company_block_unresolved",
-      suspended: admin.firestore.FieldValue.delete(),
-      suspendedReason: admin.firestore.FieldValue.delete(),
-      suspendedAt: admin.firestore.FieldValue.delete(),
-    });
+    batch.update(
+      doc.ref,
+      suspension.unresolvedSuspensionUpdate(admin.firestore.FieldValue),
+    );
     count++;
     total++;
     if (count >= 400) {

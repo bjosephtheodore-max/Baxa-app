@@ -12,7 +12,31 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
     return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
   }
 
+  // ── Jours bloqués d'une plage ───────────────────────────────────
+  // Jours où la plage a encore un créneau bloqué à venir (incident en
+  // cours, posé depuis l'accueil). Ces jours-là, aucune modification de la
+  // plage ne s'applique : ni suppression, ni génération, ni changement de
+  // paramètres, ni annulation de réservations. La modif vaut pour tous les
+  // autres jours.
+  Set<DateTime> _activeBlockedDaysIn(
+    Iterable<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+    String timeSlotId,
+  ) {
+    final slots = docs.map((d) => slotLiteFromData(d.data())).nonNulls;
+    return activeBlockedDays(slots, timeSlotId, DateTime.now());
+  }
+
+  /// Le créneau [data] tombe-t-il un jour bloqué de sa plage ?
+  bool _onBlockedDay(Map<String, dynamic> data, Set<DateTime> blockedDays) {
+    if (blockedDays.isEmpty) return false;
+    final start = (data['start'] as Timestamp?)?.toDate();
+    return start != null && blockedDays.contains(plageDayOf(start));
+  }
+
   // ── Supprime les créneaux vides futurs d'une plage ──────────────
+  // Un créneau bloqué n'est jamais supprimé (il serait recréé « ouvert »,
+  // ce qui débloquerait la plage en silence), et les jours bloqués de la
+  // plage sont laissés intacts.
   Future<void> _deleteEmptyFutureSlotsForTimeSlot(String timeSlotId) async {
     final today = DateTime(
       DateTime.now().year,
@@ -39,6 +63,8 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
       }
     }
 
+    final blockedDays = _activeBlockedDaysIn(snap.docs, timeSlotId);
+
     WriteBatch batch = _firestore.batch();
     int batchCount = 0;
 
@@ -46,6 +72,8 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
       final data = doc.data();
       if (data['timeSlotId'] != timeSlotId) continue;
       if ((data['reserved'] as int? ?? 0) > 0) continue;
+      if (data['status'] == 'blocked') continue;
+      if (_onBlockedDay(data, blockedDays)) continue;
 
       batch.delete(doc.reference);
       batchCount++;
@@ -288,8 +316,12 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
     final existingSnap = await slotsRef
         .where('start', isGreaterThanOrEqualTo: effectiveDate)
         .get();
+    // Les jours bloqués de la plage ne sont pas touchés (ni annulation, ni
+    // suppression) ; la génération ci-dessous les saute aussi.
+    final blockedDays = _activeBlockedDaysIn(existingSnap.docs, timeSlotId);
     final relevant = existingSnap.docs
         .where((d) => d.data()['timeSlotId'] == timeSlotId)
+        .where((d) => !_onBlockedDay(d.data(), blockedDays))
         .toList();
     final stillReserved = relevant
         .where((d) => (d.data()['reserved'] as int? ?? 0) > 0)
@@ -372,8 +404,11 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
     final existingSnap = await slotsRef
         .where('start', isGreaterThanOrEqualTo: pendingEffectiveDate)
         .get();
+    // Jours bloqués de la plage : laissés intacts (voir _activeBlockedDaysIn).
+    final blockedDays = _activeBlockedDaysIn(existingSnap.docs, timeSlotId);
     final relevant = existingSnap.docs
         .where((d) => d.data()['timeSlotId'] == timeSlotId)
+        .where((d) => !_onBlockedDay(d.data(), blockedDays))
         .toList();
     final stillReserved = relevant
         .where((d) => (d.data()['reserved'] as int? ?? 0) > 0)
@@ -479,6 +514,11 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
       }
     }
 
+    // Jours bloqués de la plage : laissés tels quels (voir
+    // _activeBlockedDaysIn) — la nouvelle config s'y appliquera au
+    // prochain jour non bloqué.
+    final blockedDays = _activeBlockedDaysIn(snap.docs, timeSlotId);
+
     WriteBatch batch = _firestore.batch();
     int batchCount = 0;
     int updated = 0;
@@ -487,6 +527,7 @@ extension _QueueTimeSlotsLogic on _QueueTimeSlotsPageState {
       final data = doc.data();
       if (data['timeSlotId'] != timeSlotId) continue;
       if (data['status'] != 'open') continue;
+      if (_onBlockedDay(data, blockedDays)) continue;
 
       // Ne jamais réduire la capacité sous les réservations existantes
       final reserved = data['reserved'] as int? ?? 0;

@@ -138,6 +138,147 @@ void main() {
     });
   });
 
+  // Créneau déjà présent (réservé, bloqué…) posé à la main dans la base.
+  Future<void> seedSlot({
+    required DateTime start,
+    required int minutes,
+    String timeSlotId = 't1',
+    String status = 'open',
+    int reserved = 0,
+  }) {
+    return col('slots').add({
+      'start': Timestamp.fromDate(start),
+      'end': Timestamp.fromDate(start.add(Duration(minutes: minutes))),
+      'capacity': 2,
+      'reserved': reserved,
+      'status': status,
+      'timeSlotId': timeSlotId,
+    });
+  }
+
+  Future<List<({DateTime start, DateTime end})>> mondayIntervals() async {
+    final snap = await col('slots').get();
+    return snap.docs
+        .map((d) => (
+              start: (d.data()['start'] as Timestamp).toDate(),
+              end: (d.data()['end'] as Timestamp).toDate(),
+            ))
+        .where((s) => s.start.day == monday.day && s.start.month == monday.month)
+        .toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
+  }
+
+  group('Pas de chevauchement', () {
+    test('un créneau réservé conservé n\'est jamais recouvert : on remplit '
+        'autour', () async {
+      // Réservé 9h10-9h40 (ancienne durée) ; nouvelle durée 30 min.
+      await seedSlot(
+        start: monday.add(const Duration(hours: 9, minutes: 10)),
+        minutes: 30,
+        reserved: 1,
+      );
+      await generate(days: const [1], mode: SlotGenMode.refresh);
+
+      final slots = await mondayIntervals();
+      for (var i = 1; i < slots.length; i++) {
+        expect(
+          slots[i].start.isBefore(slots[i - 1].end),
+          isFalse,
+          reason: 'chevauchement à ${slots[i].start}',
+        );
+      }
+      // 9h00-9h10 trop court ; puis 9h40, 10h10, 10h40, 11h10.
+      expect(slots.map((s) => s.start).toList(), [
+        monday.add(const Duration(hours: 9, minutes: 10)),
+        monday.add(const Duration(hours: 9, minutes: 40)),
+        monday.add(const Duration(hours: 10, minutes: 10)),
+        monday.add(const Duration(hours: 10, minutes: 40)),
+        monday.add(const Duration(hours: 11, minutes: 10)),
+      ]);
+    });
+  });
+
+  group('Jour bloqué', () {
+    test('la plage bloquée ce jour-là ne reçoit aucun créneau, les autres '
+        'jours si', () async {
+      await seedSlot(
+        start: monday.add(const Duration(hours: 9)),
+        minutes: 30,
+        status: 'blocked',
+      );
+      await generate(days: const [1], mode: SlotGenMode.refresh);
+
+      expect(await mondayIntervals(), hasLength(1)); // le seul bloqué
+      final nextMonday = (await slotStarts())
+          .where((s) => s.isAfter(monday.add(const Duration(days: 6))))
+          .toList();
+      expect(nextMonday, hasLength(6));
+    });
+
+    test('le blocage d\'une AUTRE plage n\'empêche pas la génération',
+        () async {
+      await seedSlot(
+        start: monday.add(const Duration(hours: 14)),
+        minutes: 30,
+        timeSlotId: 'autre',
+        status: 'blocked',
+      );
+      await generate(days: const [1], mode: SlotGenMode.refresh);
+      expect(await mondayIntervals(), hasLength(7)); // 6 + le bloqué
+    });
+  });
+
+  group('Fermeture', () {
+    test('file fermée sans date de réouverture : aucun créneau', () async {
+      await db
+          .collection('companies')
+          .doc('compA')
+          .collection('queues')
+          .doc('q1')
+          .update({
+            'closureStart': Timestamp.fromDate(
+              now.subtract(const Duration(hours: 1)),
+            ),
+          });
+      expect(await generate(days: const [1]), 0);
+      expect(await slotStarts(), isEmpty);
+    });
+
+    test('règle de préchauffage identique à la génération de nuit', () {
+      final t = DateTime(2026, 11, 2, 12);
+      final past = t.subtract(const Duration(days: 3));
+      // Pas de fermeture / fermeture pas encore commencée → on génère.
+      expect(shouldSkipGenerationForClosure(null, null, t), isFalse);
+      expect(
+        shouldSkipGenerationForClosure(
+          t.add(const Duration(days: 1)),
+          null,
+          t,
+        ),
+        isFalse,
+      );
+      // Fermée sans fin, ou réouverture lointaine → on suspend.
+      expect(shouldSkipGenerationForClosure(past, null, t), isTrue);
+      expect(
+        shouldSkipGenerationForClosure(
+          past,
+          t.add(const Duration(days: 5)),
+          t,
+        ),
+        isTrue,
+      );
+      // Réouverture dans moins de 48 h → préchauffage, on génère.
+      expect(
+        shouldSkipGenerationForClosure(
+          past,
+          t.add(const Duration(hours: 30)),
+          t,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('Pas de doublons', () {
     test('relancer la génération ne recrée pas les créneaux existants',
         () async {

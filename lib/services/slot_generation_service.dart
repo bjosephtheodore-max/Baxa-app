@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_performance/firebase_performance.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:baxa/services/booking_constants.dart';
+import 'package:baxa/services/plage_rules.dart';
 
 // ════════════════════════════════════════════════════════════════════
 // Génération immédiate des créneaux — côté app, sans attendre la Cloud
@@ -15,7 +17,34 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 // (horizon fixe). La maintenance de nuit (Cloud Function `companyJob`, tâche `nightly`) prolonge l'horizon
 // chaque nuit, nettoie les vieux créneaux et recompte les `dailyStats`
 // depuis les vrais créneaux (filet de sécurité contre toute dérive).
+//
+// Garde-fous :
+//  • file fermée → rien n'est généré (même règle que la génération de
+//    nuit, préchauffage 48 h avant une réouverture datée comprise) ;
+//  • jour où la plage est bloquée (incident en cours) → jour sauté ;
+//  • un nouveau créneau ne chevauche jamais un créneau existant : on ne
+//    remplit que les espaces libres de la plage. L'anti-doublon sur l'heure
+//    de début reste en dernier garde-fou.
 // ════════════════════════════════════════════════════════════════════
+
+/// Préchauffage avant une réouverture datée : MIROIR de la génération de
+/// nuit (functions/index.js, `reopenSoon`).
+const Duration _kReopenPreheat = Duration(hours: 48);
+
+/// Vrai si la génération doit être suspendue pour cette file : fermeture
+/// en cours, sauf réouverture datée dans moins de 48 h. MIROIR exact de
+/// `skipGeneration` côté Cloud Function.
+@visibleForTesting
+bool shouldSkipGenerationForClosure(
+  DateTime? closureStart,
+  DateTime? closureEnd,
+  DateTime now,
+) {
+  if (!isQueueClosedNow(closureStart, closureEnd, now: now)) return false;
+  final reopenSoon =
+      closureEnd != null && closureEnd.difference(now) < _kReopenPreheat;
+  return !reopenSoon;
+}
 
 /// Contexte d'appel — détermine la stratégie anti-doublon et le calcul des
 /// stats journalières.
@@ -135,6 +164,24 @@ Future<int> _generateSlotsImmediatelyImpl({
   final startParts = startTimeStr.split(':');
   final endParts = endTimeStr.split(':');
 
+  // ── 0. File fermée → aucune génération ─────────────────────────────
+  // Même règle que la génération de nuit : inutile de créer des créneaux
+  // que personne ne peut réserver (ils fausseraient l'accueil et les
+  // stats). « Rouvrir immédiatement » efface la fermeture AVANT de
+  // générer : il n'est donc pas concerné. Lecture best-effort : si elle
+  // échoue, on génère comme avant (la nuit fera le tri).
+  try {
+    final q = (await queuePath.get()).data();
+    if (q != null &&
+        shouldSkipGenerationForClosure(
+          (q['closureStart'] as Timestamp?)?.toDate(),
+          (q['closureEnd'] as Timestamp?)?.toDate(),
+          DateTime.now(),
+        )) {
+      return 0;
+    }
+  } catch (_) {}
+
   // ── 1. Jours ouvrés dans la fenêtre de 7 jours ─────────────────────
   final workDates = <DateTime>[];
   for (int i = 0; i <= 7; i++) {
@@ -148,11 +195,13 @@ Future<int> _generateSlotsImmediatelyImpl({
     return 0;
   }
 
-  // ── 2. Dédup : créneaux déjà présents pour chaque jour, EN PARALLÈLE ─
+  // ── 2. Créneaux déjà présents pour chaque jour, EN PARALLÈLE ────────
   //   create  → cache (une plage neuve n'a rien ; le cache suffit et évite
   //             ~6 allers-retours réseau).
   //   refresh → serveur (le cache peut être froid/périmé après une
   //             suppression — c'est ce qui causait des doublons).
+  // Servent à la fois à l'anti-doublon (heures de début), au repérage des
+  // jours bloqués et au calcul des espaces libres (anti-chevauchement).
   final dedupSource =
       mode == SlotGenMode.create ? Source.cache : Source.serverAndCache;
 
@@ -164,17 +213,23 @@ Future<int> _generateSlotsImmediatelyImpl({
             .where('start', isGreaterThanOrEqualTo: date)
             .where('start', isLessThan: endOfDay)
             .get(GetOptions(source: dedupSource));
-        return MapEntry(
-          date,
-          snap.docs
-              .map((d) => (d.data()['start'] as Timestamp).toDate())
-              .toSet(),
-        );
+        final starts = <DateTime>{};
+        final lites = <SlotLite>[];
+        for (final d in snap.docs) {
+          final data = d.data();
+          starts.add((data['start'] as Timestamp).toDate());
+          final lite = slotLiteFromData(data);
+          if (lite != null) lites.add(lite);
+        }
+        return MapEntry(date, (starts: starts, slots: lites));
       } catch (_) {
         if (mode == SlotGenMode.create) {
           // Cache froid/vide → on considère « rien » : aucun risque de
           // doublon sur une plage qu'on vient de créer.
-          return MapEntry(date, <DateTime>{});
+          return MapEntry(
+            date,
+            (starts: <DateTime>{}, slots: <SlotLite>[]),
+          );
         }
         // refresh : on préfère échouer proprement (l'appelant réessaie)
         // que risquer un doublon.
@@ -183,6 +238,7 @@ Future<int> _generateSlotsImmediatelyImpl({
     }),
   );
   final existingByDate = {for (final e in dedupResults) e.key: e.value};
+  final now = DateTime.now();
 
   // ── 3. Construire les créneaux + accumuler le delta de stats par jour ─
   WriteBatch batch = firestore.batch();
@@ -191,7 +247,16 @@ Future<int> _generateSlotsImmediatelyImpl({
   final dayDelta = <DateTime, ({int slots, int capacity})>{};
 
   for (final date in workDates) {
-    final existing = existingByDate[date] ?? <DateTime>{};
+    final existingDay = existingByDate[date];
+    final existing = existingDay?.starts ?? <DateTime>{};
+    final existingSlots = existingDay?.slots ?? const <SlotLite>[];
+
+    // Jour où la plage est bloquée (incident en cours) : on n'y touche pas,
+    // même si ses horaires ont été allongés. La modif s'appliquera au
+    // prochain jour non bloqué.
+    if (activeBlockedDays(existingSlots, timeSlotId, now).contains(date)) {
+      continue;
+    }
 
     final plageStart = DateTime(
       date.year,
@@ -210,45 +275,58 @@ Future<int> _generateSlotsImmediatelyImpl({
             int.parse(endParts[1]),
           );
 
-    DateTime cursor = plageStart;
-
-    // Aujourd'hui : sauter les créneaux déjà commencés.
-    if (date == todayMidnight) {
-      final now = DateTime.now();
-      while (cursor.isBefore(now) &&
-          cursor.add(Duration(minutes: duration)).compareTo(plageEnd) <= 0) {
-        cursor = cursor.add(Duration(minutes: duration));
-      }
-    }
+    // Espaces libres de la plage : tout créneau déjà présent dans ses
+    // horaires (réservé, bloqué, ou laissé par une modif du jour) est du
+    // temps occupé — on ne remplit qu'autour, jamais par-dessus. Sans
+    // créneau existant, l'espace libre est la plage entière (comportement
+    // inchangé).
+    final spans = freeIntervals(
+      existingSlots.map((s) => (start: s.start, end: s.end)),
+      plageStart,
+      plageEnd,
+    );
 
     int daySlots = 0;
     int dayCap = 0;
-    while (cursor.add(Duration(minutes: duration)).compareTo(plageEnd) <= 0) {
-      final slotEnd = cursor.add(Duration(minutes: duration));
-      if (!existing.contains(cursor)) {
-        batch.set(slotsRef.doc(), {
-          'start': cursor,
-          'end': slotEnd,
-          'capacity': capacity,
-          'reserved': 0,
-          'cancelled': 0,
-          'status': 'open',
-          'duration': duration,
-          'isLegacy': false,
-          'timeSlotId': timeSlotId,
-          'reservationDeadlineMinutes': reservationDeadlineMinutes,
-        });
-        batchCount++;
-        created++;
-        daySlots++;
-        dayCap += capacity;
-        if (batchCount >= 400) {
-          await batch.commit();
-          batch = firestore.batch();
-          batchCount = 0;
+    for (final span in spans) {
+      DateTime cursor = span.start;
+
+      // Aujourd'hui : sauter les créneaux déjà commencés.
+      if (date == todayMidnight) {
+        while (cursor.isBefore(now) &&
+            cursor.add(Duration(minutes: duration)).compareTo(span.end) <= 0) {
+          cursor = cursor.add(Duration(minutes: duration));
         }
       }
-      cursor = slotEnd;
+
+      while (cursor.add(Duration(minutes: duration)).compareTo(span.end) <= 0) {
+        final slotEnd = cursor.add(Duration(minutes: duration));
+        // Dernier garde-fou : jamais deux créneaux à la même heure.
+        if (!existing.contains(cursor)) {
+          batch.set(slotsRef.doc(), {
+            'start': cursor,
+            'end': slotEnd,
+            'capacity': capacity,
+            'reserved': 0,
+            'cancelled': 0,
+            'status': 'open',
+            'duration': duration,
+            'isLegacy': false,
+            'timeSlotId': timeSlotId,
+            'reservationDeadlineMinutes': reservationDeadlineMinutes,
+          });
+          batchCount++;
+          created++;
+          daySlots++;
+          dayCap += capacity;
+          if (batchCount >= 400) {
+            await batch.commit();
+            batch = firestore.batch();
+            batchCount = 0;
+          }
+        }
+        cursor = slotEnd;
+      }
     }
     if (daySlots > 0) {
       dayDelta[date] = (slots: daySlots, capacity: dayCap);

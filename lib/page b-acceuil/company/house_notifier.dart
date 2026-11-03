@@ -11,7 +11,6 @@ class _PendingRevert {
   final DateTime plageStart;
   final DateTime plageEnd;
   final int previousDuration;
-  final ModificationType type;
   final DateTime originalSelectedDate;
   final DateTime anchorNow;
   final DateTime expiresAt;
@@ -23,7 +22,6 @@ class _PendingRevert {
     required this.plageStart,
     required this.plageEnd,
     required this.previousDuration,
-    required this.type,
     required this.originalSelectedDate,
     required this.anchorNow,
     required this.expiresAt,
@@ -184,17 +182,11 @@ class _HouseNotifier extends ChangeNotifier {
       final idx = _queues.indexWhere((q) => q != null && q.id == queueId);
       if (idx != -1) {
         final q = _queues[idx]!;
-        _queues[idx] = _QueueAgenda(
-          id: q.id,
-          name: q.name,
-          slots: [...q.slots, ...page.slots],
-          isBlocked: q.isBlocked,
-          blockReason: q.blockReason,
-          stats: q.stats,
-          weekdays: q.weekdays,
-          timeSlotCount: q.timeSlotCount,
-          closureStart: q.closureStart,
-          closureEnd: q.closureEnd,
+        // Jour passé (pagination) : stats issues de dailyStats, conservées.
+        _queues[idx] = q.rebuiltAt(
+          DateTime.now(),
+          newSlots: [...q.slots, ...page.slots],
+          newStats: q.stats,
         );
       }
     } catch (e) {
@@ -263,11 +255,23 @@ class _HouseNotifier extends ChangeNotifier {
           .orderBy('start')
           .get();
 
-      final docs = timeSlotId != null
-          ? snap.docs
-                .where((d) => d.data()['timeSlotId'] == timeSlotId)
-                .toList()
-          : snap.docs;
+      // Seuls les créneaux pas encore terminés sont bloqués : un créneau
+      // passé a déjà eu lieu (ses clients ont été servis) — le suspendre
+      // ferait croire à ces clients que leur réservation est annulée. Un
+      // créneau déjà bloqué est laissé tel quel (raison d'origine gardée).
+      final now = DateTime.now();
+      final docs = snap.docs.where((d) {
+        final data = d.data();
+        if (timeSlotId != null && data['timeSlotId'] != timeSlotId) {
+          return false;
+        }
+        if (data['status'] == 'blocked') return false;
+        final end = (data['end'] as Timestamp?)?.toDate();
+        return end != null && end.isAfter(now);
+      }).toList();
+      if (docs.isEmpty) {
+        return 'Aucun créneau à venir à bloquer sur cette plage.';
+      }
 
       // La raison part telle quelle dans une notification client.
       final trimmed = reason.trim();
@@ -643,7 +647,10 @@ class _HouseNotifier extends ChangeNotifier {
         .doc(queueId)
         .collection('timeSlots')
         .get();
-    return snap.docs.map((doc) {
+    // Ordre horaire de la journée (Firestore les rend dans l'ordre de leurs
+    // identifiants, c.-à-d. au hasard) : sélecteur de modif et feuille de
+    // blocage affichent ainsi les plages dans l'ordre où elles se suivent.
+    final infos = snap.docs.map((doc) {
       final d = doc.data();
       return _TimeSlotInfo(
         id: doc.id,
@@ -659,7 +666,8 @@ class _HouseNotifier extends ChangeNotifier {
             (d['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0,
         deleteAfter: (d['deleteAfter'] as Timestamp?)?.toDate(),
       );
-    }).toList();
+    });
+    return sortedByPlageStart(infos, (ts) => ts.startTime);
   }
 
   // ── Modification de durée — algorithme timeline ───────────────────────────
@@ -669,7 +677,6 @@ class _HouseNotifier extends ChangeNotifier {
     required DateTime plageStart,
     required DateTime plageEnd,
     required int newDuration,
-    required ModificationType type,
     bool isRevertAction = false,
     DateTime? anchorNow,
   }) async {
@@ -696,77 +703,9 @@ class _HouseNotifier extends ChangeNotifier {
     // l'instant présent pour une édition normale.
     final effectiveNow = anchorNow ?? DateTime.now();
     try {
-      // ── Mode PERMANENTE : delete-empty + regenerate + update-params ──────
-      if (type == ModificationType.permanente) {
-        await _db
-            .collection('companies')
-            .doc(_companyId)
-            .collection('queues')
-            .doc(queue.id)
-            .collection('timeSlots')
-            .doc(tsInfo.id)
-            .update({
-              'serviceDurationMinutes': newDuration,
-              'updatedAt': FieldValue.serverTimestamp(),
-            });
-
-        await _agenda.deleteEmptyFutureSlotsForTimeSlot(
-          tsInfo.id,
-          queue.id,
-          companyId: _companyId,
-        );
-        final effectiveWorkingDays = tsInfo.workingDays.isNotEmpty
-            ? tsInfo.workingDays
-            : queue.weekdays.isNotEmpty
-            ? queue.weekdays
-            : List.generate(7, (i) => i + 1);
-        final created = await _agenda.generateSlotsImmediately(
-          queueId: queue.id,
-          timeSlotId: tsInfo.id,
-          startTimeStr: tsInfo.startTime,
-          endTimeStr: tsInfo.endTime,
-          duration: newDuration,
-          capacity: tsInfo.capacity > 0
-              ? tsInfo.capacity
-              : currentCapacity(queue),
-          workingDays: effectiveWorkingDays,
-          maxAdvanceDays: tsInfo.maxAdvanceDays,
-          reservationDeadlineMinutes: tsInfo.reservationDeadlineMinutes,
-          companyId: _companyId,
-          anchorNow: effectiveNow,
-        );
-        await _agenda.updateSlotParameters(
-          timeSlotId: tsInfo.id,
-          queueId: queue.id,
-          capacity: tsInfo.capacity > 0
-              ? tsInfo.capacity
-              : currentCapacity(queue),
-          duration: newDuration,
-          reservationDeadlineMinutes: tsInfo.reservationDeadlineMinutes,
-          maxAdvanceDays: tsInfo.maxAdvanceDays,
-          companyId: _companyId,
-        );
-        if (!isRevertAction) {
-          _registerPendingRevert(
-            timeSlotId: tsInfo.id,
-            queueId: queue.id,
-            tsInfo: tsInfo,
-            plageStart: plageStart,
-            plageEnd: plageEnd,
-            previousDuration: tsInfo.duration,
-            type: type,
-            anchorNow: effectiveNow,
-          );
-        }
-        return ModificationResult(
-          success: true,
-          message:
-              'Durée mise à jour à $newDuration min ✅  ·  $created créneaux régénérés',
-          slotsAffected: created,
-        );
-      }
-
-      // ── Mode PONCTUEL : free-spans approach ─────────────────────────────
+      // ── Modif DU JOUR uniquement (free-spans) ───────────────────────────
+      // L'accueil ne modifie que le jour affiché : la plage elle-même (ses
+      // valeurs habituelles) ne change que depuis la page des plages.
       final dayStart = DateTime(
         _selectedDate.year,
         _selectedDate.month,
@@ -817,13 +756,23 @@ class _HouseNotifier extends ChangeNotifier {
               .toList()
             ..sort((a, b) => a.start.compareTo(b.start));
 
+      // Plage bloquée ce jour-là (incident en cours) : aucune modif. Sans ce
+      // garde-fou, ses créneaux vides bloqués seraient supprimés puis
+      // recréés « ouverts » — la plage serait débloquée en silence.
+      if (allSlots.any((s) => s.isBlocked && s.end.isAfter(DateTime.now()))) {
+        return const ModificationResult(
+          success: false,
+          message:
+              'Cette plage est bloquée aujourd\'hui — débloquez-la d\'abord pour la modifier.',
+        );
+      }
+
       final emptySlotIds = allSlots
           .where((s) => s.reserved == 0)
           .map((s) => s.id)
           .toList();
 
-      // Espaces libres = [plageStart, plageEnd] minus les créneaux réservés
-      // (même calcul que le mode permanent — une seule logique partagée).
+      // Espaces libres = [plageStart, plageEnd] minus les créneaux réservés.
       final freeSpans = _agenda.freeSpans(allSlots, plageStart, plageEnd);
 
       final batch = _db.batch();
@@ -843,9 +792,11 @@ class _HouseNotifier extends ChangeNotifier {
       // On ne crée jamais de créneaux dans le passé (cas création de plage le jour J)
       int createdCount = 0;
       final roundedNow = _agenda.roundUpToNext5Minutes(effectiveNow);
-      final slotCapacity = tsInfo.capacity > 0
-          ? tsInfo.capacity
-          : currentCapacity(queue);
+      // Capacité DU JOUR (une modif de capacité du jour ne doit pas être
+      // perdue quand on change ensuite la durée).
+      final slotCapacity = tsInfo.effectiveCapacity > 0
+          ? tsInfo.effectiveCapacity
+          : 1;
       for (final span in freeSpans) {
         var t = span.start.isBefore(effectiveNow) ? roundedNow : span.start;
         while (true) {
@@ -872,16 +823,27 @@ class _HouseNotifier extends ChangeNotifier {
         }
       }
 
-      // Recalculer dailyStats pour que "disponible" soit correct après refresh
-      final reservedSlots = allSlots.where((s) => s.reserved > 0).toList();
-      final int totalReservedPeople = reservedSlots.fold(
+      // Recalculer dailyStats pour que "disponible" soit correct après
+      // refresh. Le résumé couvre TOUTE la file ce jour-là : les créneaux
+      // des autres plages comptent aussi (avant, seuls ceux de la plage
+      // modifiée étaient comptés et le reste était effacé).
+      final keptSlots = [
+        ...slotsSnap.docs
+            .where(
+              (doc) =>
+                  (doc.data() as Map<String, dynamic>)['timeSlotId'] !=
+                  tsInfo.id,
+            )
+            .map((doc) => _agenda.slotFromDoc(doc, queueId: queue.id)),
+        ...allSlots.where((s) => s.reserved > 0),
+      ];
+      final int keptCapacity = keptSlots.fold(0, (acc, s) => acc + s.capacity);
+      final int keptReserved = keptSlots.fold(0, (acc, s) => acc + s.reserved);
+      final int keptCancelled = keptSlots.fold(
         0,
-        (acc, s) => acc + s.reserved,
+        (acc, s) => acc + s.cancelled,
       );
-      final int reservedCapacityRemaining = reservedSlots.fold(
-        0,
-        (acc, s) => acc + (s.capacity - s.reserved),
-      );
+      final int totalCapacity = keptCapacity + createdCount * slotCapacity;
       final dateStr =
           '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
       batch.set(
@@ -893,24 +855,28 @@ class _HouseNotifier extends ChangeNotifier {
             .collection('dailyStats')
             .doc(dateStr),
         {
-          'available': reservedCapacityRemaining + createdCount * slotCapacity,
-          'reserved': totalReservedPeople,
-          'cancelled': 0,
-          'totalSlots': reservedSlots.length + createdCount,
+          'date': dateStr,
+          'totalCapacity': totalCapacity,
+          'available': totalCapacity - keptReserved,
+          'reserved': keptReserved,
+          'cancelled': keptCancelled,
+          'totalSlots': keptSlots.length + createdCount,
           'updatedAt': FieldValue.serverTimestamp(),
         },
+        SetOptions(merge: true),
       );
 
       await batch.commit();
       if (!isRevertAction) {
+        // L'annulation (5 min) revient à la durée DU JOUR d'avant la modif,
+        // pas à la durée habituelle de la plage.
         _registerPendingRevert(
           timeSlotId: tsInfo.id,
           queueId: queue.id,
           tsInfo: tsInfo,
           plageStart: plageStart,
           plageEnd: plageEnd,
-          previousDuration: tsInfo.duration,
-          type: type,
+          previousDuration: tsInfo.effectiveDuration,
           anchorNow: effectiveNow,
         );
       }
@@ -934,7 +900,6 @@ class _HouseNotifier extends ChangeNotifier {
     required DateTime plageStart,
     required DateTime plageEnd,
     required int previousDuration,
-    required ModificationType type,
     required DateTime anchorNow,
   }) {
     _pendingReverts.remove(timeSlotId)?.expiryTimer?.cancel();
@@ -944,7 +909,6 @@ class _HouseNotifier extends ChangeNotifier {
       plageStart: plageStart,
       plageEnd: plageEnd,
       previousDuration: previousDuration,
-      type: type,
       originalSelectedDate: DateTime(
         _selectedDate.year,
         _selectedDate.month,
@@ -998,28 +962,24 @@ class _HouseNotifier extends ChangeNotifier {
       }
     }
 
-    // Une révocation "ponctuelle" dépend du jour actuellement affiché (la
-    // branche ponctuelle de applyDurationChange lit _selectedDate en
-    // interne, pas un paramètre) — refuser si le jour affiché a changé
-    // depuis la modification d'origine, pour éviter un décalage entre la
-    // plage stockée et le jour réellement interrogé.
-    if (entry.type == ModificationType.ponctuelle) {
-      final today = DateTime(
-        _selectedDate.year,
-        _selectedDate.month,
-        _selectedDate.day,
+    // La révocation dépend du jour actuellement affiché (applyDurationChange
+    // lit _selectedDate en interne, pas un paramètre) — refuser si le jour
+    // affiché a changé depuis la modification d'origine, pour éviter un
+    // décalage entre la plage stockée et le jour réellement interrogé.
+    final shownDay = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+    );
+    if (shownDay != entry.originalSelectedDate) {
+      final label = DateFormat(
+        'dd/MM/yyyy',
+        'fr_FR',
+      ).format(entry.originalSelectedDate);
+      return ModificationResult(
+        success: false,
+        message: 'Retournez au $label pour annuler cette modification.',
       );
-      if (today != entry.originalSelectedDate) {
-        final label = DateFormat(
-          'dd/MM/yyyy',
-          'fr_FR',
-        ).format(entry.originalSelectedDate);
-        return ModificationResult(
-          success: false,
-          message:
-              'Retournez au $label pour annuler cette modification ponctuelle.',
-        );
-      }
     }
 
     final queue = _queues.firstWhere(
@@ -1039,7 +999,6 @@ class _HouseNotifier extends ChangeNotifier {
       plageStart: entry.plageStart,
       plageEnd: entry.plageEnd,
       newDuration: entry.previousDuration,
-      type: entry.type,
       isRevertAction: true,
       anchorNow: entry.anchorNow,
     );
@@ -1080,19 +1039,66 @@ class _HouseNotifier extends ChangeNotifier {
     } catch (_) {}
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
-  int currentDuration(_QueueAgenda q) {
-    final nl = q.slots.where((s) => !s.isLegacy).toList();
-    return nl.isNotEmpty
-        ? nl.first.duration
-        : (q.slots.isNotEmpty ? q.slots.first.duration : 15);
+  // ── Valeurs réelles du jour affiché ───────────────────────────────────────
+  // Lues sur les créneaux déjà chargés (aucune requête) : après une modif du
+  // jour faite depuis l'accueil, elles diffèrent des valeurs habituelles de
+  // la plage — c'est d'elles que partent les boutons +/−.
+  //  • durée : la plus fréquente parmi les créneaux à venir, ouverts et
+  //    SANS réservation (les seuls qu'une modif de durée recalcule ; les
+  //    réservés gardent volontairement leur ancienne durée) — à défaut,
+  //    parmi les créneaux à venir ouverts ;
+  //  • capacité : la plus fréquente parmi les créneaux à venir ouverts.
+  // La durée est lue sur les heures réelles (fin − début), pas sur le champ
+  // `duration` du créneau, qui peut ne pas refléter sa vraie longueur.
+  ({int? duration, int? capacity, bool hasFreeSlot}) dayValuesFor(
+    _QueueAgenda q,
+    String timeSlotId,
+  ) {
+    final now = DateTime.now();
+    final upcomingOpen = q.slots
+        .where(
+          (s) =>
+              s.timeSlotId == timeSlotId && !s.isBlocked && s.end.isAfter(now),
+        )
+        .toList();
+    final free = upcomingOpen.where((s) => s.reserved == 0).toList();
+    int minutes(AgendaSlot s) => s.end.difference(s.start).inMinutes;
+    return (
+      duration:
+          mostFrequent(free.map(minutes)) ??
+          mostFrequent(upcomingOpen.map(minutes)),
+      capacity: mostFrequent(upcomingOpen.map((s) => s.capacity)),
+      hasFreeSlot: free.isNotEmpty,
+    );
   }
 
-  int currentCapacity(_QueueAgenda q) {
-    final nl = q.slots.where((s) => !s.isLegacy).toList();
-    return nl.isNotEmpty
-        ? nl.first.capacity
-        : (q.slots.isNotEmpty ? q.slots.first.capacity : 1);
+  /// Plage enrichie de ses valeurs du jour (voir [dayValuesFor]).
+  _TimeSlotInfo withDayValues(_QueueAgenda q, _TimeSlotInfo ts) {
+    final v = dayValuesFor(q, ts.id);
+    return ts.withDayValues(
+      dayDuration: v.duration,
+      dayCapacity: v.capacity,
+      hasFreeSlot: v.hasFreeSlot,
+    );
+  }
+
+  // File à une seule plage : valeur affichée directement sur la carte —
+  // même calcul que le sélecteur, pour qu'ils soient toujours d'accord.
+  String? _singlePlageId(_QueueAgenda q) {
+    for (final s in q.slots) {
+      if (s.timeSlotId.isNotEmpty) return s.timeSlotId;
+    }
+    return null;
+  }
+
+  int? currentDuration(_QueueAgenda q) {
+    final id = _singlePlageId(q);
+    return id == null ? null : dayValuesFor(q, id).duration;
+  }
+
+  int? currentCapacity(_QueueAgenda q) {
+    final id = _singlePlageId(q);
+    return id == null ? null : dayValuesFor(q, id).capacity;
   }
 
   /// Trace de révocation active pour ce timeSlot (null si aucune ou expirée).
@@ -1416,8 +1422,6 @@ class _HouseNotifier extends ChangeNotifier {
 
             final List<AgendaSlot> allSlots;
             final QueueStats stats;
-            final bool isBlocked;
-            final String? blockReason;
 
             if (isPastDate) {
               // ── Date déjà passée : ne change plus → pagination + dailyStats,
@@ -1450,10 +1454,6 @@ class _HouseNotifier extends ChangeNotifier {
               _isLoadingMore[qDoc.id] = false;
               allSlots = page.slots;
 
-              isBlocked =
-                  allSlots.isNotEmpty && allSlots.every((s) => s.isBlocked);
-              blockReason = isBlocked ? allSlots.first.blockReason : null;
-
               if (statsDoc.exists) {
                 final sd = statsDoc.data() as Map<String, dynamic>;
                 stats = QueueStats(
@@ -1466,7 +1466,7 @@ class _HouseNotifier extends ChangeNotifier {
                   // plus personne n'est "en attente" de son passage.
                   personnesEnAttente: 0,
                   totalCreneaux: sd['totalSlots'] as int? ?? 0,
-                  estBloquee: isBlocked,
+                  estBloquee: _blockStateOf(allSlots, now).isBlocked,
                 );
               } else {
                 stats = _agenda.computeStats(allSlots, now: now);
@@ -1507,26 +1507,23 @@ class _HouseNotifier extends ChangeNotifier {
                 ...?_pastSlotsCache[qDoc.id],
                 ...?_liveSlotsCache[qDoc.id],
               ];
-              isBlocked =
-                  allSlots.isNotEmpty && allSlots.every((s) => s.isBlocked);
-              blockReason = isBlocked ? allSlots.first.blockReason : null;
               stats = _agenda.computeStats(allSlots, now: now);
             }
 
             final timeSlotCount = await tsCountFuture;
 
+            // État de blocage (en cours / total / partiel) calculé dans
+            // rebuiltAt, à partir des créneaux et de l'heure.
             final queueData = _QueueAgenda(
               id: qDoc.id,
               name: queueName,
               slots: allSlots,
-              isBlocked: isBlocked,
-              blockReason: blockReason,
               stats: stats,
               weekdays: weekdays,
               timeSlotCount: timeSlotCount,
               closureStart: (qData['closureStart'] as Timestamp?)?.toDate(),
               closureEnd: (qData['closureEnd'] as Timestamp?)?.toDate(),
-            );
+            ).rebuiltAt(now, newStats: stats);
 
             if (silent) {
               newQueues[index] = queueData;
@@ -1684,21 +1681,8 @@ class _HouseNotifier extends ChangeNotifier {
       ...?_pastSlotsCache[queueId],
       ...?_liveSlotsCache[queueId],
     ];
-    final isBlocked = allSlots.isNotEmpty && allSlots.every((s) => s.isBlocked);
-    final blockReason = isBlocked ? allSlots.first.blockReason : null;
 
-    _queues[idx] = _QueueAgenda(
-      id: old.id,
-      name: old.name,
-      slots: allSlots,
-      isBlocked: isBlocked,
-      blockReason: blockReason,
-      stats: _agenda.computeStats(allSlots, now: DateTime.now()),
-      weekdays: old.weekdays,
-      timeSlotCount: old.timeSlotCount,
-      closureStart: old.closureStart,
-      closureEnd: old.closureEnd,
-    );
+    _queues[idx] = old.rebuiltAt(DateTime.now(), newSlots: allSlots);
     _notify();
   }
 
@@ -1730,17 +1714,10 @@ class _HouseNotifier extends ChangeNotifier {
         if (idx == -1) return;
         final old = _queues[idx]!;
         if (old.timeSlotCount == count) return;
-        _queues[idx] = _QueueAgenda(
-          id: old.id,
-          name: old.name,
-          slots: old.slots,
-          isBlocked: old.isBlocked,
-          blockReason: old.blockReason,
-          stats: old.stats,
-          weekdays: old.weekdays,
-          timeSlotCount: count,
-          closureStart: old.closureStart,
-          closureEnd: old.closureEnd,
+        _queues[idx] = old.rebuiltAt(
+          DateTime.now(),
+          newStats: old.stats,
+          newTimeSlotCount: count,
         );
         _notify();
       },
@@ -1767,12 +1744,62 @@ class _HouseNotifier extends ChangeNotifier {
 
   // ── Utilitaire interne ────────────────────────────────────────────────────
   void _notify() {
-    if (!_disposed) notifyListeners();
+    if (_disposed) return;
+    _scheduleSlotEndTick();
+    notifyListeners();
+  }
+
+  // ── Minuteur « fin de créneau » (jour affiché = aujourd'hui) ─────────────
+  // L'état de blocage et la journée terminée dépendent de l'heure : quand un
+  // créneau se termine, sans aucun changement en base, la carte doit quand
+  // même passer de « Débloquer » à « Bloquer » (fin de la plage bloquée) ou
+  // masquer ses boutons (journée terminée). Un seul minuteur, réglé sur la
+  // prochaine fin de créneau, recalcule toutes les files en mémoire.
+  Timer? _slotEndTick;
+  DateTime? _slotEndTickAt;
+
+  void _scheduleSlotEndTick() {
+    final now = DateTime.now();
+    DateTime? next;
+    if (plageDayOf(_selectedDate) == plageDayOf(now)) {
+      for (final q in _queues) {
+        if (q == null) continue;
+        for (final s in q.slots) {
+          if (s.end.isAfter(now) && (next == null || s.end.isBefore(next))) {
+            next = s.end;
+          }
+        }
+      }
+    }
+    if (next == _slotEndTickAt && _slotEndTick != null) return;
+    _slotEndTick?.cancel();
+    _slotEndTick = null;
+    _slotEndTickAt = next;
+    if (next == null) return;
+    _slotEndTick = Timer(
+      next.difference(now) + const Duration(seconds: 1),
+      _onSlotEndTick,
+    );
+  }
+
+  void _onSlotEndTick() {
+    _slotEndTick = null;
+    _slotEndTickAt = null;
+    if (_disposed) return;
+    // Un rechargement en cours repartira lui-même de l'heure à jour.
+    if (_isRefreshing) {
+      _scheduleSlotEndTick();
+      return;
+    }
+    final now = DateTime.now();
+    _queues = [for (final q in _queues) q?.rebuiltAt(now)];
+    _notify();
   }
 
   @override
   void dispose() {
     _disposed = true;
+    _slotEndTick?.cancel();
     _sub?.cancel();
     _staffStatusSub?.cancel();
     for (final sub in _liveSlotSubs.values) {

@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/booking_constants.dart';
+import 'package:baxa/services/plage_rules.dart';
 import 'package:baxa/services/slot_generation_service.dart';
 import 'package:baxa/services/onboarding_service.dart';
 import 'package:baxa/widgets/onboarding_widgets.dart';

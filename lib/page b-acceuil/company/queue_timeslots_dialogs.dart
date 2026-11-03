@@ -94,6 +94,10 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       }
     }
 
+    // Jours bloqués de la plage : la modif ne s'y applique pas, leurs
+    // réservations (suspendues) ne sont donc jamais en conflit.
+    final blockedDays = _activeBlockedDaysIn(snap.docs, timeSlotId);
+
     final conflicting = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
     DateTime? furthestReservedStart;
     for (final doc in snap.docs) {
@@ -101,6 +105,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       if (data['timeSlotId'] != timeSlotId) continue;
       final reserved = data['reserved'] as int? ?? 0;
       if (reserved == 0) continue;
+      if (_onBlockedDay(data, blockedDays)) continue;
 
       final slotStart = (data['start'] as Timestamp).toDate();
       if (furthestReservedStart == null ||
