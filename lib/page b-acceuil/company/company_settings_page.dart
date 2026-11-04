@@ -2534,10 +2534,17 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     } on FirebaseAuthException catch (e) {
       String message = 'Erreur lors du changement de mot de passe';
 
-      if (e.code == 'wrong-password') {
+      // Avec la protection contre l'énumération d'e-mails, Firebase renvoie
+      // `invalid-credential` (et non plus `wrong-password`) pour un mauvais
+      // mot de passe : les deux codes veulent dire la même chose ici.
+      if (e.code == 'wrong-password' || e.code == 'invalid-credential') {
         message = 'Ancien mot de passe incorrect';
       } else if (e.code == 'weak-password') {
         message = 'Le nouveau mot de passe est trop faible';
+      } else if (e.code == 'too-many-requests') {
+        message = 'Trop de tentatives. Réessayez dans quelques minutes.';
+      } else if (e.code == 'network-request-failed') {
+        message = 'Vérifiez votre connexion internet.';
       }
 
       if (mounted) {

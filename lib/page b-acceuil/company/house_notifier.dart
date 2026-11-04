@@ -1749,35 +1749,40 @@ class _HouseNotifier extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ── Minuteur « fin de créneau » (jour affiché = aujourd'hui) ─────────────
-  // L'état de blocage et la journée terminée dépendent de l'heure : quand un
-  // créneau se termine, sans aucun changement en base, la carte doit quand
-  // même passer de « Débloquer » à « Bloquer » (fin de la plage bloquée) ou
-  // masquer ses boutons (journée terminée). Un seul minuteur, réglé sur la
-  // prochaine fin de créneau, recalcule toutes les files en mémoire.
+  // ── Minuteur « début / fin de créneau » (jour affiché = aujourd'hui) ─────
+  // Plusieurs affichages dépendent de l'heure, sans aucun changement en
+  // base : à la FIN d'un créneau, la carte passe de « Débloquer » à
+  // « Bloquer » (fin de la plage bloquée) ou masque ses boutons (journée
+  // terminée) ; au DÉBUT d'un créneau, le bouton « + » se masque s'il n'en
+  // reste plus aucun où inscrire quelqu'un. Un seul minuteur, réglé sur le
+  // prochain de ces instants, recalcule toutes les files en mémoire.
   Timer? _slotEndTick;
   DateTime? _slotEndTickAt;
 
   void _scheduleSlotEndTick() {
     final now = DateTime.now();
     DateTime? next;
+    void consider(DateTime t) {
+      if (t.isAfter(now) && (next == null || t.isBefore(next!))) next = t;
+    }
+
     if (plageDayOf(_selectedDate) == plageDayOf(now)) {
       for (final q in _queues) {
         if (q == null) continue;
         for (final s in q.slots) {
-          if (s.end.isAfter(now) && (next == null || s.end.isBefore(next))) {
-            next = s.end;
-          }
+          consider(s.start);
+          consider(s.end);
         }
       }
     }
-    if (next == _slotEndTickAt && _slotEndTick != null) return;
+    final at = next;
+    if (at == _slotEndTickAt && _slotEndTick != null) return;
     _slotEndTick?.cancel();
     _slotEndTick = null;
-    _slotEndTickAt = next;
-    if (next == null) return;
+    _slotEndTickAt = at;
+    if (at == null) return;
     _slotEndTick = Timer(
-      next.difference(now) + const Duration(seconds: 1),
+      at.difference(now) + const Duration(seconds: 1),
       _onSlotEndTick,
     );
   }

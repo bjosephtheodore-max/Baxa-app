@@ -1,4 +1,5 @@
 import 'package:baxa/page%20b-acceuil/company/company_page.dart';
+import 'package:baxa/page%20b-acceuil/company/password_reset_page.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
@@ -128,6 +129,23 @@ class SigninPageState extends State<SigninPage> {
         _errorCode = null;
       });
     }
+  }
+
+  // Mot de passe oublié : l'e-mail déjà saisi est repris, et celui utilisé
+  // sur l'écran de réinitialisation revient pré-remplir la connexion.
+  Future<void> _openPasswordReset() async {
+    FocusScope.of(context).unfocus();
+    _clearError();
+    final email = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CompanyPasswordResetPage(
+          initialEmail: _emailController.text.trim(),
+        ),
+      ),
+    );
+    if (!mounted || email == null || email.isEmpty) return;
+    _emailController.text = email;
   }
 
   void _toggleMode() {
@@ -499,7 +517,30 @@ class SigninPageState extends State<SigninPage> {
                             if (!_isLoginMode) ...[
                               const SizedBox(height: 8),
                               _PasswordRule(controller: _passwordController),
-                            ],
+                            ] else
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton(
+                                  key: const ValueKey(
+                                    'company-signin-forgot-password',
+                                  ),
+                                  onPressed: _openPasswordReset,
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: _greenText,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                      vertical: 12,
+                                    ),
+                                  ),
+                                  child: const Text(
+                                    'Mot de passe oublié ?',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
                       ),

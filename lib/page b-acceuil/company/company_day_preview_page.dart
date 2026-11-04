@@ -221,7 +221,7 @@ class _CompanyDayPreviewPageState extends State<CompanyDayPreviewPage> {
                     ),
                   ),
                   child: const Text(
-                    'Créer mon compte',
+                    'C\'est parti !',
                     style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
                   ),
                 ),

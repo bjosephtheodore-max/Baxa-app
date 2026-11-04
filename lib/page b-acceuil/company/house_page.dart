@@ -256,6 +256,44 @@ class _HousePageState extends State<HousePage>
     );
   }
 
+  // ── Bouton « + » : règle unique d'affichage et d'appui ────
+  /// Créneaux de [queue] où l'on peut encore inscrire un client : non
+  /// bloqués et pas encore commencés (aujourd'hui), ou du jour affiché s'il
+  /// est futur. Les créneaux complets en font partie : une place peut se
+  /// libérer à tout moment (annulation).
+  Iterable<AgendaSlot> _upcomingOpenSlots(_QueueAgenda queue, DateTime now) {
+    final today = plageDayOf(now);
+    final selectedDay = plageDayOf(_n.selectedDate);
+    // Borne basse : "maintenant" seulement si on regarde aujourd'hui (ou un
+    // jour passé) — sinon le début du jour affiché.
+    final lowerBound = selectedDay.isAfter(today) ? selectedDay : now;
+    return queue.slots.where(
+      (s) => !s.isBlocked && s.start.isAfter(lowerBound),
+    );
+  }
+
+  /// Index de la file affichée dans le PageView (0 s'il n'y en a qu'une).
+  int _visibleQueueIndex() {
+    final count = _n.queues.length;
+    if (count <= 1 || !_pageControllerReady || !_pageController.hasClients) {
+      return 0;
+    }
+    return (_pageController.page ?? 0).round().clamp(0, count - 1);
+  }
+
+  /// Le « + » a-t-il une raison d'être sur la file affichée ? Non quand il
+  /// ne reste aucun créneau à venir et non bloqué : jour passé, journée
+  /// terminée, aucun créneau ce jour (jour non travaillé, fermeture), ou
+  /// tout ce qui reste est bloqué. File en cours de chargement : visible,
+  /// comme avant (évite un clignotement à chaque changement de date).
+  bool _quickAddUseful() {
+    final queues = _n.queues;
+    if (queues.isEmpty) return true;
+    final queue = queues[_visibleQueueIndex()];
+    if (queue == null) return true;
+    return _upcomingOpenSlots(queue, DateTime.now()).isNotEmpty;
+  }
+
   // Carte Bienvenue : aucune file, ou parcours guidé en cours (une file peut
   // déjà exister sans plage — reprise après avoir quitté l'app). Le parcours
   // ne concerne que l'admin, jamais un compte staff.
@@ -316,36 +354,44 @@ class _HousePageState extends State<HousePage>
                 ),
               ),
             ),
-      floatingActionButton: !showWelcome
-          ? AnimatedSlide(
-              duration: const Duration(milliseconds: 220),
-              curve: Curves.easeOutCubic,
-              offset: _fabVisible ? Offset.zero : const Offset(0, 1.4),
-              child: AnimatedScale(
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOutCubic,
-                scale: _fabVisible ? 1.0 : 0.4,
-                child: AnimatedOpacity(
-                  duration: const Duration(milliseconds: 160),
-                  opacity: _fabVisible ? 1.0 : 0.0,
-                  child: IgnorePointer(
-                    ignoring: !_fabVisible,
-                    child: FloatingActionButton(
-                      onPressed: _quickAddLoading ? null : _showQuickAddDialog,
-                      backgroundColor: _green,
-                      child: _quickAddLoading
-                          ? const SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(
-                                color: Colors.white,
-                                strokeWidth: 2.5,
-                              ),
-                            )
-                          : const Icon(Icons.add, color: Colors.white),
+      floatingActionButton: !showWelcome && _pageControllerReady
+          // Suit la file affichée (défilement entre files) en plus des
+          // données : se redessine à chaque changement de page.
+          ? AnimatedBuilder(
+              animation: _pageController,
+              builder: (context, child) {
+                // Deux raisons de se cacher, même animation : défilement
+                // vers le bas, ou plus aucun créneau où inscrire quelqu'un.
+                final show = _fabVisible && _quickAddUseful();
+                return AnimatedSlide(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  offset: show ? Offset.zero : const Offset(0, 1.4),
+                  child: AnimatedScale(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    scale: show ? 1.0 : 0.4,
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 160),
+                      opacity: show ? 1.0 : 0.0,
+                      child: IgnorePointer(ignoring: !show, child: child),
                     ),
                   ),
-                ),
+                );
+              },
+              child: FloatingActionButton(
+                onPressed: _quickAddLoading ? null : _showQuickAddDialog,
+                backgroundColor: _green,
+                child: _quickAddLoading
+                    ? const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2.5,
+                        ),
+                      )
+                    : const Icon(Icons.add, color: Colors.white),
               ),
             )
           : null,
@@ -1082,40 +1128,20 @@ class _HousePageState extends State<HousePage>
         parameters: {'widget_name': 'fab_ajouter_client'},
       ),
     );
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final selectedDay = DateTime(
-      _n.selectedDate.year,
-      _n.selectedDate.month,
-      _n.selectedDate.day,
-    );
-    // Borne basse : "maintenant" seulement si on regarde aujourd'hui
-    // (exclut les créneaux déjà passés) — sinon le début du jour affiché,
-    // pour ne jamais proposer un créneau d'un autre jour que celui-ci.
-    final lowerBound = selectedDay.isAfter(today) ? selectedDay : now;
-
     // 1. File actuellement affichée (page visible du PageView, ou l'unique
     // file s'il n'y en a qu'une) — le bouton + agit toujours sur ce que
-    // l'utilisateur a sous les yeux, jamais sur une autre file.
-    final queues = _n.queues.whereType<_QueueAgenda>().toList();
-    if (queues.isEmpty) return;
-    var currentIndex = 0;
-    if (queues.length > 1 && _pageController.hasClients) {
-      currentIndex = (_pageController.page ?? 0).round().clamp(
-        0,
-        queues.length - 1,
-      );
-    }
-    final bestQueue = queues[currentIndex];
+    // l'utilisateur a sous les yeux, jamais sur une autre file. Même index
+    // que celui qui décide d'afficher le bouton (_quickAddUseful).
+    if (_n.queues.isEmpty) return;
+    final bestQueue = _n.queues[_visibleQueueIndex()];
+    if (bestQueue == null) return; // file encore en chargement
 
-    final hasCandidate =
-        !bestQueue.isBlocked &&
-        bestQueue.slots.any(
-          (s) =>
-              !s.isBlocked &&
-              s.reserved < s.capacity &&
-              s.start.isAfter(lowerBound),
-        );
+    // Même règle que l'affichage du bouton (_upcomingOpenSlots), plus une
+    // place libre : si tout est complet, le message ci-dessous l'explique.
+    final hasCandidate = _upcomingOpenSlots(
+      bestQueue,
+      DateTime.now(),
+    ).any((s) => s.reserved < s.capacity);
 
     if (!hasCandidate) {
       if (mounted) {
