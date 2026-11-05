@@ -1,11 +1,13 @@
+import 'dart:async';
+
 import 'package:baxa/page%20b-acceuil/company/company_page.dart';
 import 'package:baxa/page%20b-acceuil/company/password_reset_page.dart';
+import 'package:baxa/services/company_account_service.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:baxa/services/time_zone_service.dart';
 
 // Palette de l'onboarding structure (company_onboarding_page.dart) : la page
@@ -22,6 +24,11 @@ const Color _fieldFill = Color(0xFFF6F8F6);
 const Color _iconIdle = Color(0xFF5B6660);
 const Color _errorRed = Color(0xFFD93A3A);
 const Color _errorText = Color(0xFF7B1111);
+
+// Compte valide mais sans espace structure (client, membre retiré…).
+const String _kNotACompanyMessage =
+    'Aucun espace structure n\'est associé à ce compte. Pour inscrire votre '
+    'structure, utilisez « S\'inscrire ».';
 
 class SigninPage extends StatefulWidget {
   final String? nomEntreprise;
@@ -69,6 +76,14 @@ class SigninPageState extends State<SigninPage> {
 
   bool get _emailInError =>
       _errorCode == 'email-already-in-use' || _errorCode == 'invalid-email';
+
+  @override
+  void initState() {
+    super.initState();
+    // Réveille la fonction serveur pendant la saisie : l'inscription ou la
+    // vérification du compte répond ensuite sans le délai du premier appel.
+    unawaited(CompanyAccountService.warmup());
+  }
 
   @override
   void dispose() {
@@ -158,6 +173,13 @@ class SigninPageState extends State<SigninPage> {
     });
   }
 
+  void _openCompanySpace() {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (context) => const CompanyPage()),
+    );
+  }
+
   // Méthode de connexion
   Future<void> _handleLogin() async {
     _clearError();
@@ -171,98 +193,131 @@ class SigninPageState extends State<SigninPage> {
         _passwordController.text.trim(),
       );
 
+      // Le mot de passe est bon, mais le compte est-il une structure ? Un
+      // compte client (ou un ancien compte Google à qui l'on a donné un mot
+      // de passe) ne doit jamais entrer dans l'espace structure.
+      final role = await CompanyAccountService.resolveRole();
+      if (role.role == CompanyRole.none) {
+        await Auth().logout();
+        _setError(_kNotACompanyMessage);
+        return;
+      }
+
       if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const CompanyPage()),
-      );
+      _openCompanySpace();
     } on FirebaseAuthException catch (e) {
       _setError(_friendlyError(e), code: e.code);
+    } on CompanyAccountException catch (e) {
+      // Rôle impossible à vérifier (réseau…) : pas de session à moitié
+      // ouverte sur l'appareil.
+      await Auth().logout();
+      _setError(e.message);
     } finally {
       if (mounted) setState(() => _isLoadingLogin = false);
     }
   }
 
   // Méthode d'inscription
+  //
+  // 1. Création de l'accès (e-mail + mot de passe).
+  // 2. Création de la structure CÔTÉ SERVEUR (companyAccount), qui vérifie
+  //    que le compte n'est ni client ni membre d'équipe et pose l'étiquette
+  //    « structure ». L'app n'écrit plus la fiche elle-même.
+  //
+  // Si l'étape 2 échoue (coupure réseau), l'accès existe déjà : un nouvel
+  // appui sur « Créer mon compte » retombe sur « adresse déjà utilisée »,
+  // se connecte avec le même mot de passe et termine simplement l'étape 2.
   Future<void> _handleSignup() async {
     _clearError();
     if (!mounted) return;
+    if (!_formkey.currentState!.validate()) return;
+
+    // Sans le formulaire de présentation (nom de la structure…), il n'y a
+    // rien à créer : on ne crée pas d'accès orphelin.
+    if (!_fromOnboarding) {
+      _setError(
+        'Présentez d\'abord votre structure : revenez à l\'écran précédent.',
+      );
+      return;
+    }
+
     setState(() => _isLoadingSignup = true);
+    final email = _emailController.text.trim();
+    final password = _passwordController.text.trim();
 
     try {
-      if (!_formkey.currentState!.validate()) {
-        setState(() => _isLoadingSignup = false);
-        return;
+      try {
+        await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: email,
+          password: password,
+        );
+      } on FirebaseAuthException catch (e) {
+        if (e.code != 'email-already-in-use') rethrow;
+        // Adresse déjà utilisée : inscription interrompue à reprendre, ou
+        // compte existant. Avec le bon mot de passe, on regarde lequel.
+        try {
+          await Auth().loginWithEmailAndPassword(email, password);
+        } on FirebaseAuthException {
+          throw e; // garde « Un compte existe déjà avec cette adresse »
+        }
+        final role = await CompanyAccountService.resolveRole();
+        if (role.role == CompanyRole.company) {
+          if (!mounted) return;
+          _openCompanySpace(); // déjà inscrite : on entre, tout simplement
+          return;
+        }
+        if (role.role == CompanyRole.staff) {
+          await Auth().logout();
+          _setError(
+            'Ce compte fait partie de l\'équipe d\'une structure. Utilisez '
+            'une autre adresse pour inscrire votre structure.',
+          );
+          return;
+        }
+        // Aucun espace : on termine l'inscription ci-dessous (le serveur
+        // refusera un compte client).
       }
 
-      UserCredential userCredential = await FirebaseAuth.instance
-          .createUserWithEmailAndPassword(
-            email: _emailController.text.trim(),
-            password: _passwordController.text.trim(),
-          );
+      // Fuseau du téléphone : jours et heures de la structure côté
+      // serveur (créneaux de nuit, résumé du matin, textes des notifs).
+      final timeZone = await TimeZoneService.deviceTimeZone();
+      await CompanyAccountService.createCompany({
+        'nom': widget.nomEntreprise,
+        if (widget.typeEntreprise != null) 'type': widget.typeEntreprise,
+        if (widget.typeCategorie != null) 'typeCategorie': widget.typeCategorie,
+        if (widget.ville != null) 'ville': widget.ville,
+        if (widget.country != null) 'country': widget.country,
+        if (widget.language != null) 'language': widget.language,
+        if (widget.locale != null) 'locale': widget.locale,
+        if (timeZone != null) 'timeZone': timeZone,
+      });
 
-      final uid = userCredential.user?.uid;
-      if (uid != null) {
-        final entrepriseData = {
-          "email": _emailController.text.trim(),
-          "createdAt": FieldValue.serverTimestamp(),
-        };
-
-        if (widget.nomEntreprise != null) {
-          entrepriseData["nom"] = widget.nomEntreprise!;
-        }
-        if (widget.typeEntreprise != null) {
-          entrepriseData["type"] = widget.typeEntreprise!;
-        }
-        if (widget.typeCategorie != null) {
-          entrepriseData["typeCategorie"] = widget.typeCategorie!;
-        }
-        if (widget.ville != null) {
-          entrepriseData["ville"] = widget.ville!;
-        }
-        if (widget.country != null) {
-          entrepriseData["country"] = widget.country!;
-        }
-        if (widget.language != null) {
-          entrepriseData["language"] = widget.language!;
-        }
-        if (widget.locale != null) {
-          entrepriseData["locale"] = widget.locale!;
-        }
-        // Fuseau du téléphone : jours et heures de la structure côté
-        // serveur (créneaux de nuit, résumé du matin, textes des notifs).
-        final timeZone = await TimeZoneService.deviceTimeZone();
-        if (timeZone != null) {
-          entrepriseData["timeZone"] = timeZone;
-        }
-
-        await FirebaseFirestore.instance
-            .collection("companies")
-            .doc(uid)
-            .set(entrepriseData, SetOptions(merge: true));
-
-        // On envoie toujours `typeCategorie` (jamais `type`) : c'est le
-        // champ qui reste toujours propre ('Autre' quand l'entreprise a
-        // saisi un texte libre), pour ne jamais faire exploser cette
-        // dimension Analytics avec du texte libre non normalisé.
-        if (widget.typeCategorie != null) {
-          await FirebaseAnalytics.instance.setUserProperty(
-            name: 'company_category',
-            value: widget.typeCategorie!,
-          );
-        }
+      // On envoie toujours `typeCategorie` (jamais `type`) : c'est le
+      // champ qui reste toujours propre ('Autre' quand l'entreprise a
+      // saisi un texte libre), pour ne jamais faire exploser cette
+      // dimension Analytics avec du texte libre non normalisé.
+      if (widget.typeCategorie != null) {
+        await FirebaseAnalytics.instance.setUserProperty(
+          name: 'company_category',
+          value: widget.typeCategorie!,
+        );
       }
 
       if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const CompanyPage()),
-      );
+      _openCompanySpace();
     } on FirebaseAuthException catch (e) {
       _setError(_friendlyError(e), code: e.code);
-    } on FirebaseException catch (e) {
-      debugPrint('Firestore error: ${e.code} ${e.message}');
-      _setError('Une erreur est survenue. Réessayez.');
+    } on CompanyAccountException catch (e) {
+      // Structure non créée : on ferme la session pour ne pas laisser un
+      // accès sans espace ouvert sur l'appareil. Un nouvel appui reprend
+      // l'inscription là où elle s'est arrêtée (voir plus haut).
+      await Auth().logout();
+      _setError(
+        e.isNetwork
+            ? '$kNoConnectionMessage Votre inscription reprendra là où elle '
+                  's\'est arrêtée.'
+            : e.message,
+      );
     } catch (e, st) {
       debugPrint("SIGNUP ▶ Erreur inattendue: $e\n$st");
       _setError('Une erreur est survenue. Réessayez.');

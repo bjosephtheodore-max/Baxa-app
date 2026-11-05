@@ -2286,6 +2286,10 @@ exports.leaveTeam = v2Callable(async (data, context) => {
 // Fonction 2e génération en africa-south1 : voir booking.js.
 exports.booking = require("./booking").booking;
 
+// ── Compte structure (inscription + rôle) ───────────────────────────
+// Fonction 2e génération en africa-south1 : voir company_account.js.
+exports.companyAccount = require("./company_account").companyAccount;
+
 // ── Plage complète / bientôt complète (déclenché à chaque réservation) ─
 async function checkPlageFillAfterReservation(companyId, resa) {
   const slotId = resa && resa.slotId;

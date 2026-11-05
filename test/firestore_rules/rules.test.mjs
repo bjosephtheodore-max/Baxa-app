@@ -162,8 +162,13 @@ beforeEach(async () => {
 // ============================================================
 describe("Fiche entreprise", () => {
   it("tout le monde peut la consulter", () => allowed(op.get(A, ANON)));
-  it("un client crée sa fiche entreprise (inscription admin)", () =>
-    allowed(op.create("companies", CLIENT, {nom: "Nouveau"}, CLIENT)));
+  // L'inscription d'une structure passe par le serveur (companyAccount).
+  it("personne ne crée de fiche entreprise depuis l'app", () =>
+    denied(op.create("companies", CLIENT, {nom: "Nouveau"}, CLIENT)));
+  it("même une écriture « fusion » ne crée pas de fiche", () =>
+    denied(op.merge("companies/newco", {nom: "Nouveau"}, "newco")));
+  it("l'admin peut toujours supprimer sa fiche", () =>
+    allowed(op.del(A, ADMIN)));
   it("l'admin la modifie", () =>
     allowed(op.update(A, {nom: "Salon A+"}, ADMIN)));
   it("un membre actif la modifie", () =>
