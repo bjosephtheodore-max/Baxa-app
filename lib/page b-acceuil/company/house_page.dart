@@ -10,6 +10,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/agenda_service.dart';
 import 'package:baxa/services/booking_constants.dart';
+import 'package:baxa/services/company_booking_service.dart';
+import 'package:baxa/services/company_functions.dart';
 import 'package:baxa/services/plage_rules.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:baxa/page b-acceuil/company/team_page.dart';

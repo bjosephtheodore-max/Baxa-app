@@ -5,6 +5,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:intl/intl.dart';
 import 'package:baxa/services/booking_constants.dart';
+import 'package:baxa/services/company_booking_service.dart';
+import 'package:baxa/services/company_functions.dart';
 import 'package:baxa/services/plage_rules.dart';
 import 'package:baxa/services/slot_generation_service.dart';
 import 'package:baxa/services/onboarding_service.dart';
@@ -1263,15 +1265,15 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     if (confirm != true) return;
     try {
-      await _firestore
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queueId)
-          .update({
-            'closureStart': Timestamp.fromDate(DateTime.now()),
-            'closureEnd': FieldValue.delete(),
-          });
+      // Côté serveur (companyBooking · close) : fermeture sans fin dès
+      // maintenant. « Stopper » remplace une fermeture déjà posée, et ne
+      // touche pas aux réservations confirmées (comme avant).
+      await CompanyBookingService.close(
+        companyId: _companyId!,
+        queueIds: [queueId],
+        start: DateTime.now(),
+        replaceExisting: true,
+      );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1279,6 +1281,11 @@ class _SettingsPageState extends State<SettingsPage> {
           backgroundColor: Colors.orange.shade700,
         ),
       );
+    } on CompanyActionException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(

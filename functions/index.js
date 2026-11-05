@@ -2290,6 +2290,11 @@ exports.booking = require("./booking").booking;
 // Fonction 2e génération en africa-south1 : voir company_account.js.
 exports.companyAccount = require("./company_account").companyAccount;
 
+// ── Réservations gérées par la structure (guichet, blocage, fermetures,
+// départ) — fonction 2e génération en africa-south1 : voir
+// company_booking.js.
+exports.companyBooking = require("./company_booking").companyBooking;
+
 // ── Plage complète / bientôt complète (déclenché à chaque réservation) ─
 async function checkPlageFillAfterReservation(companyId, resa) {
   const slotId = resa && resa.slotId;

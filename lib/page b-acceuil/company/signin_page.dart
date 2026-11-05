@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:baxa/page%20b-acceuil/company/company_page.dart';
 import 'package:baxa/page%20b-acceuil/company/password_reset_page.dart';
 import 'package:baxa/services/company_account_service.dart';
+import 'package:baxa/services/company_functions.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
@@ -207,7 +208,7 @@ class SigninPageState extends State<SigninPage> {
       _openCompanySpace();
     } on FirebaseAuthException catch (e) {
       _setError(_friendlyError(e), code: e.code);
-    } on CompanyAccountException catch (e) {
+    } on CompanyActionException catch (e) {
       // Rôle impossible à vérifier (réseau…) : pas de session à moitié
       // ouverte sur l'appareil.
       await Auth().logout();
@@ -307,7 +308,7 @@ class SigninPageState extends State<SigninPage> {
       _openCompanySpace();
     } on FirebaseAuthException catch (e) {
       _setError(_friendlyError(e), code: e.code);
-    } on CompanyAccountException catch (e) {
+    } on CompanyActionException catch (e) {
       // Structure non créée : on ferme la session pour ne pas laisser un
       // accès sans espace ouvert sur l'appareil. Un nouvel appui reprend
       // l'inscription là où elle s'est arrêtée (voir plus haut).

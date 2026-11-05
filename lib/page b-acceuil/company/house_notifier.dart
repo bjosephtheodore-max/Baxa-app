@@ -41,11 +41,9 @@ class _HouseNotifier extends ChangeNotifier {
 
   final String? _staffCompanyId;
 
-  // Personne connectée (admin : uid == companyId) et, pour un membre du
-  // staff, son nom tel que l'admin l'a renseigné (lu dans le suivi de
-  // statut, sans requête de plus).
+  // Personne connectée (admin : uid == companyId). Le nom d'un membre
+  // (« Ajouté par … ») est posé par le serveur depuis sa fiche d'équipe.
   String? get _myUid => FirebaseAuth.instance.currentUser?.uid;
-  String _myStaffName = '';
 
   // ── Services ──────────────────────────────────────────────────────────────
   final _db = FirebaseFirestore.instance;
@@ -135,6 +133,9 @@ class _HouseNotifier extends ChangeNotifier {
     _initialized = true;
     _agenda.initialize();
     _loadCompanyData();
+    // Inscriptions au guichet : la fonction serveur est réveillée dès
+    // l'ouverture de l'accueil, pour répondre sans délai au premier appui.
+    unawaited(CompanyBookingService.warmup());
   }
 
   void refreshSilent() => _refreshAgenda(silent: true);
@@ -235,177 +236,54 @@ class _HouseNotifier extends ChangeNotifier {
     required String reason,
   }) async {
     if (_companyId == null) return 'Aucune entreprise trouvée';
+    // Côté serveur (companyBooking · block) : seuls les créneaux pas encore
+    // terminés sont bloqués, un créneau déjà bloqué garde sa raison, et les
+    // réservations concernées passent « suspendues » en une fois.
     try {
-      final dayStart = DateTime(
-        _selectedDate.year,
-        _selectedDate.month,
-        _selectedDate.day,
+      await CompanyBookingService.block(
+        companyId: _companyId!,
+        queueId: queueId,
+        day: _selectedDate,
+        timeSlotId: timeSlotId,
+        reason: reason,
       );
-      final dayEnd = dayStart.add(const Duration(days: 1));
-      final slotsRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queueId)
-          .collection('slots');
-
-      final snap = await slotsRef
-          .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(dayStart))
-          .where('start', isLessThan: Timestamp.fromDate(dayEnd))
-          .orderBy('start')
-          .get();
-
-      // Seuls les créneaux pas encore terminés sont bloqués : un créneau
-      // passé a déjà eu lieu (ses clients ont été servis) — le suspendre
-      // ferait croire à ces clients que leur réservation est annulée. Un
-      // créneau déjà bloqué est laissé tel quel (raison d'origine gardée).
-      final now = DateTime.now();
-      final docs = snap.docs.where((d) {
-        final data = d.data();
-        if (timeSlotId != null && data['timeSlotId'] != timeSlotId) {
-          return false;
-        }
-        if (data['status'] == 'blocked') return false;
-        final end = (data['end'] as Timestamp?)?.toDate();
-        return end != null && end.isAfter(now);
-      }).toList();
-      if (docs.isEmpty) {
-        return 'Aucun créneau à venir à bloquer sur cette plage.';
-      }
-
-      // La raison part telle quelle dans une notification client.
-      final trimmed = reason.trim();
-      final safeReason = trimmed.length > 120
-          ? '${trimmed.substring(0, 117)}…'
-          : trimmed;
-      final reasonValue = safeReason.isEmpty ? null : safeReason;
-
-      WriteBatch batch = _db.batch();
-      int count = 0;
-      Future<void> flush() async {
-        if (count >= 380) {
-          await batch.commit();
-          batch = _db.batch();
-          count = 0;
-        }
-      }
-
-      for (final doc in docs) {
-        batch.update(doc.reference, {
-          'status': 'blocked',
-          'blockReason': reasonValue,
-          'blockedAt': FieldValue.serverTimestamp(),
-        });
-        count++;
-        await flush();
-
-        final reserved = (doc.data()['reserved'] as num?)?.toInt() ?? 0;
-        if (reserved > 0) {
-          final resSnap = await _db
-              .collection('companies')
-              .doc(_companyId)
-              .collection('reservations')
-              .where('slotId', isEqualTo: doc.id)
-              .where('status', isEqualTo: 'confirmed')
-              .get();
-          for (final resDoc in resSnap.docs) {
-            batch.update(resDoc.reference, {
-              'suspended': true,
-              'suspendedReason': reasonValue,
-              'suspendedAt': FieldValue.serverTimestamp(),
-            });
-            count++;
-            await flush();
-          }
-        }
-      }
-      if (count > 0) await batch.commit();
-
       await _refreshAgenda(silent: true);
       return null;
-    } catch (e) {
-      return 'Erreur: $e';
+    } on CompanyActionException catch (e) {
+      return e.message;
     }
   }
 
   // ── Déblocage ─────────────────────────────────────────────────────────────
+  // Côté serveur (companyBooking · unblock) : créneaux à venir rouverts,
+  // réservations suspendues rétablies — ou annulées si leur créneau est
+  // passé pendant le blocage (`company_block_unresolved`, compteurs
+  // corrigés). Les notifications partent des Cloud Functions habituelles.
   Future<ModificationResult> unblockPlage(String queueId) async {
+    if (_companyId == null) {
+      return const ModificationResult(
+        success: false,
+        message: 'Aucune entreprise trouvée',
+      );
+    }
     setQueueLoading(queueId);
-    final result = await _agenda.unblockPlage(
-      queueId: queueId,
-      date: _selectedDate,
-    );
-    if (result.success) {
-      await _reactivateSuspendedReservations(queueId);
+    ModificationResult result;
+    try {
+      final n = await CompanyBookingService.unblock(
+        companyId: _companyId!,
+        queueId: queueId,
+        day: _selectedDate,
+      );
+      result = ModificationResult(
+        success: true,
+        message: '$n créneau(x) débloqué(s).',
+        slotsAffected: n,
+      );
+    } on CompanyActionException catch (e) {
+      result = ModificationResult(success: false, message: e.message);
     }
     await _refreshAgenda(silent: true);
     return result;
-  }
-
-  // Après déblocage : rétablit les réservations suspendues du jour dont le
-  // créneau est encore à venir ; annule celles dont le créneau est déjà
-  // passé (`company_block_unresolved`). Les notifications sont envoyées par
-  // les Cloud Functions (onReservationBlockChange / onReservationCancelledByCompany).
-  Future<void> _reactivateSuspendedReservations(String queueId) async {
-    if (_companyId == null) return;
-    try {
-      final dayStart = DateTime(
-        _selectedDate.year,
-        _selectedDate.month,
-        _selectedDate.day,
-      );
-      final dayEnd = dayStart.add(const Duration(days: 1));
-      final now = DateTime.now();
-
-      final resSnap = await _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('reservations')
-          .where('queueId', isEqualTo: queueId)
-          .where('status', isEqualTo: 'confirmed')
-          .get();
-
-      final suspended = resSnap.docs.where((d) {
-        final data = d.data();
-        if (data['suspended'] != true) return false;
-        final ss = (data['slotStart'] as Timestamp?)?.toDate();
-        return ss != null && !ss.isBefore(dayStart) && ss.isBefore(dayEnd);
-      }).toList();
-      if (suspended.isEmpty) return;
-
-      WriteBatch batch = _db.batch();
-      int count = 0;
-      for (final d in suspended) {
-        final se = (d.data()['slotEnd'] as Timestamp?)?.toDate();
-        final passed = se != null && se.isBefore(now);
-        batch.update(
-          d.reference,
-          passed
-              ? {
-                  'status': 'cancelled',
-                  'cancelledAt': FieldValue.serverTimestamp(),
-                  'cancellationSource': 'company_block_unresolved',
-                  'suspended': FieldValue.delete(),
-                  'suspendedReason': FieldValue.delete(),
-                  'suspendedAt': FieldValue.delete(),
-                }
-              : {
-                  'suspended': FieldValue.delete(),
-                  'suspendedReason': FieldValue.delete(),
-                  'suspendedAt': FieldValue.delete(),
-                },
-        );
-        count++;
-        if (count >= 380) {
-          await batch.commit();
-          batch = _db.batch();
-          count = 0;
-        }
-      }
-      if (count > 0) await batch.commit();
-    } catch (_) {
-      // non bloquant : les créneaux sont débloqués, c'est l'essentiel
-    }
   }
 
   // ── RDV manuel ────────────────────────────────────────────────────────────
@@ -415,82 +293,23 @@ class _HouseNotifier extends ChangeNotifier {
     AgendaSlot slot,
   ) async {
     if (_companyId == null) return 'Aucune entreprise trouvée';
+    // Côté serveur (companyBooking · addManual), en une seule transaction :
+    // file ouverte, jour hors fermeture, plage non supprimée, créneau ni
+    // bloqué ni terminé, et surtout une place ENCORE libre au moment
+    // d'écrire (deux inscriptions simultanées ne peuvent plus surbooker).
+    // L'auteur (admin / membre et son nom) est fixé par le serveur.
     try {
-      final queuePath = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id);
-
-      // Garde-fou : une file fermée ou une plage en suppression programmée
-      // n'accepte plus AUCUNE nouvelle réservation, manuelle comprise.
-      final queueDoc = await queuePath.get();
-      final qd = queueDoc.data();
-      final closureStart = (qd?['closureStart'] as Timestamp?)?.toDate();
-      final closureEnd = (qd?['closureEnd'] as Timestamp?)?.toDate();
-      if (isQueueClosedNow(closureStart, closureEnd)) {
-        return 'Cette file est fermée aux réservations.';
-      }
-      // Fermeture PROGRAMMÉE qui couvre le jour de ce créneau (même règle
-      // que les réservations client, refusées côté serveur).
-      if (isSlotInClosure(closureStart, closureEnd, slot.start)) {
-        return 'La structure est fermée ce jour-là.';
-      }
-      if (slot.timeSlotId.isNotEmpty) {
-        final tsDoc = await queuePath
-            .collection('timeSlots')
-            .doc(slot.timeSlotId)
-            .get();
-        if (tsDoc.data()?['deleteAfter'] != null) {
-          return 'Cette plage est en cours de suppression, plus de réservation possible.';
-        }
-      }
-
-      final slotRef = queuePath.collection('slots').doc(slot.id);
-
-      final d = slot.start.toLocal();
-      final dateKey =
-          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-      final dailyRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('dailyStats')
-          .doc(dateKey);
-
-      await Future.wait([
-        _db
-            .collection('companies')
-            .doc(_companyId)
-            .collection('reservations')
-            .add({
-              'customerId': 'manual_booking',
-              'customerName': clientName,
-              'companyId': _companyId,
-              'queueId': queue.id,
-              'queueName': queue.name,
-              'slotId': slot.id,
-              'slotStart': slot.start,
-              'slotEnd': slot.end,
-              'status': 'confirmed',
-              'createdAt': FieldValue.serverTimestamp(),
-              'source': 'company_manual',
-              // Auteur de l'inscription : décide qui peut la supprimer
-              // (l'admin toujours, un membre seulement les siennes) et
-              // alimente « Ajouté par … ». Contrôlé aussi par les règles.
-              if (_myUid != null) 'createdBy': _myUid,
-              'createdByRole': _isStaff ? 'staff' : 'admin',
-              if (_isStaff && _myStaffName.isNotEmpty)
-                'createdByName': _myStaffName,
-            }),
-        slotRef.update({'reserved': FieldValue.increment(1)}),
-        dailyRef.update({'reserved': FieldValue.increment(1)}),
-      ]);
+      await CompanyBookingService.addManual(
+        companyId: _companyId!,
+        queueId: queue.id,
+        slotId: slot.id,
+        clientName: clientName,
+        queueName: queue.name,
+      );
       _recordManualAdd();
       return null;
-    } catch (e) {
-      return 'Erreur: $e';
+    } on CompanyActionException catch (e) {
+      return e.message;
     }
   }
 
@@ -550,42 +369,17 @@ class _HouseNotifier extends ChangeNotifier {
     required AgendaSlot slot,
   }) async {
     if (_companyId == null) return 'Aucune entreprise trouvée';
+    // Côté serveur (companyBooking · removeManual) : droits vérifiés
+    // (membre : seulement les siennes), place rendue une seule fois même
+    // en cas de double appui.
     try {
-      final slotRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('slots')
-          .doc(slot.id);
-
-      final d = slot.start.toLocal();
-      final dateKey =
-          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-      final dailyRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('dailyStats')
-          .doc(dateKey);
-
-      await Future.wait([
-        _db
-            .collection('companies')
-            .doc(_companyId)
-            .collection('reservations')
-            .doc(reservationId)
-            .delete(),
-        slotRef.update({'reserved': FieldValue.increment(-1)}),
-        dailyRef.update({
-          'reserved': FieldValue.increment(-1),
-          'available': FieldValue.increment(1),
-        }),
-      ]);
+      await CompanyBookingService.removeManual(
+        companyId: _companyId!,
+        reservationId: reservationId,
+      );
       return null;
-    } catch (e) {
-      return 'Erreur: $e';
+    } on CompanyActionException catch (e) {
+      return e.message;
     }
   }
 
@@ -1136,8 +930,6 @@ class _HouseNotifier extends ChangeNotifier {
         .snapshots()
         .listen(
           (doc) {
-            _myStaffName =
-                (doc.data()?['displayName'] as String?)?.trim() ?? '';
             final isActive = doc.data()?['isActive'] as bool? ?? false;
             if (!isActive) {
               _handleRevocation(doc.data()?['revokedReason'] as String?);
