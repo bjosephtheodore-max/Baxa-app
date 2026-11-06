@@ -492,7 +492,8 @@ async function generateSlotsForCompany(companyId) {
       // partir de la date d'effet suit la config en attente, pas
       // l'actuelle — nécessaire pour les jours qui n'ont pas encore été
       // générés à l'avance (au-delà de l'horizon de 7 jours utilisé par
-      // la génération immédiate côté app au moment où c'est programmé).
+      // la génération immédiate de companySchedule au moment où c'est
+      // programmé).
       const stillPendingTs = tsData.pendingEffectiveDate;
       const pendingEffectiveDate = stillPendingTs ? stillPendingTs.toDate() : null;
       const pendingCfg = pendingEffectiveDate

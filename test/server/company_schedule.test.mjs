@@ -155,6 +155,65 @@ describe("Moteur (fonctions pures)", () => {
 });
 
 // ============================================================
+// Cas repris des anciens tests de la génération côté app
+// (test/business/slot_generation_test.dart, retirés avec le service).
+describe("Génération (moteur sur la base)", () => {
+  const cfg = (extra = {}) => ({startTime: "09:00", endTime: "10:00",
+    duration: 30, capacity: 2, workingDays: [1, 2, 3, 4, 5],
+    reservationDeadlineMinutes: 0, ...extra});
+  const gen = async (extra = {}, ts = "t1") => {
+    const qRef = db.doc(Q);
+    return sc.generateForTimeSlot(db, {qRef, tz: TZ, timeSlotId: ts,
+      cfg: cfg(extra), fromDay: TODAY, queue: {}, now});
+  };
+
+  it("un créneau qui dépasserait la fin de plage n'est pas créé", async () => {
+    await gen({duration: 25});
+    const s = await slotsOf(day(1), "t1");
+    assert.equal(s.length, 2); // 09:00, 09:25 — 09:50 dépasserait 10:00
+  });
+
+  it("aucun jour ouvré : aucun créneau", async () => {
+    const res = await gen({workingDays: []});
+    assert.equal(res.created, 0);
+  });
+
+  it("relancer la génération ne recrée pas les créneaux existants",
+    async () => {
+      const first = await gen();
+      const second = await gen();
+      assert.equal(first.created, 12);
+      assert.equal(second.created, 0);
+      assert.equal((await slotsOf(day(1), "t1")).length, 2);
+    });
+
+  it("un créneau réservé conservé n'est jamais recouvert", async () => {
+    // Ancien créneau réservé de 09:15 à 09:45 : on remplit autour.
+    await putSlot("keep", day(1), "09:15", {reserved: 1});
+    await gen({duration: 15});
+    const s = await slotsOf(day(1), "t1");
+    assert.deepEqual(s.map((x) => x.start.getTime()), [
+      at(day(1), "09:00"), at(day(1), "09:15"), at(day(1), "09:45"),
+    ].map((x) => x.getTime()));
+  });
+
+  it("le blocage d'une AUTRE plage n'empêche pas la génération", async () => {
+    await putSlot("blk", day(1), "14:00", {ts: "t2", status: "blocked"});
+    await gen();
+    assert.equal((await slotsOf(day(1), "t1")).length, 2);
+  });
+
+  it("la plage bloquée ce jour-là ne reçoit rien, les autres jours si",
+    async () => {
+      await putSlot("blk", day(1), "09:00", {status: "blocked"});
+      await gen();
+      assert.deepEqual((await slotsOf(day(1), "t1")).map((x) => x.id),
+        ["blk"]);
+      assert.equal((await slotsOf(day(2), "t1")).length, 2);
+    });
+});
+
+// ============================================================
 describe("Créer une plage", () => {
   it("crée la plage, ses créneaux sur 8 jours ouvrés et les places",
     async () => {

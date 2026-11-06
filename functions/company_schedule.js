@@ -19,8 +19,8 @@
 // aussi celui de la génération de nuit (functions/index.js), dans le
 // FUSEAU DE LA STRUCTURE.
 //
-// Règles reprises à l'identique de l'app (lib/services/plage_rules.dart,
-// slot_generation_service.dart) :
+// Règles reprises à l'identique de l'ancienne génération côté app (et de
+// lib/services/plage_rules.dart, toujours utilisé pour l'affichage) :
 //  • un jour où la plage a un créneau bloqué à venir n'est JAMAIS touché ;
 //  • on ne remplit que les espaces libres, jamais par-dessus un créneau ;
 //  • file fermée → pas de génération (sauf 48 h avant une réouverture
