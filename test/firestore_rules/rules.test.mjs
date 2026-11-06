@@ -184,25 +184,49 @@ describe("Fiche entreprise", () => {
   it("l'admin d'une autre entreprise ne peut pas la modifier", () =>
     denied(op.update(A, {nom: "X"}, ADMIN_B)));
   it("un membre ne peut pas la supprimer", () => denied(op.del(A, STAFF)));
+  // Résumé « recherche » tenu par le serveur (files, fermeture affichée).
+  it("l'admin ne peut pas s'afficher « ouvert » à la place du serveur", () =>
+    denied(op.update(A, {closedNow: false}, ADMIN)));
+  it("l'admin ne peut pas changer son nombre de files", () =>
+    denied(op.update(A, {queueCount: 3}, ADMIN)));
 });
-
 // ============================================================
+// Files, plages, créneaux, places du jour et réservations : écrits
+// UNIQUEMENT côté serveur (booking, companyBooking, companySchedule). L'app
+// ne fait que lire — sauf les réglages simples d'une file, par l'admin.
 describe("Files d'attente et plages horaires", () => {
+  const settings = (extra = {}) => ({name: "Coupe", maxAdvanceDays: 3,
+    reservationDeadlineMinutes: 10, allowMultiplePerPlage: true, ...extra});
   it("un visiteur consulte les files", () =>
     allowed(op.list(`${A}/queues`, ANON)));
   it("un visiteur consulte les plages", () =>
     allowed(op.list(`${Q}/timeSlots`, ANON)));
-  it("l'admin crée une file", () =>
-    allowed(op.create(`${A}/queues`, "q2", {nom: "Barbe"}, ADMIN)));
-  it("un membre actif crée une file", () =>
-    allowed(op.create(`${A}/queues`, "q2", {nom: "Barbe"}, STAFF)));
-  it("l'admin supprime une file", () => allowed(op.del(Q, ADMIN)));
-  it("l'admin supprime une plage", () =>
-    allowed(op.del(`${Q}/timeSlots/t1`, ADMIN)));
+  it("l'admin modifie les réglages simples d'une file", () =>
+    allowed(op.update(Q, settings(), ADMIN)));
+  it("l'admin ne peut pas fermer une file depuis l'app (serveur)", () =>
+    denied(op.update(Q, {...settings(), closureStart: new Date()}, ADMIN)));
+  it("l'admin ne programme pas la suppression d'une file depuis l'app", () =>
+    denied(op.update(Q, {...settings(), deleteAfter: new Date()}, ADMIN)));
+  it("réglage hors limites : refusé", () =>
+    denied(op.update(Q, settings({maxAdvanceDays: 30}), ADMIN)));
+  it("nom vide : refusé", () =>
+    denied(op.update(Q, settings({name: ""}), ADMIN)));
+  it("un membre actif ne modifie pas les réglages d'une file", () =>
+    denied(op.update(Q, settings(), STAFF)));
+  it("l'admin ne crée pas de file depuis l'app (serveur : limite de 5)", () =>
+    denied(op.create(`${A}/queues`, "q2", {name: "Barbe"}, ADMIN)));
+  it("un membre actif ne crée pas de file", () =>
+    denied(op.create(`${A}/queues`, "q2", {name: "Barbe"}, STAFF)));
+  it("l'admin ne supprime pas une file depuis l'app (serveur)", () =>
+    denied(op.del(Q, ADMIN)));
+  it("l'admin ne supprime pas une plage depuis l'app (serveur)", () =>
+    denied(op.del(`${Q}/timeSlots/t1`, ADMIN)));
+  it("l'admin ne modifie pas une plage depuis l'app (serveur)", () =>
+    denied(op.update(`${Q}/timeSlots/t1`, {endTime: "23:00"}, ADMIN)));
   it("un client ne peut pas créer de file", () =>
-    denied(op.create(`${A}/queues`, "q2", {nom: "X"}, CLIENT)));
+    denied(op.create(`${A}/queues`, "q2", {name: "X"}, CLIENT)));
   it("un membre retiré ne peut plus créer de file", () =>
-    denied(op.create(`${A}/queues`, "q2", {nom: "X"}, STAFF_OUT)));
+    denied(op.create(`${A}/queues`, "q2", {name: "X"}, STAFF_OUT)));
   it("le membre d'une autre entreprise ne peut pas supprimer une file", () =>
     denied(op.del(Q, STAFF_B)));
   it("un client ne peut pas modifier une plage", () =>
@@ -228,8 +252,12 @@ describe("Créneaux (compteurs de places)", () => {
     denied(op.create(`${Q}/slots`, "s9", {capacity: 1}, CLIENT)));
   it("un client ne peut pas supprimer un créneau", () =>
     denied(op.del(S, CLIENT)));
-  it("l'admin crée un créneau", () =>
-    allowed(op.create(`${Q}/slots`, "s9", {capacity: 1}, ADMIN)));
+  it("l'admin ne crée pas de créneau depuis l'app (serveur)", () =>
+    denied(op.create(`${Q}/slots`, "s9", {capacity: 1}, ADMIN)));
+  it("l'admin ne change pas un compteur depuis l'app (serveur)", () =>
+    denied(op.update(S, {reserved: 0}, ADMIN)));
+  it("un membre actif ne change pas la capacité depuis l'app", () =>
+    denied(op.update(S, {capacity: 9}, STAFF)));
 });
 
 // ============================================================
@@ -244,8 +272,10 @@ describe("Places libres par jour (dailyStats)", () => {
       {reserved: 1, available: -1}, CLIENT)));
   it("un visiteur ne peut pas écrire", () =>
     denied(op.update(D, {reserved: 5}, ANON)));
-  it("un membre actif écrit librement", () =>
-    allowed(op.update(D, {bonus: 1}, STAFF)));
+  it("un membre actif n'écrit plus (serveur uniquement)", () =>
+    denied(op.update(D, {bonus: 1}, STAFF)));
+  it("l'admin n'écrit plus (serveur uniquement)", () =>
+    denied(op.update(D, {available: 99}, ADMIN)));
 });
 
 // ============================================================
@@ -261,8 +291,10 @@ describe("Réservations", () => {
     denied(op.update(R1, {status: "cancelled"}, CLIENT)));
   it("un client ne peut pas modifier sa réservation", () =>
     denied(op.update(R1, {source: "company_manual"}, CLIENT)));
-  it("un membre actif annule une réservation de son entreprise", () =>
-    allowed(op.update(R1, {status: "cancelled"}, STAFF)));
+  it("un membre actif n'annule pas depuis l'app (serveur)", () =>
+    denied(op.update(R1, {status: "cancelled"}, STAFF)));
+  it("l'admin n'annule pas depuis l'app (serveur)", () =>
+    denied(op.update(R1, {status: "cancelled"}, ADMIN)));
   it("un client ne peut pas supprimer sa réservation", () =>
     denied(op.del(R1, CLIENT)));
   it("un client lit SA réservation", () => allowed(op.get(R1, CLIENT)));
@@ -270,13 +302,13 @@ describe("Réservations", () => {
     allowed(op.group("reservations", ["customerId", CLIENT], CLIENT)));
   it("l'admin liste les réservations de son entreprise", () =>
     allowed(op.list(`${A}/reservations`, ADMIN)));
-  it("un membre actif ajoute un client sur place", () => allowed(op.create(
-    `${A}/reservations`, "r9", {customerId: "", source: "company_manual"},
-    STAFF)));
+  it("un membre actif n'inscrit pas un client depuis l'app (serveur)", () =>
+    denied(op.create(`${A}/reservations`, "r9",
+      {customerId: "", source: "company_manual"}, STAFF)));
   it("un membre retiré ne peut plus rien modifier", () =>
     denied(op.update(`${A}/reservations/r2`, {status: "done"}, STAFF_OUT)));
-  it("l'admin supprime un ajout manuel", () =>
-    allowed(op.del(`${A}/reservations/rm`, ADMIN)));
+  it("l'admin ne supprime pas un ajout manuel depuis l'app (serveur)", () =>
+    denied(op.del(`${A}/reservations/rm`, ADMIN)));
   it("l'admin ne peut pas supprimer une réservation client", () =>
     denied(op.del(R1, ADMIN)));
   it("un client retrouve ses réservations dans une file (page créneaux)",
@@ -301,32 +333,22 @@ describe("Réservations", () => {
 });
 
 // ============================================================
-describe("Inscriptions manuelles : qui peut supprimer", () => {
+// Inscriptions au guichet : désormais UNIQUEMENT via companyBooking (voir
+// test/server/company_booking.test.mjs pour qui peut retirer quoi).
+describe("Inscriptions manuelles : plus aucune écriture depuis l'app", () => {
   const R = `${A}/reservations`;
   const manual = (by, role) => ({source: "company_manual",
     customerId: "manual_booking", createdBy: by, createdByRole: role});
-  it("l'admin supprime l'inscription d'un membre", () =>
-    allowed(op.del(`${R}/mStaff`, ADMIN)));
-  it("l'admin supprime sa propre inscription", () =>
-    allowed(op.del(`${R}/mAdmin`, ADMIN)));
-  it("un membre supprime sa propre inscription", () =>
-    allowed(op.del(`${R}/mStaff`, STAFF)));
+  it("l'admin ne supprime pas une inscription depuis l'app", () =>
+    denied(op.del(`${R}/mStaff`, ADMIN)));
+  it("un membre ne supprime pas sa propre inscription depuis l'app", () =>
+    denied(op.del(`${R}/mStaff`, STAFF)));
   it("un membre ne peut pas supprimer l'inscription de l'admin", () =>
     denied(op.del(`${R}/mAdmin`, STAFF)));
-  it("un membre ne peut pas supprimer l'inscription d'un autre membre", () =>
-    denied(op.del(`${R}/mStaff`, STAFF_2)));
-  it("un membre ne peut pas supprimer une inscription sans auteur", () =>
-    denied(op.del(`${R}/rm`, STAFF)));
-  it("un membre retiré ne peut plus supprimer la sienne", () =>
-    denied(op.del(`${R}/mOut`, STAFF_OUT)));
-  it("un membre inscrit un client à son nom", () =>
-    allowed(op.create(R, "m9", manual(STAFF, "staff"), STAFF)));
-  it("l'admin inscrit un client à son nom", () =>
-    allowed(op.create(R, "m9", manual(ADMIN, "admin"), ADMIN)));
-  it("un membre ne peut pas inscrire au nom d'un autre", () =>
-    denied(op.create(R, "m9", manual(ADMIN, "admin"), STAFF)));
-  it("un membre ne peut pas se faire passer pour le responsable", () =>
-    denied(op.create(R, "m9", manual(STAFF, "admin"), STAFF)));
+  it("un membre n'inscrit pas un client depuis l'app", () =>
+    denied(op.create(R, "m9", manual(STAFF, "staff"), STAFF)));
+  it("l'admin n'inscrit pas un client depuis l'app", () =>
+    denied(op.create(R, "m9", manual(ADMIN, "admin"), ADMIN)));
   it("un membre ne peut pas s'attribuer l'inscription de l'admin", () =>
     denied(op.update(`${R}/mAdmin`, {createdBy: STAFF}, STAFF)));
   it("l'admin ne peut pas non plus changer l'auteur d'une inscription", () =>

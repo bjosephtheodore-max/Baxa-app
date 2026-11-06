@@ -275,4 +275,54 @@ class CompanyScheduleService {
   /// créneaux recréés (les réservations annulées ne reviennent pas).
   static Future<void> returnToBaxa({required String companyId}) =>
       _call('returnToBaxa', {'companyId': companyId});
+
+  // ── Files d'attente ──────────────────────────────────────────────
+
+  /// Crée une file (au plus 5, vérifié par le serveur). Renvoie son id.
+  static Future<String> createQueue({
+    required String companyId,
+    required String name,
+    required int maxAdvanceDays,
+    required int reservationDeadlineMinutes,
+    required bool allowMultiplePerPlage,
+  }) async {
+    final res = await _call('createQueue', {
+      'companyId': companyId,
+      'name': name,
+      'maxAdvanceDays': maxAdvanceDays,
+      'reservationDeadlineMinutes': reservationDeadlineMinutes,
+      'allowMultiplePerPlage': allowMultiplePerPlage,
+    });
+    return res['queueId'] as String? ?? '';
+  }
+
+  /// Supprime une file sans plage ni réservation à venir (et ses restes).
+  static Future<void> deleteQueue({
+    required String companyId,
+    required String queueId,
+  }) => _call('deleteQueue', {'companyId': companyId, 'queueId': queueId});
+
+  /// Programme la suppression de la file à la date de sa dernière plage
+  /// (toutes ses plages doivent déjà partir). Renvoie cette date.
+  static Future<DateTime> scheduleQueueDeletion({
+    required String companyId,
+    required String queueId,
+  }) async {
+    final res = await _call('scheduleQueueDeletion', {
+      'companyId': companyId,
+      'queueId': queueId,
+    });
+    return DateTime.fromMillisecondsSinceEpoch(
+      (res['deleteAfter'] as num).toInt(),
+    );
+  }
+
+  /// Annule la suppression programmée d'une file.
+  static Future<void> restoreQueueDeletion({
+    required String companyId,
+    required String queueId,
+  }) => _call('restoreQueueDeletion', {
+    'companyId': companyId,
+    'queueId': queueId,
+  });
 }

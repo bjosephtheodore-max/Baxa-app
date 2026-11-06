@@ -964,11 +964,113 @@ async function returnToBaxa(db, user, data, now = new Date()) {
   return {created};
 }
 
+// ════════════════════════════════════════════════════════════════════
+// FILES D'ATTENTE (création, suppression)
+// ════════════════════════════════════════════════════════════════════
+
+// MIROIRS de settings_page.dart (`_kAdvanceDaysValues`, `_kDeadlineValues`)
+// et de la limite de 5 files (avant : vérifiée par l'app seule).
+const MAX_QUEUES = 5;
+const ADVANCE_DAYS = [1, 2, 3, 4, 5, 6, 7];
+const DEADLINE_MINUTES = [0, 5, 10, 15, 20, 25, 30, 40, 50, 60];
+
+/** Réglages d'une file envoyés par le formulaire, vérifiés. */
+function queueSettings(data) {
+  const name = requireString(data, "name", {max: 60});
+  const advance = data.maxAdvanceDays;
+  const delay = data.reservationDeadlineMinutes;
+  if (!ADVANCE_DAYS.includes(advance) || !DEADLINE_MINUTES.includes(delay)) {
+    throw new HttpsError("invalid-argument", "Réglages invalides.");
+  }
+  return {
+    name,
+    maxAdvanceDays: advance,
+    reservationDeadlineMinutes: delay,
+    allowMultiplePerPlage: data.allowMultiplePerPlage === true,
+  };
+}
+
+// ── CRÉER UNE FILE (au plus 5) ──────────────────────────────────────
+async function createQueue(db, user, data) {
+  const companyId = requireString(data, "companyId");
+  await companyAccess(db, user.uid, companyId, {adminOnly: true});
+  const settings = queueSettings(data);
+  const col = companyRef(db, companyId).collection("queues");
+  const ref = col.doc();
+  await db.runTransaction(async (tx) => {
+    const existing = await tx.get(col);
+    if (existing.size >= MAX_QUEUES) {
+      throw refuse("maxQueues",
+        `Maximum ${MAX_QUEUES} files d'attente atteint.`);
+    }
+    tx.set(ref, {
+      ...settings,
+      weekdays: DEFAULT_WEEKDAYS,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  });
+  return {queueId: ref.id};
+}
+
+// ── SUPPRIMER UNE FILE (coquille vide) ──────────────────────────────
+// Seulement sans plage ni réservation à venir. Firestore ne supprime pas
+// les sous-collections : on balaie d'éventuels restes avant le document.
+async function deleteQueue(db, user, data, now = new Date()) {
+  const ctx = await contextFor(db, user, data, now);
+  const {companyId, queueId, qRef} = ctx;
+  const ts = await qRef.collection("timeSlots").limit(1).get();
+  if (!ts.empty) {
+    throw refuse("hasTimeSlots",
+      "Supprimez d'abord les plages de cette file.");
+  }
+  const upcoming = await companyRef(db, companyId).collection("reservations")
+    .where("queueId", "==", queueId).where("status", "==", "confirmed").get();
+  if (upcoming.docs.some((d) => toDate(d.get("slotStart")) > now)) {
+    throw refuse("hasReservations",
+      "Des réservations sont encore à venir sur cette file.");
+  }
+  for (const sub of ["slots", "timeSlots", "dailyStats"]) {
+    for (;;) {
+      const snap = await qRef.collection(sub).limit(BATCH_LIMIT).get();
+      if (snap.empty) break;
+      const batch = db.batch();
+      snap.docs.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+      if (snap.size < BATCH_LIMIT) break;
+    }
+  }
+  await qRef.delete();
+  return {ok: true};
+}
+
+// ── PROGRAMMER / ANNULER LA SUPPRESSION D'UNE FILE ──────────────────
+// Possible quand TOUTES ses plages sont en suppression programmée : la
+// file partira avec la dernière (maintenance de nuit).
+async function scheduleQueueDeletion(db, user, data, now = new Date()) {
+  const ctx = await contextFor(db, user, data, now);
+  const snap = await ctx.qRef.collection("timeSlots").get();
+  const dates = snap.docs.map((d) => toDate(d.get("deleteAfter")));
+  if (!dates.length || dates.some((d) => !d)) {
+    throw refuse("notAllDeferred",
+      "Toutes les plages doivent d'abord être programmées pour suppression.");
+  }
+  const last = new Date(Math.max(...dates.map((d) => d.getTime())));
+  await ctx.qRef.update({deleteAfter: Timestamp.fromDate(last)});
+  return {deleteAfter: last.getTime()};
+}
+
+async function restoreQueueDeletion(db, user, data, now = new Date()) {
+  const ctx = await contextFor(db, user, data, now);
+  await ctx.qRef.update({deleteAfter: FieldValue.delete()});
+  return {ok: true};
+}
+
 // ── Point d'entrée ──────────────────────────────────────────────────
 const ACTIONS = {
   previewTimeSlot, saveTimeSlot, previewDeleteTimeSlot, deleteTimeSlot,
   restoreTimeSlot, changeDayDuration, changeDayCapacity, reopen,
-  returnToBaxa,
+  returnToBaxa, createQueue, deleteQueue, scheduleQueueDeletion,
+  restoreQueueDeletion,
 };
 
 const companySchedule = onCall({region: REGION, timeoutSeconds: 120},
@@ -993,5 +1095,5 @@ module.exports = {
   ...ACTIONS,
   toMinutes, freeIntervals, shouldSkipGeneration, activeBlockedDays,
   buildDaySlots, mostFrequent, configOf, scheduledEffectiveDay,
-  generateForTimeSlot, recountDays, slotLite, HORIZON_DAYS,
+  generateForTimeSlot, recountDays, slotLite, HORIZON_DAYS, MAX_QUEUES,
 };

@@ -429,6 +429,73 @@ describe("Accueil : durée et capacité du jour", () => {
 });
 
 // ============================================================
+describe("Files : création et suppression", () => {
+  const settings = (extra = {}) => ({companyId: "compA", name: "Barbe",
+    maxAdvanceDays: 2, reservationDeadlineMinutes: 0,
+    allowMultiplePerPlage: false, ...extra});
+
+  it("crée une file avec ses réglages et les jours par défaut", async () => {
+    const {queueId} = await sc.createQueue(db, ADMIN, settings());
+    const q = await read(`${A}/queues/${queueId}`);
+    assert.equal(q.name, "Barbe");
+    assert.deepEqual(q.weekdays, [1, 2, 3, 4, 5]);
+    assert.equal(q.allowMultiplePerPlage, false);
+    assert.ok(q.createdAt);
+  });
+
+  it("au plus 5 files", async () => {
+    for (let i = 2; i <= 5; i++) {
+      await doc(`${A}/queues/q${i}`).set({name: `F${i}`});
+    }
+    await expectRefused(sc.createQueue(db, ADMIN, settings()), "maxQueues");
+  });
+
+  it("réglages hors liste : refusés", () => assert.rejects(
+    sc.createQueue(db, ADMIN, settings({maxAdvanceDays: 30})),
+    (e) => e.code === "invalid-argument"));
+
+  it("un membre ne crée pas de file", () => assert.rejects(
+    sc.createQueue(db, STAFF, settings()),
+    (e) => e.code === "permission-denied"));
+
+  it("supprime une file vide et ses restes", async () => {
+    await putSlot("old", day(-3), "09:00");
+    await doc(`${Q}/dailyStats/${day(-3)}`).set({totalSlots: 1});
+    await sc.deleteQueue(db, ADMIN, {companyId: "compA", queueId: "q1"}, now);
+    assert.equal((await doc(Q).get()).exists, false);
+    assert.equal((await doc(`${Q}/slots/old`).get()).exists, false);
+    assert.equal((await doc(`${Q}/dailyStats/${day(-3)}`).get()).exists,
+      false);
+  });
+
+  it("refuse tant qu'il reste une plage", async () => {
+    await doc(`${Q}/timeSlots/t1`).set({startTime: "09:00"});
+    await expectRefused(sc.deleteQueue(db, ADMIN,
+      {companyId: "compA", queueId: "q1"}, now), "hasTimeSlots");
+  });
+
+  it("refuse tant qu'une réservation est à venir", async () => {
+    await putResa("r1", "s1", day(1), "09:00");
+    await expectRefused(sc.deleteQueue(db, ADMIN,
+      {companyId: "compA", queueId: "q1"}, now), "hasReservations");
+  });
+
+  it("programmer : seulement si toutes les plages partent, à la dernière date",
+    async () => {
+      await doc(`${Q}/timeSlots/t1`).set({deleteAfter: at(day(3), "00:00")});
+      await doc(`${Q}/timeSlots/t2`).set({startTime: "14:00"});
+      const ids = {companyId: "compA", queueId: "q1"};
+      await expectRefused(sc.scheduleQueueDeletion(db, ADMIN, ids, now),
+        "notAllDeferred");
+      await doc(`${Q}/timeSlots/t2`).set({deleteAfter: at(day(5), "00:00")});
+      const res = await sc.scheduleQueueDeletion(db, ADMIN, ids, now);
+      assert.equal(res.deleteAfter, at(day(5), "00:00").getTime());
+      await sc.restoreQueueDeletion(db, ADMIN, ids, now);
+      assert.equal("deleteAfter" in (await read(Q)), false);
+    });
+});
+
+// ============================================================
 describe("Rouvrir / revenir sur Baxa", () => {
   beforeEach(async () => {
     await doc(`${Q}/timeSlots/t1`).set({startTime: "09:00", endTime: "10:00",

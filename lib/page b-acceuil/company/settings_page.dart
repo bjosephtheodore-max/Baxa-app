@@ -30,37 +30,6 @@ const Color _kSheetDark = Color(0xFF1A2E1F);
 const Color _kSheetMuted = Color(0xFF4A564E);
 const Color _kSheetBorder = Color(0xFFD5DED8);
 
-// ============================================================
-// Suppression d'une file : efface ses sous-collections (Firestore ne
-// cascade pas) puis le doc file. N'est appelé que sur une file sans plage
-// et sans réservation à venir — le balayage récupère d'éventuels restes
-// d'anciennes suppressions.
-// ============================================================
-Future<void> _sweepAndDeleteQueue(
-  FirebaseFirestore fs,
-  String companyId,
-  String queueId,
-) async {
-  final queueRef = fs
-      .collection('companies')
-      .doc(companyId)
-      .collection('queues')
-      .doc(queueId);
-  for (final sub in const ['slots', 'timeSlots', 'dailyStats']) {
-    QuerySnapshot<Map<String, dynamic>> snap;
-    do {
-      snap = await queueRef.collection(sub).limit(400).get();
-      if (snap.docs.isEmpty) break;
-      final batch = fs.batch();
-      for (final doc in snap.docs) {
-        batch.delete(doc.reference);
-      }
-      await batch.commit();
-    } while (snap.docs.length == 400);
-  }
-  await queueRef.delete();
-}
-
 // ==================== PAGE PRINCIPALE : LISTE DES FILES ====================
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -252,7 +221,8 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _buildQueueCard(String queueId, Map<String, dynamic> queueData) {
     final name = queueData['name'] as String? ?? 'File sans nom';
     final advance = (queueData['maxAdvanceDays'] as num?)?.toInt() ?? 2;
-    final delay = (queueData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
+    final delay =
+        (queueData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
     final subtitle = delay == 0
         ? 'Réservable $advance j à l\'avance'
         : 'Réservable $advance j à l\'avance · préavis $delay min';
@@ -429,7 +399,18 @@ class _SettingsPageState extends State<SettingsPage> {
 
   // Valeurs proposées pour les deux réglages de la file.
   static const List<int> _kAdvanceDaysValues = [1, 2, 3, 4, 5, 6, 7];
-  static const List<int> _kDeadlineValues = [0, 5, 10, 15, 20, 25, 30, 40, 50, 60];
+  static const List<int> _kDeadlineValues = [
+    0,
+    5,
+    10,
+    15,
+    20,
+    25,
+    30,
+    40,
+    50,
+    60,
+  ];
 
   // Bouton trigger de la carte file : ouvre le formulaire de la file en
   // édition (nom + anticipation + délai min), pré-rempli.
@@ -479,9 +460,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   // Formulaire partagé création / édition d'une file. Ne touche PAS à la base :
   // renvoie les valeurs saisies (ou null si annulé), l'appelant fait l'écriture.
-  Future<
-    ({String name, int advance, int delay, bool allowMultiplePerPlage})?
-  >
+  Future<({String name, int advance, int delay, bool allowMultiplePerPlage})?>
   _showQueueSettingsSheet({
     required bool isEdit,
     String? initialName,
@@ -511,8 +490,9 @@ class _SettingsPageState extends State<SettingsPage> {
         builder: (ctx, setD) => Padding(
           // Le clavier pousse toute la feuille vers le haut ; l'inset de la
           // barre système est géré par le SafeArea du bouton épinglé.
-          padding:
-              EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          ),
           child: Container(
             decoration: const BoxDecoration(
               color: Colors.white,
@@ -591,7 +571,8 @@ class _SettingsPageState extends State<SettingsPage> {
                               style: TextButton.styleFrom(
                                 foregroundColor: _kSheetGreenText,
                                 padding: const EdgeInsets.symmetric(
-                                    horizontal: 4),
+                                  horizontal: 4,
+                                ),
                                 textStyle: const TextStyle(
                                   fontSize: 13,
                                   fontWeight: FontWeight.w700,
@@ -621,15 +602,15 @@ class _SettingsPageState extends State<SettingsPage> {
                                 borderRadius: BorderRadius.circular(14),
                                 onTap: () {
                                   FocusScope.of(ctx).unfocus();
-                                  setD(() =>
-                                      paramsExpanded = !paramsExpanded);
+                                  setD(() => paramsExpanded = !paramsExpanded);
                                 },
                                 child: Padding(
                                   padding: const EdgeInsets.all(10),
                                   child: Row(
                                     children: [
                                       const _SheetIconTile(
-                                          Icons.event_available_rounded),
+                                        Icons.event_available_rounded,
+                                      ),
                                       const SizedBox(width: 12),
                                       Expanded(
                                         child: Column(
@@ -671,10 +652,10 @@ class _SettingsPageState extends State<SettingsPage> {
                               ),
                               if (paramsExpanded)
                                 Container(
-                                  margin:
-                                      const EdgeInsets.fromLTRB(4, 0, 4, 4),
+                                  margin: const EdgeInsets.fromLTRB(4, 0, 4, 4),
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 14),
+                                    horizontal: 14,
+                                  ),
                                   decoration: BoxDecoration(
                                     color: Colors.white,
                                     borderRadius: BorderRadius.circular(14),
@@ -702,8 +683,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                         recommended: 0,
                                         format: (v) =>
                                             v == 0 ? 'Aucun' : '$v min',
-                                        onChanged: (v) =>
-                                            setD(() => delay = v),
+                                        onChanged: (v) => setD(() => delay = v),
                                       ),
                                     ],
                                   ),
@@ -727,8 +707,7 @@ class _SettingsPageState extends State<SettingsPage> {
                               const SizedBox(width: 12),
                               const Expanded(
                                 child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
                                       'Plusieurs réservations',
@@ -777,8 +756,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       child: ElevatedButton(
                         onPressed: () {
                           if (nameCtrl.text.trim().isEmpty) {
-                            setD(() =>
-                                nameError = 'Veuillez entrer un nom');
+                            setD(() => nameError = 'Veuillez entrer un nom');
                             return;
                           }
                           Navigator.pop(ctx, true);
@@ -883,7 +861,9 @@ class _SettingsPageState extends State<SettingsPage> {
                     style: TextStyle(
                       fontSize: 11.5,
                       fontWeight: FontWeight.w600,
-                      color: atRecommended ? _kSheetGreenText : const Color(0xFF6B756F),
+                      color: atRecommended
+                          ? _kSheetGreenText
+                          : const Color(0xFF6B756F),
                     ),
                   ),
                 ),
@@ -891,8 +871,11 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
           const SizedBox(width: 12),
-          stepBtn(Icons.remove_rounded, canDown,
-              () => onChanged(values[i - 1])),
+          stepBtn(
+            Icons.remove_rounded,
+            canDown,
+            () => onChanged(values[i - 1]),
+          ),
           Container(
             width: 70,
             alignment: Alignment.center,
@@ -958,7 +941,9 @@ class _SettingsPageState extends State<SettingsPage> {
                     const SizedBox(height: 7),
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
                       decoration: BoxDecoration(
                         color: _kGreen.withValues(alpha: 0.08),
                         borderRadius: BorderRadius.circular(6),
@@ -999,8 +984,11 @@ class _SettingsPageState extends State<SettingsPage> {
                       color: Colors.white.withValues(alpha: 0.2),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(Icons.lightbulb_rounded,
-                        color: Colors.white, size: 20),
+                    child: const Icon(
+                      Icons.lightbulb_rounded,
+                      color: Colors.white,
+                      size: 20,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   const Expanded(
@@ -1022,8 +1010,11 @@ class _SettingsPageState extends State<SettingsPage> {
                         color: Colors.white.withValues(alpha: 0.2),
                         shape: BoxShape.circle,
                       ),
-                      child: const Icon(Icons.close,
-                          size: 16, color: Colors.white),
+                      child: const Icon(
+                        Icons.close,
+                        size: 16,
+                        color: Colors.white,
+                      ),
                     ),
                   ),
                 ],
@@ -1477,12 +1468,12 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     if (confirm != true) return;
     try {
-      await _firestore
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queueId)
-          .update({'deleteAfter': Timestamp.fromDate(lastDate)});
+      // Côté serveur (companySchedule · scheduleQueueDeletion) : vérifie que
+      // toutes les plages partent et pose la date de la dernière.
+      await CompanyScheduleService.scheduleQueueDeletion(
+        companyId: _companyId!,
+        queueId: queueId,
+      );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1491,26 +1482,35 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       );
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+      _showQueueError(e);
     }
   }
 
+  void _showQueueError(Object e) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(e is CompanyActionException ? e.message : 'Erreur : $e'),
+      ),
+    );
+  }
+
   // ── Exécution de la suppression d'une file (coquille vide) ──────
+  // Côté serveur (companySchedule · deleteQueue) : refusée s'il reste une
+  // plage ou une réservation à venir ; balaie les sous-collections
+  // (Firestore ne les supprime pas avec le document).
   Future<void> _performQueueDeletion(String queueId, String queueName) async {
     try {
-      await _sweepAndDeleteQueue(_firestore, _companyId!, queueId);
+      await CompanyScheduleService.deleteQueue(
+        companyId: _companyId!,
+        queueId: queueId,
+      );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('🗑️ File « $queueName » supprimée')),
       );
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+      _showQueueError(e);
     }
   }
 
@@ -1520,21 +1520,16 @@ class _SettingsPageState extends State<SettingsPage> {
   // celle de la file — voir _restorePendingDeletion).
   Future<void> _restoreQueueDeletion(String queueId) async {
     try {
-      await _firestore
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queueId)
-          .update({'deleteAfter': FieldValue.delete()});
+      await CompanyScheduleService.restoreQueueDeletion(
+        companyId: _companyId!,
+        queueId: queueId,
+      );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Suppression de la file annulée.')),
       );
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+      _showQueueError(e);
     }
   }
 
@@ -1601,23 +1596,21 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     final queueName = created.name;
     try {
-      final docRef = await _firestore
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .add({
-            'name': queueName,
-            'weekdays': const [1, 2, 3, 4, 5],
-            'maxAdvanceDays': created.advance,
-            'reservationDeadlineMinutes': created.delay,
-            'allowMultiplePerPlage': created.allowMultiplePerPlage,
-            'createdAt': FieldValue.serverTimestamp(),
-          });
+      // Côté serveur (companySchedule · createQueue) : la limite de 5 files
+      // est vérifiée au moment d'écrire (le contrôle ci-dessus ne sert qu'à
+      // prévenir tout de suite).
+      final queueId = await CompanyScheduleService.createQueue(
+        companyId: _companyId!,
+        name: queueName,
+        maxAdvanceDays: created.advance,
+        reservationDeadlineMinutes: created.delay,
+        allowMultiplePerPlage: created.allowMultiplePerPlage,
+      );
 
       unawaited(
         FirebaseAnalytics.instance.logEvent(
           name: 'queue_created',
-          parameters: {'company_id': _companyId ?? '', 'queue_id': docRef.id},
+          parameters: {'company_id': _companyId ?? '', 'queue_id': queueId},
         ),
       );
 
@@ -1645,17 +1638,14 @@ class _SettingsPageState extends State<SettingsPage> {
           MaterialPageRoute(
             builder: (_) => QueueTimeSlotsPage(
               companyId: _companyId!,
-              queueId: docRef.id,
+              queueId: queueId,
               queueName: queueName,
             ),
           ),
         );
       }
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+      _showQueueError(e);
     } finally {
       if (mounted) setState(() => _isCreatingQueue = false);
     }
