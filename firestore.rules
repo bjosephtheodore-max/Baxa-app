@@ -190,19 +190,22 @@ service cloud.firestore {
       allow read, write: if signedIn() && request.auth.uid == customerId;
     }
 
-    // Profil : chacun gère le sien, SAUF le quota de réservations du jour
-    // (dailyBookingCount / lastBookingDate), tenu uniquement par la Cloud
-    // Function `booking` — sinon la limite quotidienne serait contournable.
+    // Profil : chacun gère le sien, SAUF les compteurs de réservations —
+    // quota du jour (dailyBookingCount / lastBookingDate) et total
+    // (totalReservations) — tenus uniquement par la Cloud Function
+    // `booking` : sinon la limite quotidienne serait contournable.
     // Pas de suppression côté client (l'app n'en fait pas) : supprimer puis
     // recréer son profil remettrait le quota à zéro.
     match /users/{userId} {
       allow read: if signedIn() && request.auth.uid == userId;
       allow create: if signedIn() && request.auth.uid == userId
         && !request.resource.data.keys()
-          .hasAny(['dailyBookingCount', 'lastBookingDate']);
+          .hasAny(['dailyBookingCount', 'lastBookingDate',
+            'totalReservations']);
       allow update: if signedIn() && request.auth.uid == userId
         && !request.resource.data.diff(resource.data).affectedKeys()
-          .hasAny(['dailyBookingCount', 'lastBookingDate']);
+          .hasAny(['dailyBookingCount', 'lastBookingDate',
+            'totalReservations']);
 
       match /favorites/{favId} {
         allow read, write: if signedIn() && request.auth.uid == userId;

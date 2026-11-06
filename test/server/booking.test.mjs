@@ -98,6 +98,26 @@ describe("Réserver", () => {
     assert.equal(u.lastBookingDate, booking.ymd(now));
   });
 
+  it("compte le total des réservations du client et le renvoie", async () => {
+    await slot("s1", tomorrow10);
+    const first = await reserve(CLIENT, "s1");
+    assert.equal(first.totalReservations, 1);
+    assert.equal((await read("users/cust1")).totalReservations, 1);
+
+    // Plus tard, autre file (une seule réservation active par file).
+    await doc("users/cust1").update({totalReservations: 2});
+    await slot("s2", at(tomorrow10, 120), {q: "q2"});
+    const next = await booking.reserve(db, CLIENT,
+      {companyId: "compA", queueId: "q2", slotId: "s2"}, now);
+    assert.equal(next.totalReservations, 3);
+  });
+
+  it("le total ne bouge pas quand la réservation est refusée", async () => {
+    await slot("s1", tomorrow10, {capacity: 1, reserved: 1});
+    await reserve(CLIENT, "s1").catch(() => {});
+    assert.equal("totalReservations" in (await read("users/cust1")), false);
+  });
+
   it("crée les places du jour si elles manquent (ancien bug 9)", async () => {
     const day = at(tomorrow10, 24 * 60);
     await slot("s1", day);

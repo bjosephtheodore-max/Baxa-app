@@ -464,8 +464,11 @@ describe("Espace client (profil, favoris, notifications)", () => {
     denied(op.get("users/cust1", ANON)));
   it("un client modifie son profil (prénom…)", () =>
     allowed(op.update("users/cust1", {prenom: "Awa"}, CLIENT)));
-  it("un client compte ses réservations (invitation à s'inscrire)", () =>
-    allowed(op.update("users/cust1", {totalReservations: 3}, CLIENT)));
+  // Le total de réservations est tenu par le serveur (booking · reserve).
+  it("un client ne peut pas modifier son total de réservations", () =>
+    denied(op.update("users/cust1", {totalReservations: 3}, CLIENT)));
+  it("un nouveau profil ne peut pas arriver avec un total", () =>
+    denied(op.create("users", "cust8", {totalReservations: 0}, "cust8")));
   it("un nouveau client crée son profil", () =>
     allowed(op.create("users", "cust9", {role: "customer"}, "cust9")));
   it("un client ne peut pas remettre à zéro son quota du jour", () =>

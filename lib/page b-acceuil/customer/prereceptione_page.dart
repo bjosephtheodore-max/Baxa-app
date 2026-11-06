@@ -45,7 +45,7 @@ class _PrereceptionePageState extends State<PrereceptionePage> {
         'nom': _nomController.text.trim(),
         'role': 'customer',
         'isAnonymous': true,
-        'totalReservations': 0,
+        // (totalReservations : tenu par le serveur, voir booking · reserve)
         'createdAt': FieldValue.serverTimestamp(),
         ...LocaleService.toFirestoreMap(),
       }, SetOptions(merge: true));

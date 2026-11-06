@@ -2002,7 +2002,7 @@ class _SlotsPageState extends State<SlotsPage>
     try {
       _showLoadingSnackbar();
 
-      await _rulesService.reserveSlot(
+      final booked = await _rulesService.reserveSlot(
         companyId: widget.entrepriseId,
         queueId: widget.queueId,
         timeSlotId: timeSlotId,
@@ -2020,7 +2020,9 @@ class _SlotsPageState extends State<SlotsPage>
         bool widgetAShown = false;
         final fbUser = FirebaseAuth.instance.currentUser;
         if (fbUser != null && fbUser.isAnonymous) {
-          final result = await _maybeShowProfilePrompt(fbUser.uid);
+          final result = await _maybeShowProfilePrompt(
+            booked.totalReservations,
+          );
           if (!mounted) return;
           widgetAShown = result.shown;
           if (result.wantsSignIn) {
@@ -2099,16 +2101,12 @@ class _SlotsPageState extends State<SlotsPage>
 
   // ── Profile prompt ────────────────────────────────────────────
 
+  // [total] : nombre total de réservations du client, compté par le serveur
+  // dans la même opération que la réservation (booking · reserve).
   Future<({bool shown, bool wantsSignIn})> _maybeShowProfilePrompt(
-    String uid,
+    int total,
   ) async {
     try {
-      final ref = _fs.collection('users').doc(uid);
-      await ref.set({
-        'totalReservations': FieldValue.increment(1),
-      }, SetOptions(merge: true));
-      final snap = await ref.get();
-      final total = (snap.data()?['totalReservations'] as int?) ?? 1;
       if (!mounted || (total != 1 && total != 3)) {
         return (shown: false, wantsSignIn: false);
       }
