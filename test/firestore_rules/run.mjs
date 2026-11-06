@@ -17,6 +17,7 @@ const testFiles = [
   "test/server/booking.test.mjs",
   "test/server/company_account.test.mjs",
   "test/server/company_booking.test.mjs",
+  "test/server/company_schedule.test.mjs",
 ].join(" ");
 
 const result = spawnSync(

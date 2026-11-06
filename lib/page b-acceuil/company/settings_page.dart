@@ -7,8 +7,8 @@ import 'package:intl/intl.dart';
 import 'package:baxa/services/booking_constants.dart';
 import 'package:baxa/services/company_booking_service.dart';
 import 'package:baxa/services/company_functions.dart';
+import 'package:baxa/services/company_schedule_service.dart';
 import 'package:baxa/services/plage_rules.dart';
-import 'package:baxa/services/slot_generation_service.dart';
 import 'package:baxa/services/onboarding_service.dart';
 import 'package:baxa/widgets/onboarding_widgets.dart';
 
@@ -1190,25 +1190,12 @@ class _SettingsPageState extends State<SettingsPage> {
     if (confirm != true || !mounted) return;
 
     try {
-      await _firestore
-          .collection('companies')
-          .doc(companyId)
-          .collection('queues')
-          .doc(queueId)
-          .update({
-            'closureStart': FieldValue.delete(),
-            'closureEnd': FieldValue.delete(),
-          });
-
-      try {
-        await regenerateSlotsForQueue(
-          firestore: _firestore,
-          companyId: companyId,
-          queueId: queueId,
-        );
-      } catch (_) {
-        // La CF de nuit rattrapera si la régénération immédiate échoue.
-      }
+      // Côté serveur (companySchedule · reopen) : fermeture effacée et
+      // créneaux recréés tout de suite si elle était en cours.
+      await CompanyScheduleService.reopen(
+        companyId: companyId,
+        queueIds: [queueId],
+      );
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1217,6 +1204,11 @@ class _SettingsPageState extends State<SettingsPage> {
           backgroundColor: _kGreen,
         ),
       );
+    } on CompanyActionException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(

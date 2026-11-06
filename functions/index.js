@@ -10,6 +10,7 @@ const wake = require("./wake");
 const searchDir = require("./search_directory");
 const zone = require("./zone");
 const suspension = require("./suspension");
+const schedule = require("./company_schedule");
 admin.initializeApp();
 
 // Plafond d'instances par fonction (2e génération). Par défaut chacune peut
@@ -539,38 +540,34 @@ async function generateSlotsForCompany(companyId) {
           continue;
         }
 
-        // Générer les créneaux pour ce jour
+        // Générer les créneaux pour ce jour — même moteur que les actions
+        // immédiates (company_schedule.js) : délai de réservation de la
+        // plage porté par chaque créneau, et aujourd'hui rien de déjà
+        // commencé.
+        const fresh = schedule.buildDaySlots({
+          day: dayStr, tz, timeSlotId: timeSlotDoc.id, existing: [],
+          now: new Date(),
+          cfg: {
+            ...cfg,
+            reservationDeadlineMinutes: Number((cfg === pendingCfg ?
+              tsData.pendingReservationDeadlineMinutes :
+              tsData.reservationDeadlineMinutes) || 0),
+          },
+        });
         let createBatch = db.batch();
         let createCount = 0;
-        let cursor = new Date(plageStart);
-
-        while (cursor.getTime() + cfg.duration * 60 * 1000 <= plageEnd.getTime()) {
-          const slotEnd = new Date(cursor.getTime() + cfg.duration * 60 * 1000);
-
-          createBatch.set(slotsRef.doc(), {
-            "start": cursor,
-            "end": slotEnd,
-            "capacity": cfg.capacity,
-            "reserved": 0,
-            "cancelled": 0,
-            "status": "open",
-            "duration": cfg.duration,
-            "isLegacy": false,
-            "timeSlotId": timeSlotDoc.id,
-          });
-
-          createCount++;
-          cursor = new Date(slotEnd);
-
-          if (createCount >= 450) {
+        for (const s of fresh) {
+          createBatch.set(slotsRef.doc(), s);
+          if (++createCount >= 450) {
             await createBatch.commit();
             createBatch = db.batch();
             createCount = 0;
           }
         }
+        if (createCount > 0) await createBatch.commit();
+        createCount = fresh.length;
 
         if (createCount > 0) {
-          await createBatch.commit();
           totalGenerated += createCount;
           // Écrire dailyStats précis en agrégeant les slots de ce jour
           await upsertDailyStats(dayStr);
@@ -2294,6 +2291,11 @@ exports.companyAccount = require("./company_account").companyAccount;
 // départ) — fonction 2e génération en africa-south1 : voir
 // company_booking.js.
 exports.companyBooking = require("./company_booking").companyBooking;
+
+// ── Plages horaires et créneaux (création, modification, suppression,
+// modifs du jour, réouverture) — fonction 2e génération en africa-south1 :
+// voir company_schedule.js (moteur partagé avec la génération de nuit).
+exports.companySchedule = schedule.companySchedule;
 
 // ── Plage complète / bientôt complète (déclenché à chaque réservation) ─
 async function checkPlageFillAfterReservation(companyId, resa) {

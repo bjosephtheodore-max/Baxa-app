@@ -497,170 +497,24 @@ class _HouseNotifier extends ChangeNotifier {
     // l'instant présent pour une édition normale.
     final effectiveNow = anchorNow ?? DateTime.now();
     try {
-      // ── Modif DU JOUR uniquement (free-spans) ───────────────────────────
-      // L'accueil ne modifie que le jour affiché : la plage elle-même (ses
-      // valeurs habituelles) ne change que depuis la page des plages.
-      final dayStart = DateTime(
-        _selectedDate.year,
-        _selectedDate.month,
-        _selectedDate.day,
+      // Côté serveur (companySchedule · changeDayDuration), en une
+      // transaction : modif DU JOUR uniquement (la plage elle-même ne change
+      // que depuis la page des plages), créneaux vides remplacés, espaces
+      // libres autour des réservations remplis avec la nouvelle durée,
+      // jamais dans le passé, places du jour recalculées. Un client qui
+      // réserve au même instant n'est plus jamais rattaché à un créneau
+      // supprimé ; une plage bloquée ce jour-là est refusée.
+      final createdCount = await CompanyScheduleService.changeDayDuration(
+        companyId: _companyId!,
+        queueId: queue.id,
+        timeSlotId: tsInfo.id,
+        day: _selectedDate,
+        duration: newDuration,
+        // Capacité DU JOUR (une modif de capacité du jour ne doit pas être
+        // perdue quand on change ensuite la durée).
+        capacity: tsInfo.effectiveCapacity > 0 ? tsInfo.effectiveCapacity : 1,
+        anchor: anchorNow,
       );
-      final dayEnd = dayStart.add(const Duration(days: 1));
-
-      final slotsQuery = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('slots')
-          .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(dayStart))
-          .where('start', isLessThan: Timestamp.fromDate(dayEnd))
-          .orderBy('start');
-
-      QuerySnapshot slotsSnap;
-      try {
-        slotsSnap = await slotsQuery.get();
-      } on FirebaseException catch (e) {
-        if (e.code == 'unavailable') {
-          slotsSnap = await slotsQuery.get(
-            const GetOptions(source: Source.cache),
-          );
-        } else {
-          rethrow;
-        }
-      }
-
-      final allDocs = slotsSnap.docs
-          .where(
-            (doc) =>
-                (doc.data() as Map<String, dynamic>)['timeSlotId'] == tsInfo.id,
-          )
-          .toList();
-
-      if (allDocs.isEmpty) {
-        return ModificationResult(
-          success: false,
-          message: 'Aucun créneau trouvé pour cette plage',
-        );
-      }
-
-      final allSlots =
-          allDocs
-              .map((doc) => _agenda.slotFromDoc(doc, queueId: queue.id))
-              .toList()
-            ..sort((a, b) => a.start.compareTo(b.start));
-
-      // Plage bloquée ce jour-là (incident en cours) : aucune modif. Sans ce
-      // garde-fou, ses créneaux vides bloqués seraient supprimés puis
-      // recréés « ouverts » — la plage serait débloquée en silence.
-      if (allSlots.any((s) => s.isBlocked && s.end.isAfter(DateTime.now()))) {
-        return const ModificationResult(
-          success: false,
-          message:
-              'Cette plage est bloquée aujourd\'hui — débloquez-la d\'abord pour la modifier.',
-        );
-      }
-
-      final emptySlotIds = allSlots
-          .where((s) => s.reserved == 0)
-          .map((s) => s.id)
-          .toList();
-
-      // Espaces libres = [plageStart, plageEnd] minus les créneaux réservés.
-      final freeSpans = _agenda.freeSpans(allSlots, plageStart, plageEnd);
-
-      final batch = _db.batch();
-      final slotsRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('slots');
-
-      // Supprimer tous les créneaux vides
-      for (final id in emptySlotIds) {
-        batch.delete(slotsRef.doc(id));
-      }
-
-      // Remplir chaque espace libre avec la nouvelle durée
-      // On ne crée jamais de créneaux dans le passé (cas création de plage le jour J)
-      int createdCount = 0;
-      final roundedNow = _agenda.roundUpToNext5Minutes(effectiveNow);
-      // Capacité DU JOUR (une modif de capacité du jour ne doit pas être
-      // perdue quand on change ensuite la durée).
-      final slotCapacity = tsInfo.effectiveCapacity > 0
-          ? tsInfo.effectiveCapacity
-          : 1;
-      for (final span in freeSpans) {
-        var t = span.start.isBefore(effectiveNow) ? roundedNow : span.start;
-        while (true) {
-          final newEnd = t.add(Duration(minutes: newDuration));
-          if (!newEnd.isAfter(span.end) &&
-              newEnd.difference(t).inMinutes >= 5) {
-            batch.set(slotsRef.doc(), {
-              'start': Timestamp.fromDate(t),
-              'end': Timestamp.fromDate(newEnd),
-              'duration': newDuration,
-              'capacity': slotCapacity,
-              'reserved': 0,
-              'cancelled': 0,
-              'status': 'open',
-              'isLegacy': false,
-              'timeSlotId': tsInfo.id,
-              'reservationDeadlineMinutes': tsInfo.reservationDeadlineMinutes,
-            });
-            createdCount++;
-            t = newEnd;
-          } else {
-            break;
-          }
-        }
-      }
-
-      // Recalculer dailyStats pour que "disponible" soit correct après
-      // refresh. Le résumé couvre TOUTE la file ce jour-là : les créneaux
-      // des autres plages comptent aussi (avant, seuls ceux de la plage
-      // modifiée étaient comptés et le reste était effacé).
-      final keptSlots = [
-        ...slotsSnap.docs
-            .where(
-              (doc) =>
-                  (doc.data() as Map<String, dynamic>)['timeSlotId'] !=
-                  tsInfo.id,
-            )
-            .map((doc) => _agenda.slotFromDoc(doc, queueId: queue.id)),
-        ...allSlots.where((s) => s.reserved > 0),
-      ];
-      final int keptCapacity = keptSlots.fold(0, (acc, s) => acc + s.capacity);
-      final int keptReserved = keptSlots.fold(0, (acc, s) => acc + s.reserved);
-      final int keptCancelled = keptSlots.fold(
-        0,
-        (acc, s) => acc + s.cancelled,
-      );
-      final int totalCapacity = keptCapacity + createdCount * slotCapacity;
-      final dateStr =
-          '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
-      batch.set(
-        _db
-            .collection('companies')
-            .doc(_companyId)
-            .collection('queues')
-            .doc(queue.id)
-            .collection('dailyStats')
-            .doc(dateStr),
-        {
-          'date': dateStr,
-          'totalCapacity': totalCapacity,
-          'available': totalCapacity - keptReserved,
-          'reserved': keptReserved,
-          'cancelled': keptCancelled,
-          'totalSlots': keptSlots.length + createdCount,
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
-
-      await batch.commit();
       if (!isRevertAction) {
         // L'annulation (5 min) revient à la durée DU JOUR d'avant la modif,
         // pas à la durée habituelle de la plage.
@@ -679,10 +533,46 @@ class _HouseNotifier extends ChangeNotifier {
         message: '$createdCount créneau(x) créés ✅',
         slotsAffected: createdCount,
       );
+    } on CompanyActionException catch (e) {
+      return ModificationResult(success: false, message: e.message);
     } catch (e) {
       return ModificationResult(success: false, message: 'Erreur : $e');
     } finally {
       _busyTimeSlotIds.remove(tsInfo.id);
+    }
+  }
+
+  // ── Capacité des créneaux du jour (accueil) ───────────────────────────────
+  // Côté serveur (companySchedule · changeDayCapacity) : créneaux ouverts à
+  // venir du jour affiché, jamais sous le nombre de réservations ; places
+  // du jour recalculées.
+  Future<ModificationResult> changeDayCapacity({
+    required String queueId,
+    required int newCapacity,
+    String? timeSlotId,
+  }) async {
+    if (_companyId == null) {
+      return const ModificationResult(
+        success: false,
+        message: 'Aucune entreprise trouvée',
+      );
+    }
+    try {
+      final affected = await CompanyScheduleService.changeDayCapacity(
+        companyId: _companyId!,
+        queueId: queueId,
+        day: _selectedDate,
+        capacity: newCapacity,
+        timeSlotId: timeSlotId,
+      );
+      return ModificationResult(
+        success: true,
+        message:
+            'Capacité mise à jour à $newCapacity pers. ($affected créneaux)',
+        slotsAffected: affected,
+      );
+    } on CompanyActionException catch (e) {
+      return ModificationResult(success: false, message: e.message);
     }
   }
 

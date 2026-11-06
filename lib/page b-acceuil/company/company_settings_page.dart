@@ -5,9 +5,9 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:baxa/page b-acceuil/company/settings_page.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 import 'package:baxa/services/booking_constants.dart';
-import 'package:baxa/services/slot_generation_service.dart';
 import 'package:baxa/services/company_booking_service.dart';
 import 'package:baxa/services/company_functions.dart';
+import 'package:baxa/services/company_schedule_service.dart';
 import 'package:baxa/widgets/account_status_card.dart';
 import 'package:baxa/widgets/qr_code_section.dart';
 import 'package:baxa/services/location_service.dart';
@@ -1047,37 +1047,13 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     if (confirm != true || !mounted) return;
 
     try {
-      final batch = _firestore.batch();
-      for (final id in queueIds) {
-        batch.update(
-          _firestore
-              .collection('companies')
-              .doc(_companyId)
-              .collection('queues')
-              .doc(id),
-          {
-            'closureStart': FieldValue.delete(),
-            'closureEnd': FieldValue.delete(),
-          },
-        );
-      }
-      await batch.commit();
-
-      // Régénération immédiate des créneaux — seulement si la fermeture
-      // était active (sinon la génération n'avait jamais été suspendue).
-      if (wasActive) {
-        for (final id in queueIds) {
-          try {
-            await regenerateSlotsForQueue(
-              firestore: _firestore,
-              companyId: _companyId!,
-              queueId: id,
-            );
-          } catch (_) {
-            // La CF de nuit rattrapera si la régénération immédiate échoue.
-          }
-        }
-      }
+      // Côté serveur (companySchedule · reopen) : fermetures effacées et,
+      // si elles étaient en cours (génération suspendue), créneaux recréés
+      // tout de suite.
+      await CompanyScheduleService.reopen(
+        companyId: _companyId!,
+        queueIds: queueIds,
+      );
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1087,6 +1063,11 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
           ),
         ),
       );
+    } on CompanyActionException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(

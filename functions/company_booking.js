@@ -671,4 +671,10 @@ module.exports = {
   // Exposés pour les tests (émulateur).
   addManual, removeManual, block, unblock, close, leave,
   LEAVE_GRACE_DAYS,
+  // Outils partagés avec company_schedule.js.
+  shared: {
+    refuse, toDate, requireString, optionalString, requireDay, millis,
+    isQueueClosedNow, companyAccess, cancelReservations, commitInBatches,
+    companyRef, queueRef, BATCH_LIMIT,
+  },
 };

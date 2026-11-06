@@ -12,6 +12,7 @@ import 'package:baxa/services/agenda_service.dart';
 import 'package:baxa/services/booking_constants.dart';
 import 'package:baxa/services/company_booking_service.dart';
 import 'package:baxa/services/company_functions.dart';
+import 'package:baxa/services/company_schedule_service.dart';
 import 'package:baxa/services/plage_rules.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:baxa/page b-acceuil/company/team_page.dart';
@@ -1553,7 +1554,7 @@ class _HousePageState extends State<HousePage>
 
   // ── Modification capacité ─────────────────────────────────
   // Ne jamais bloquer la réduction de capacité au prétexte qu'un créneau est
-  // complet : `modifySlotCapacity` clampe déjà, créneau par créneau, la
+  // complet : le serveur (changeDayCapacity) clampe déjà, créneau par créneau, la
   // nouvelle capacité au nombre de réservations existantes (un créneau
   // complet garde sa capacité et ses réservations intactes, les autres
   // s'ajustent normalement). Un pré-check bloquant ici serait redondant et,
@@ -1584,9 +1585,8 @@ class _HousePageState extends State<HousePage>
       if (!confirmed) return;
 
       _n.setQueueLoading(queue.id);
-      final result = await _n.agenda.modifySlotCapacity(
+      final result = await _n.changeDayCapacity(
         queueId: queue.id,
-        date: _n.selectedDate,
         newCapacity: newCapacity,
         timeSlotId: tsInfo.id,
       );
