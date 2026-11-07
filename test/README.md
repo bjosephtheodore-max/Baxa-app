@@ -9,19 +9,26 @@ flutter test
 ```
 
 Réservations (limites, écarts entre créneaux, fermeture des files), calculs de
-l'agenda, génération des créneaux. Firebase est **simulé en mémoire** : aucune
+l'agenda, règles des plages. Firebase est **simulé en mémoire** : aucune
 donnée réelle n'est touchée. Durée : quelques secondes.
 
-## 2. Règles de sécurité Firestore — `test/firestore_rules/`
+## 2. Règles de sécurité Firestore et fonctions serveur — `test/firestore_rules/`, `test/server/`
 
 ```
 node test/firestore_rules/run.mjs
 ```
 
-Vérifie qui peut lire ou modifier quoi (visiteur, client, admin, staff) sur un
-**émulateur local** avec des données fictives. À relancer après chaque
-modification de `firestore.rules`. Durée : environ 1 minute (le premier
+Vérifie qui peut lire ou modifier quoi (visiteur, client, admin, staff), puis
+les fonctions serveur qui écrivent réservations, créneaux et compteurs :
+`booking` (client), `companyAccount` (inscription et rôle de la structure),
+`companyBooking` (guichet, blocage, fermetures, départ) et `companySchedule`
+(plages, créneaux, génération). Tout tourne sur un **émulateur local** avec
+des données fictives. À relancer après chaque modification de
+`firestore.rules` ou de `functions/`. Durée : environ 1 minute (le premier
 lancement télécharge l'émulateur).
+
+Les petits tests propres au dossier `functions/` (fuseaux, réveils…) se
+lancent avec `npm test` depuis `functions/`.
 
 Prérequis : Java 17 ou plus. L'outil Firebase est volontairement épinglé en
 version 13 (la dernière compatible Java 17).

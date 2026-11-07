@@ -353,7 +353,9 @@ class ReservationRulesService {
 
   // ── RÉSERVER ──────────────────────────────────────────────────
 
-  Future<String> reserveSlot({
+  /// [totalReservations] : nombre total de réservations du client, tenu
+  /// par le serveur (sert à l'invitation à compléter son profil).
+  Future<({String reservationId, int totalReservations})> reserveSlot({
     required String companyId,
     required String queueId,
     required String timeSlotId,
@@ -386,7 +388,10 @@ class ReservationRulesService {
       ),
     );
 
-    return result['reservationId'] as String;
+    return (
+      reservationId: result['reservationId'] as String,
+      totalReservations: (result['totalReservations'] as num?)?.toInt() ?? 0,
+    );
   }
 
   // ── REMPLACER ─────────────────────────────────────────────────

@@ -5,8 +5,11 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:baxa/page b-acceuil/company/settings_page.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 import 'package:baxa/services/booking_constants.dart';
-import 'package:baxa/services/slot_generation_service.dart';
-import 'package:baxa/services/reservation_admin_service.dart';
+import 'package:baxa/services/company_booking_service.dart';
+import 'package:baxa/services/company_functions.dart';
+import 'package:baxa/services/company_schedule_service.dart';
+import 'package:baxa/services/password_rules.dart';
+import 'package:baxa/widgets/password_checklist.dart';
 import 'package:baxa/widgets/account_status_card.dart';
 import 'package:baxa/widgets/qr_code_section.dart';
 import 'package:baxa/services/location_service.dart';
@@ -727,57 +730,13 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     final companyId = _companyId;
     if (companyId == null) return;
     try {
-      final now = DateTime.now();
-      final executeAfter = now.add(const Duration(days: _graceDays));
-
-      final data = <String, dynamic>{
-        'companyId': companyId,
-        'companyName': _companyData?['nom'] ?? '',
-        'email': _auth.currentUser?.email ?? _companyData?['email'] ?? '',
-        'phone': _companyData?['telephone'] ?? _companyData?['phone'] ?? '',
-        'reason': reason,
-        'requestedAt': FieldValue.serverTimestamp(),
-        'requestedBy': _auth.currentUser?.uid ?? '',
-        'status': 'scheduled',
-        'executeAfter': Timestamp.fromDate(executeAfter),
-      };
-      await _firestore.collection('deletionRequests').doc(companyId).set(data);
-
-      // Fermeture indéterminée immédiate de toutes les files + annulation
-      // des réservations à venir (le client est prévenu par la Cloud
-      // Function, source `company_closure`).
-      final queuesSnap = await _firestore
-          .collection('companies')
-          .doc(companyId)
-          .collection('queues')
-          .get();
-
-      if (queuesSnap.docs.isNotEmpty) {
-        final closeBatch = _firestore.batch();
-        for (final q in queuesSnap.docs) {
-          closeBatch.update(q.reference, {
-            'closureStart': Timestamp.fromDate(now),
-            'closureEnd': FieldValue.delete(),
-          });
-        }
-        await closeBatch.commit();
-      }
-
-      final resSnap = await _firestore
-          .collection('companies')
-          .doc(companyId)
-          .collection('reservations')
-          .where('status', isEqualTo: 'confirmed')
-          .get();
-      final toCancel = resSnap.docs.where((d) {
-        final ss = (d.data()['slotStart'] as Timestamp?)?.toDate();
-        return ss != null && ss.isAfter(now);
-      }).toList();
-      await cancelReservationsBatch(
-        firestore: _firestore,
+      // Côté serveur (companyBooking · leave) : demande de suppression
+      // (délai de grâce), fermeture indéterminée de toutes les files dès
+      // maintenant et annulation des réservations à venir (le client est
+      // prévenu par la Cloud Function, source `company_closure`).
+      final executeAfter = await CompanyBookingService.leave(
         companyId: companyId,
-        reservationDocs: toCancel,
-        cancellationSource: 'company_closure',
+        reason: reason,
       );
 
       // L'accès du staff est coupé par la Cloud Function
@@ -818,6 +777,11 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
         MaterialPageRoute(builder: (_) => const ChoosePage()),
         (route) => false,
       );
+    } on CompanyActionException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -1085,37 +1049,13 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     if (confirm != true || !mounted) return;
 
     try {
-      final batch = _firestore.batch();
-      for (final id in queueIds) {
-        batch.update(
-          _firestore
-              .collection('companies')
-              .doc(_companyId)
-              .collection('queues')
-              .doc(id),
-          {
-            'closureStart': FieldValue.delete(),
-            'closureEnd': FieldValue.delete(),
-          },
-        );
-      }
-      await batch.commit();
-
-      // Régénération immédiate des créneaux — seulement si la fermeture
-      // était active (sinon la génération n'avait jamais été suspendue).
-      if (wasActive) {
-        for (final id in queueIds) {
-          try {
-            await regenerateSlotsForQueue(
-              firestore: _firestore,
-              companyId: _companyId!,
-              queueId: id,
-            );
-          } catch (_) {
-            // La CF de nuit rattrapera si la régénération immédiate échoue.
-          }
-        }
-      }
+      // Côté serveur (companySchedule · reopen) : fermetures effacées et,
+      // si elles étaient en cours (génération suspendue), créneaux recréés
+      // tout de suite.
+      await CompanyScheduleService.reopen(
+        companyId: _companyId!,
+        queueIds: queueIds,
+      );
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1125,6 +1065,11 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
           ),
         ),
       );
+    } on CompanyActionException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -1149,80 +1094,19 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
   Future<void> _applyClosure(_ClosurePlan p) async {
     if (_companyId == null) return;
     try {
-      final queuesRef = _firestore
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues');
-
-      // 0. Relecture : une file qui a reçu une fermeture entre-temps (autre
-      // appareil connecté au même compte) n'est jamais écrasée.
-      final fresh = await Future.wait(
-        p.queueIds.map((id) => queuesRef.doc(id).get()),
+      // Côté serveur (companyBooking · close), en une fois : refus si une
+      // des files a déjà une fermeture (autre appareil connecté au même
+      // compte — rien n'est alors écrasé), pose de la fermeture, puis
+      // annulation des réservations prises dans la période si l'entreprise
+      // l'a choisi (notifiées par onReservationCancelledByCompany, source
+      // `company_closure`).
+      final cancelled = await CompanyBookingService.close(
+        companyId: _companyId!,
+        queueIds: p.queueIds.toList(),
+        start: p.start,
+        end: p.end,
+        cancelCaught: p.cancelCaught,
       );
-      final now = DateTime.now();
-      final alreadyTaken = fresh.any((s) {
-        final d = s.data();
-        if (d == null) return false;
-        return hasClosureScheduled(
-          (d['closureStart'] as Timestamp?)?.toDate(),
-          (d['closureEnd'] as Timestamp?)?.toDate(),
-          now: now,
-        );
-      });
-      if (alreadyTaken) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Une des files a déjà une fermeture. Rien n\'a été modifié.',
-            ),
-          ),
-        );
-        return;
-      }
-
-      // 1. Poser la fermeture sur les files ciblées.
-      final batch = _firestore.batch();
-      for (final id in p.queueIds) {
-        batch.update(
-          queuesRef.doc(id),
-          {
-            'closureStart': Timestamp.fromDate(p.start),
-            'closureEnd': p.end != null
-                ? Timestamp.fromDate(p.end!)
-                : FieldValue.delete(),
-          },
-        );
-      }
-      await batch.commit();
-
-      // 2. Annuler les réservations attrapées, si l'entreprise l'a choisi.
-      // La notification part côté serveur (Cloud Function
-      // onReservationCancelledByCompany, source `company_closure`).
-      int cancelled = 0;
-      if (p.cancelCaught) {
-        final snap = await _firestore
-            .collection('companies')
-            .doc(_companyId)
-            .collection('reservations')
-            .where('status', isEqualTo: 'confirmed')
-            .get();
-        final caught = snap.docs.where((doc) {
-          final data = doc.data();
-          if (!p.queueIds.contains(data['queueId'])) return false;
-          final ss = (data['slotStart'] as Timestamp?)?.toDate();
-          if (ss == null || ss.isBefore(p.start)) return false;
-          if (p.end != null && ss.isAfter(p.end!)) return false;
-          return true;
-        }).toList();
-
-        cancelled = await cancelReservationsBatch(
-          firestore: _firestore,
-          companyId: _companyId!,
-          reservationDocs: caught,
-          cancellationSource: 'company_closure',
-        );
-      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1235,6 +1119,11 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
           backgroundColor: Colors.indigo.shade600,
         ),
       );
+    } on CompanyActionException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -2218,6 +2107,7 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     bool obscureNew = true;
     bool obscureConfirm = true;
     bool isLoading = false;
+    String? newError;
     String? confirmError;
 
     await showModalBottomSheet(
@@ -2314,14 +2204,15 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                   hint: 'Nouveau mot de passe',
                   obscure: obscureNew,
                   onToggle: () => setSheet(() => obscureNew = !obscureNew),
+                  errorText: newError,
+                  onChanged: (_) {
+                    if (newError != null) setSheet(() => newError = null);
+                  },
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 Padding(
                   padding: const EdgeInsets.only(left: 4),
-                  child: Text(
-                    'Au moins 6 caractères recommandés',
-                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                  ),
+                  child: PasswordChecklist(controller: newCtrl, okColor: _green),
                 ),
                 const SizedBox(height: 14),
 
@@ -2349,6 +2240,11 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                     onPressed: isLoading
                         ? null
                         : () async {
+                            final rule = validateNewPassword(newCtrl.text);
+                            if (rule != null) {
+                              setSheet(() => newError = rule);
+                              return;
+                            }
                             if (newCtrl.text != confirmCtrl.text) {
                               setSheet(
                                 () => confirmError =
@@ -2540,7 +2436,9 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
       if (e.code == 'wrong-password' || e.code == 'invalid-credential') {
         message = 'Ancien mot de passe incorrect';
       } else if (e.code == 'weak-password') {
-        message = 'Le nouveau mot de passe est trop faible';
+        message =
+            'Mot de passe trop faible : $kPasswordMinLength caractères '
+            'minimum, avec au moins une lettre et un chiffre.';
       } else if (e.code == 'too-many-requests') {
         message = 'Trop de tentatives. Réessayez dans quelques minutes.';
       } else if (e.code == 'network-request-failed') {

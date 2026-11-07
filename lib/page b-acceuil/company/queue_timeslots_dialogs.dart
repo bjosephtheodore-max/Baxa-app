@@ -5,134 +5,10 @@ part of 'settings_page.dart';
 enum _ConflictChoice { cancel, scheduleLater, forceNow }
 
 // ============================================================
-// DIALOGS — vérification de chevauchement, conflits, plage horaire
+// DIALOGS — choix en cas de conflit, plage horaire (les vérifications
+// — chevauchement, conflits — sont faites côté serveur, companySchedule)
 // ============================================================
 extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
-  // ── Vérification chevauchement ────────────────────────────────
-  Future<String?> _checkOverlap({
-    required int newStartMin,
-    required int newEndMin,
-    required List<int> newDays,
-    String? excludeSlotId,
-  }) async {
-    final snap = await _firestore
-        .collection('companies')
-        .doc(widget.companyId)
-        .collection('queues')
-        .doc(widget.queueId)
-        .collection('timeSlots')
-        .get();
-
-    for (final doc in snap.docs) {
-      if (doc.id == excludeSlotId) continue;
-      final d = doc.data();
-      final existingDays =
-          (d['workingDays'] as List<dynamic>?)?.map((e) => e as int).toList() ??
-          _queueWeekdays;
-
-      final hasCommonDay = newDays.any((day) => existingDays.contains(day));
-      if (!hasCommonDay) continue;
-
-      final existStartParts = (d['startTime'] as String? ?? '00:00').split(':');
-      final existEndParts = (d['endTime'] as String? ?? '00:00').split(':');
-      final existStartMin =
-          int.parse(existStartParts[0]) * 60 + int.parse(existStartParts[1]);
-      final existEndMin =
-          int.parse(existEndParts[0]) * 60 + int.parse(existEndParts[1]);
-
-      if (newStartMin < existEndMin && existStartMin < newEndMin) {
-        return '${d['startTime']} – ${d['endTime']}';
-      }
-    }
-    return null;
-  }
-
-  // ── Détection des créneaux réservés en conflit ────────────────
-  // Un créneau est en conflit si sa plage sort des nouvelles bornes
-  // ou si son jour d'ouverture a été retiré.
-  //
-  // Renvoie aussi [furthestReservedStart] : le début du créneau réservé
-  // le plus lointain de cette plage (conflictuel ou non), qui sert à
-  // calculer une date d'effet garantie postérieure à toute réservation
-  // existante (voir _computeScheduledEffectiveDate). null si aucune
-  // réservation.
-  Future<
-      ({
-        List<QueryDocumentSnapshot<Map<String, dynamic>>> conflicts,
-        DateTime? furthestReservedStart,
-      })>
-  _findConflictingReservedSlots({
-    required String timeSlotId,
-    required int newStartMin,
-    required int newEndMin,
-    required List<int> newWorkingDays,
-  }) async {
-    final today = DateTime(
-      DateTime.now().year,
-      DateTime.now().month,
-      DateTime.now().day,
-    );
-    final slotsRef = _firestore
-        .collection('companies')
-        .doc(widget.companyId)
-        .collection('queues')
-        .doc(widget.queueId)
-        .collection('slots');
-
-    QuerySnapshot<Map<String, dynamic>> snap;
-    try {
-      snap = await slotsRef
-          .where('start', isGreaterThanOrEqualTo: today)
-          .get();
-    } on FirebaseException catch (e) {
-      if (e.code == 'unavailable') {
-        snap = await slotsRef
-            .where('start', isGreaterThanOrEqualTo: today)
-            .get(const GetOptions(source: Source.cache));
-      } else {
-        rethrow;
-      }
-    }
-
-    // Jours bloqués de la plage : la modif ne s'y applique pas, leurs
-    // réservations (suspendues) ne sont donc jamais en conflit.
-    final blockedDays = _activeBlockedDaysIn(snap.docs, timeSlotId);
-
-    final conflicting = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-    DateTime? furthestReservedStart;
-    for (final doc in snap.docs) {
-      final data = doc.data();
-      if (data['timeSlotId'] != timeSlotId) continue;
-      final reserved = data['reserved'] as int? ?? 0;
-      if (reserved == 0) continue;
-      if (_onBlockedDay(data, blockedDays)) continue;
-
-      final slotStart = (data['start'] as Timestamp).toDate();
-      if (furthestReservedStart == null ||
-          slotStart.isAfter(furthestReservedStart)) {
-        furthestReservedStart = slotStart;
-      }
-      final slotEnd = (data['end'] as Timestamp).toDate();
-      final slotStartMin = slotStart.hour * 60 + slotStart.minute;
-      // Un créneau se terminant à 00:00 du lendemain = minuit (1440 min)
-      final slotEndMin = slotEnd.day > slotStart.day
-          ? 1440
-          : slotEnd.hour * 60 + slotEnd.minute;
-      final slotWeekday = slotStart.weekday;
-
-      final outsideTime = slotStartMin < newStartMin || slotEndMin > newEndMin;
-      final outsideDay = !newWorkingDays.contains(slotWeekday);
-
-      if (outsideTime || outsideDay) {
-        conflicting.add(doc);
-      }
-    }
-    return (
-      conflicts: conflicting,
-      furthestReservedStart: furthestReservedStart,
-    );
-  }
-
   // ── Choix : programmer sans impact, ou appliquer maintenant ─────
   // [isDeletion] : la plage entière est supprimée (pas seulement modifiée).
   // Change le texte et le libellé du bouton rouge.
@@ -162,7 +38,10 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       builder: (ctx) => Container(
         width: double.infinity,
         padding: EdgeInsets.fromLTRB(
-          24, 20, 24, 24 + MediaQuery.of(ctx).padding.bottom,
+          24,
+          20,
+          24,
+          24 + MediaQuery.of(ctx).padding.bottom,
         ),
         decoration: const BoxDecoration(
           color: Colors.white,
@@ -188,12 +67,14 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                 ),
                 InkWell(
                   borderRadius: BorderRadius.circular(20),
-                  onTap: () =>
-                      Navigator.pop(ctx, _ConflictChoice.cancel),
+                  onTap: () => Navigator.pop(ctx, _ConflictChoice.cancel),
                   child: Padding(
                     padding: const EdgeInsets.all(4),
-                    child: Icon(Icons.close_rounded,
-                        color: Colors.grey.shade500, size: 22),
+                    child: Icon(
+                      Icons.close_rounded,
+                      color: Colors.grey.shade500,
+                      size: 22,
+                    ),
                   ),
                 ),
               ],
@@ -235,8 +116,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
             SizedBox(
               width: double.infinity,
               child: OutlinedButton(
-                onPressed: () =>
-                    Navigator.pop(ctx, _ConflictChoice.forceNow),
+                onPressed: () => Navigator.pop(ctx, _ConflictChoice.forceNow),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: Colors.red.shade600,
                   side: BorderSide(color: Colors.red.shade200),
@@ -248,7 +128,9 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                 child: Text(
                   isDeletion ? 'Supprimer maintenant' : 'Appliquer maintenant',
                   style: const TextStyle(
-                      fontWeight: FontWeight.w600, fontSize: 15),
+                    fontWeight: FontWeight.w600,
+                    fontSize: 15,
+                  ),
                 ),
               ),
             ),
@@ -295,8 +177,10 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
         ? List<int>.from(slotData!['workingDays'])
         : List<int>.from(_queueWeekdays);
 
+    // Ramenée dans 1–30 (bornes du serveur) : une plage enregistrée avant
+    // ces bornes (ex. 40 pers.) serait sinon refusée à l'enregistrement.
     int selectedCapacity =
-        (slotData?['capacityPerSlot'] as num?)?.toInt() ?? 1;
+        ((slotData?['capacityPerSlot'] as num?)?.toInt() ?? 1).clamp(1, 30);
     int selectedDelay =
         (slotData?['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
     int selectedAdvanceDays =
@@ -418,63 +302,70 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                     padding: const EdgeInsets.symmetric(horizontal: 20),
                     children: [
                       // ── Chip Guide ───────────────────────────────────
-                      Builder(builder: (_) {
-                        final pulsing =
-                            OnboardingService().step == 5 && !guideSeen;
-                        final chip = GestureDetector(
-                          onTap: () {
-                            if (!guideSeen) setD(() => guideSeen = true);
-                            _showSlotHelp(ctx);
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 8,
-                            ),
-                            decoration: BoxDecoration(
-                              color: pulsing
-                                  ? _kSheetGreenSoft
-                                  : Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: pulsing
-                                    ? _kSheetGreen.withValues(alpha: 0.5)
-                                    : _kSheetBorder,
+                      Builder(
+                        builder: (_) {
+                          final pulsing =
+                              OnboardingService().step == 5 && !guideSeen;
+                          final chip = GestureDetector(
+                            onTap: () {
+                              if (!guideSeen) setD(() => guideSeen = true);
+                              _showSlotHelp(ctx);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 8,
                               ),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.info_outline,
-                                    size: 15, color: _kSheetGreen),
-                                const SizedBox(width: 6),
-                                Text(
-                                  'Guide des paramètres',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: pulsing
-                                        ? _kSheetGreenText
-                                        : _kSheetMuted,
-                                  ),
+                              decoration: BoxDecoration(
+                                color: pulsing
+                                    ? _kSheetGreenSoft
+                                    : Colors.white,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: pulsing
+                                      ? _kSheetGreen.withValues(alpha: 0.5)
+                                      : _kSheetBorder,
                                 ),
-                                const SizedBox(width: 4),
-                                Icon(Icons.arrow_forward_ios_rounded,
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.info_outline,
+                                    size: 15,
+                                    color: _kSheetGreen,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    'Guide des paramètres',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: pulsing
+                                          ? _kSheetGreenText
+                                          : _kSheetMuted,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Icon(
+                                    Icons.arrow_forward_ios_rounded,
                                     size: 10,
                                     color: pulsing
                                         ? _kSheetGreenText
-                                        : const Color(0xFF8A938D)),
-                              ],
+                                        : const Color(0xFF8A938D),
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
-                        );
-                        return pulsing
-                            ? PulsingGlow(
-                                borderRadius: BorderRadius.circular(20),
-                                child: chip,
-                              )
-                            : chip;
-                      }),
+                          );
+                          return pulsing
+                              ? PulsingGlow(
+                                  borderRadius: BorderRadius.circular(20),
+                                  child: chip,
+                                )
+                              : chip;
+                        },
+                      ),
                       const SizedBox(height: 16),
 
                       // ── 1. JOURS D'OUVERTURE ─────────────────────────
@@ -488,18 +379,22 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                         child: Row(
                           children: List.generate(7, (index) {
                             final day = index + 1;
-                            const letters = [
-                              'L', 'M', 'M', 'J', 'V', 'S', 'D',
-                            ];
+                            const letters = ['L', 'M', 'M', 'J', 'V', 'S', 'D'];
                             const names = [
-                              'Lundi', 'Mardi', 'Mercredi', 'Jeudi',
-                              'Vendredi', 'Samedi', 'Dimanche',
+                              'Lundi',
+                              'Mardi',
+                              'Mercredi',
+                              'Jeudi',
+                              'Vendredi',
+                              'Samedi',
+                              'Dimanche',
                             ];
                             final isSel = selectedWorkingDays.contains(day);
                             return Expanded(
                               child: Padding(
                                 padding: EdgeInsets.only(
-                                    left: index == 0 ? 0 : 6),
+                                  left: index == 0 ? 0 : 6,
+                                ),
                                 child: Semantics(
                                   label: names[index],
                                   button: true,
@@ -516,16 +411,16 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                       });
                                     },
                                     child: AnimatedContainer(
-                                      duration:
-                                          const Duration(milliseconds: 150),
+                                      duration: const Duration(
+                                        milliseconds: 150,
+                                      ),
                                       height: 44,
                                       alignment: Alignment.center,
                                       decoration: BoxDecoration(
                                         color: isSel
                                             ? _kSheetGreen
                                             : Colors.white,
-                                        borderRadius:
-                                            BorderRadius.circular(12),
+                                        borderRadius: BorderRadius.circular(12),
                                         border: Border.all(
                                           color: isSel
                                               ? _kSheetGreen
@@ -579,8 +474,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                       ),
                                       decoration: BoxDecoration(
                                         color: _kSheetGreenSoft,
-                                        borderRadius:
-                                            BorderRadius.circular(12),
+                                        borderRadius: BorderRadius.circular(12),
                                         border: Border.all(
                                           color: const Color(0xFFB9D3C1),
                                         ),
@@ -615,7 +509,8 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                 ),
                                 Padding(
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 10),
+                                    horizontal: 10,
+                                  ),
                                   child: Icon(
                                     Icons.arrow_forward_rounded,
                                     color: const Color(0xFFA8B1AB),
@@ -639,10 +534,10 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                                       ),
                                       decoration: BoxDecoration(
                                         color: const Color(0xFFF4F6F5),
-                                        borderRadius:
-                                            BorderRadius.circular(12),
+                                        borderRadius: BorderRadius.circular(12),
                                         border: Border.all(
-                                            color: const Color(0xFFDCE2DE)),
+                                          color: const Color(0xFFDCE2DE),
+                                        ),
                                       ),
                                       child: Column(
                                         crossAxisAlignment:
@@ -682,15 +577,20 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                               const SizedBox(height: 10),
                               Container(
                                 padding: const EdgeInsets.symmetric(
-                                    horizontal: 14, vertical: 10),
+                                  horizontal: 14,
+                                  vertical: 10,
+                                ),
                                 decoration: BoxDecoration(
                                   color: Colors.red.shade50,
                                   borderRadius: BorderRadius.circular(10),
                                 ),
                                 child: Row(
                                   children: [
-                                    Icon(Icons.warning_amber,
-                                        size: 15, color: Colors.red.shade700),
+                                    Icon(
+                                      Icons.warning_amber,
+                                      size: 15,
+                                      color: Colors.red.shade700,
+                                    ),
                                     const SizedBox(width: 8),
                                     Flexible(
                                       child: Text(
@@ -733,56 +633,64 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       // (dernier créneau, fin de plage) pour que le chiffre
                       // « X min » ait un repère immédiat.
                       if (slotCount > 0 && remainder > 0) ...[
-                        Builder(builder: (_) {
-                          final lastEndMin =
-                              startMin + slotCount * selectedDuration;
-                          final lastEndStr = _formatTime(TimeOfDay(
-                            hour: lastEndMin ~/ 60,
-                            minute: lastEndMin % 60,
-                          ));
-                          final plageEndStr = endMin >= 1440
-                              ? '24:00'
-                              : _formatTime(TimeOfDay(
-                                  hour: endMin ~/ 60,
-                                  minute: endMin % 60,
-                                ));
-                          return Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 14, vertical: 11),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFFF3E0),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Icon(
-                                  Icons.warning_amber_rounded,
-                                  size: 16,
-                                  color: Color(0xFFB26B00),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    'Avec ce créneau, le dernier finit à '
-                                    '$lastEndStr.\n'
-                                    'Les $remainder min restantes '
-                                    '($lastEndStr → $plageEndStr) sont '
-                                    'insuffisantes — donc sans réservation '
-                                    'possible. Ajustez la durée ou '
-                                    'l\'heure de fin.',
-                                    style: const TextStyle(
-                                      fontSize: 12.5,
-                                      color: Color(0xFFB26B00),
-                                      fontWeight: FontWeight.w600,
-                                      height: 1.35,
+                        Builder(
+                          builder: (_) {
+                            final lastEndMin =
+                                startMin + slotCount * selectedDuration;
+                            final lastEndStr = _formatTime(
+                              TimeOfDay(
+                                hour: lastEndMin ~/ 60,
+                                minute: lastEndMin % 60,
+                              ),
+                            );
+                            final plageEndStr = endMin >= 1440
+                                ? '24:00'
+                                : _formatTime(
+                                    TimeOfDay(
+                                      hour: endMin ~/ 60,
+                                      minute: endMin % 60,
+                                    ),
+                                  );
+                            return Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 11,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFF3E0),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Icon(
+                                    Icons.warning_amber_rounded,
+                                    size: 16,
+                                    color: Color(0xFFB26B00),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      'Avec ce créneau, le dernier finit à '
+                                      '$lastEndStr.\n'
+                                      'Les $remainder min restantes '
+                                      '($lastEndStr → $plageEndStr) sont '
+                                      'insuffisantes — donc sans réservation '
+                                      'possible. Ajustez la durée ou '
+                                      'l\'heure de fin.',
+                                      style: const TextStyle(
+                                        fontSize: 12.5,
+                                        color: Color(0xFFB26B00),
+                                        fontWeight: FontWeight.w600,
+                                        height: 1.35,
+                                      ),
                                     ),
                                   ),
-                                ),
-                              ],
-                            ),
-                          );
-                        }),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
                         const SizedBox(height: 12),
                       ],
 
@@ -809,7 +717,9 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       if (slotCount > 0) ...[
                         Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 11),
+                            horizontal: 14,
+                            vertical: 11,
+                          ),
                           decoration: BoxDecoration(
                             color: _kSheetGreenSoft,
                             borderRadius: BorderRadius.circular(12),
@@ -817,8 +727,11 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Icon(Icons.check_circle_rounded,
-                                  size: 16, color: _kSheetGreen),
+                              const Icon(
+                                Icons.check_circle_rounded,
+                                size: 16,
+                                color: _kSheetGreen,
+                              ),
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
@@ -891,7 +804,9 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
     // cette modification en attente avant toute autre chose (pas de bouton
     // dédié : "enregistrer sans changement" revient à annuler le plan).
     final hasPendingChange =
-        slotId != null && slotData != null && slotData['pendingEffectiveDate'] != null;
+        slotId != null &&
+        slotData != null &&
+        slotData['pendingEffectiveDate'] != null;
 
     // ── Détection absence de changement (mode édition uniquement) ─
     if (!hasPendingChange && slotId != null && slotData != null) {
@@ -899,8 +814,7 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       final origEnd = slotData['endTime'] as String? ?? '17:00';
       final origDuration =
           (slotData['serviceDurationMinutes'] as num?)?.toInt() ?? 15;
-      final origCapacity =
-          (slotData['capacityPerSlot'] as num?)?.toInt() ?? 1;
+      final origCapacity = (slotData['capacityPerSlot'] as num?)?.toInt() ?? 1;
       final origDelay =
           (slotData['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
       final origAdvanceDays =
@@ -915,7 +829,8 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       final sortedOrig = (List<int>.from(origDays)..sort()).join(',');
       final sortedNew = (List<int>.from(selectedWorkingDays)..sort()).join(',');
 
-      final unchanged = _formatTime(startTime) == origStart &&
+      final unchanged =
+          _formatTime(startTime) == origStart &&
           newEndStr == origEnd &&
           selectedDuration == origDuration &&
           selectedCapacity == origCapacity &&
@@ -951,122 +866,50 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
       return;
     }
 
-    final overlap = await _checkOverlap(
-      newStartMin: startMin,
-      newEndMin: endMin,
-      newDays: selectedWorkingDays,
-      excludeSlotId: slotId,
-    );
-    if (overlap != null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Row(
-            children: [
-              const Icon(
-                Icons.error_outline_rounded,
-                color: Colors.white,
-                size: 18,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'Chevauchement avec la plage $overlap. Ajustez les horaires.',
-                  style: const TextStyle(fontWeight: FontWeight.w500),
-                ),
-              ),
-            ],
-          ),
-          backgroundColor: const Color(0xFFC62828),
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 5),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-          ),
-        ),
-      );
-      return;
-    }
+    final startStr = _formatTime(startTime);
+    final endStr = (endTime.hour == 0 && endTime.minute == 0)
+        ? '24:00'
+        : _formatTime(endTime);
 
-    // ── Catégorisation des changements (mode édition) ─────────────
-    List<QueryDocumentSnapshot<Map<String, dynamic>>> conflictingSlots = [];
-    bool isHardChange = false;
-    bool needsGeneration = slotId == null; // création → toujours générer
-    DateTime? scheduledEffectiveDate; // non-null si "Programmer" est choisi
-
-    if (slotId != null && slotData != null) {
-      final origStart = slotData['startTime'] as String? ?? '09:00';
-      final origEnd = slotData['endTime'] as String? ?? '17:00';
-      final origDuration =
-          (slotData['serviceDurationMinutes'] as num?)?.toInt() ?? 15;
-      final origAdvanceDays =
-          (slotData['maxAdvanceDays'] as num?)?.toInt() ?? 2;
-      final origDaySet = slotData['workingDays'] != null
-          ? (slotData['workingDays'] as List).map((e) => e as int).toSet()
-          : _queueWeekdays.toSet();
-      final newDaySet = selectedWorkingDays.toSet();
-
-      final newEndStr = (endTime.hour == 0 && endTime.minute == 0)
-          ? '24:00'
-          : _formatTime(endTime);
-      final timingChanged = _formatTime(startTime) != origStart ||
-          newEndStr != origEnd ||
-          selectedDuration != origDuration;
-      final removedDays = origDaySet.difference(newDaySet);
-      final addedDays = newDaySet.difference(origDaySet);
-
-      isHardChange = timingChanged || removedDays.isNotEmpty;
-      needsGeneration = isHardChange ||
-          addedDays.isNotEmpty ||
-          selectedAdvanceDays > origAdvanceDays;
-
-      if (isHardChange) {
-        final reservedScan = await _findConflictingReservedSlots(
+    // Tout le reste se fait CÔTÉ SERVEUR (companySchedule) : chevauchement,
+    // conflits avec les réservations, écriture de la plage, créneaux,
+    // annulations et places du jour — en une seule opération, dans le
+    // fuseau de la structure.
+    var conflictMode = ConflictMode.none;
+    var loadingDialogShown = false;
+    try {
+      // ── Modification : réservations touchées ? (aperçu serveur) ───
+      if (slotId != null) {
+        final impact = await CompanyScheduleService.previewTimeSlot(
+          companyId: widget.companyId,
+          queueId: widget.queueId,
           timeSlotId: slotId,
-          newStartMin: startMin,
-          newEndMin: endMin,
-          newWorkingDays: selectedWorkingDays,
+          startTime: startStr,
+          endTime: endStr,
+          duration: selectedDuration,
+          capacity: selectedCapacity,
+          workingDays: selectedWorkingDays,
+          reservationDeadlineMinutes: selectedDelay,
         );
-        conflictingSlots = reservedScan.conflicts;
-        if (conflictingSlots.isNotEmpty) {
+        if (impact.conflictSlots > 0) {
           if (!mounted) return;
-          final n = conflictingSlots.length;
-          final origins = await _analyzeReservationOrigins(conflictingSlots);
-          if (!mounted) return;
-          final effectiveDate = _computeScheduledEffectiveDate(
-            newAnticipationDays: selectedAdvanceDays,
-            furthestReservedStart: reservedScan.furthestReservedStart,
-          );
-          final formattedDate =
-              DateFormat('EEE d MMM', 'fr_FR').format(effectiveDate);
+          final formattedDate = DateFormat(
+            'EEE d MMM',
+            'fr_FR',
+          ).format(impact.effectiveDate ?? DateTime.now());
           final choice = await _showScheduleOrForceSheet(
-            reservationCount: n,
-            hasBaxaClients: origins.hasBaxaClients,
-            hasManualClients: origins.hasManualClients,
+            reservationCount: impact.conflictSlots,
+            hasBaxaClients: impact.hasBaxaClients,
+            hasManualClients: impact.hasManualClients,
             formattedDate: formattedDate,
           );
           if (choice == _ConflictChoice.cancel) return;
-          if (choice == _ConflictChoice.scheduleLater) {
-            scheduledEffectiveDate = effectiveDate;
-          }
+          conflictMode = choice == _ConflictChoice.scheduleLater
+              ? ConflictMode.schedule
+              : ConflictMode.now;
         }
       }
-    }
 
-    final timeSlotData = {
-      'startTime': _formatTime(startTime),
-      'endTime': (endTime.hour == 0 && endTime.minute == 0)
-          ? '24:00'
-          : _formatTime(endTime),
-      'serviceDurationMinutes': selectedDuration,
-      'capacityPerSlot': selectedCapacity,
-      'workingDays': selectedWorkingDays,
-      'reservationDeadlineMinutes': selectedDelay,
-      'updatedAt': FieldValue.serverTimestamp(),
-    };
-
-    var loadingDialogShown = false;
-    try {
       if (!mounted) return;
       loadingDialogShown = true;
       showDialog(
@@ -1096,36 +939,29 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
         ),
       );
 
-      // Une modification programmée traîne encore sur cette plage : on
-      // l'annule d'abord (repart d'une base propre) avant d'évaluer quoi
-      // que ce soit ci-dessous — que l'utilisateur ait changé quelque
-      // chose ou non.
-      if (hasPendingChange) {
-        await _revertPendingChange(slotId, slotData);
-      }
+      final saved = await CompanyScheduleService.saveTimeSlot(
+        companyId: widget.companyId,
+        queueId: widget.queueId,
+        timeSlotId: slotId,
+        startTime: startStr,
+        endTime: endStr,
+        duration: selectedDuration,
+        capacity: selectedCapacity,
+        workingDays: selectedWorkingDays,
+        reservationDeadlineMinutes: selectedDelay,
+        conflictMode: conflictMode,
+      );
 
-      // ── Cas "Programmer" : la config actuelle n'est jamais touchée ──
-      if (scheduledEffectiveDate != null) {
-        await _scheduleTimeSlotChange(
-          timeSlotId: slotId!,
-          effectiveDate: scheduledEffectiveDate,
-          startTimeStr: _formatTime(startTime),
-          endTimeStr: (endTime.hour == 0 && endTime.minute == 0)
-              ? '24:00'
-              : _formatTime(endTime),
-          duration: selectedDuration,
-          capacity: selectedCapacity,
-          workingDays: selectedWorkingDays,
-          maxAdvanceDays: selectedAdvanceDays,
-          reservationDeadlineMinutes: selectedDelay,
-        );
+      if (!mounted) return;
+      Navigator.pop(context);
+      loadingDialogShown = false;
 
-        if (!mounted) return;
-        Navigator.pop(context);
-        loadingDialogShown = false;
-
-        final formattedDate =
-            DateFormat('EEE d MMM', 'fr_FR').format(scheduledEffectiveDate);
+      // ── Cas "Programmer" : la config actuelle n'a pas été touchée ──
+      if (saved.scheduledFor != null) {
+        final formattedDate = DateFormat(
+          'EEE d MMM',
+          'fr_FR',
+        ).format(saved.scheduledFor!);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -1137,82 +973,6 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
         );
         return;
       }
-
-      // ── Cas normal (création, édition sans conflit, ou "Appliquer
-      // maintenant") : comportement inchangé ────────────────────────
-      final timeSlotsRef = _firestore
-          .collection('companies')
-          .doc(widget.companyId)
-          .collection('queues')
-          .doc(widget.queueId)
-          .collection('timeSlots');
-
-      final String resolvedSlotId;
-      if (slotId == null) {
-        final ref = await timeSlotsRef.add(timeSlotData);
-        resolvedSlotId = ref.id;
-      } else {
-        await timeSlotsRef.doc(slotId).update(timeSlotData);
-        resolvedSlotId = slotId;
-      }
-
-      // ── Nettoyage selon le type de changement ──────────────────
-      bool cancelNotifyFailed = false;
-      if (slotId != null) {
-        if (isHardChange) {
-          await _deleteEmptyFutureSlotsForTimeSlot(resolvedSlotId);
-          if (conflictingSlots.isNotEmpty) {
-            // Isolé dans son propre try/catch : un échec ici (ex. notification
-            // au client) ne doit jamais empêcher la régénération des créneaux
-            // ci-dessous — sinon la plage se retrouve vidée par le nettoyage
-            // ci-dessus sans jamais être reconstruite.
-            try {
-              await _cancelReservedSlotsAndNotify(conflictingSlots);
-            } catch (e) {
-              cancelNotifyFailed = true;
-              debugPrint('Erreur annulation/notification réservations : $e');
-            }
-          }
-        }
-      }
-
-      // ── Génération si nécessaire ───────────────────────────────
-      int created = 0;
-      if (needsGeneration) {
-        created = await _generateSlotsImmediately(
-          timeSlotId: resolvedSlotId,
-          startTimeStr: _formatTime(startTime),
-          endTimeStr: (endTime.hour == 0 && endTime.minute == 0)
-              ? '24:00'
-              : _formatTime(endTime),
-          duration: selectedDuration,
-          capacity: selectedCapacity,
-          workingDays: selectedWorkingDays,
-          maxAdvanceDays: selectedAdvanceDays,
-          reservationDeadlineMinutes: selectedDelay,
-          // Création : plage neuve, aucun créneau préexistant → dédup en
-          // cache (instantané) + stats en incrément atomique.
-          // Édition : on vient peut-être de supprimer des créneaux juste
-          // au-dessus → dédup serveur + recalcul complet des stats.
-          mode: slotId == null ? SlotGenMode.create : SlotGenMode.refresh,
-        );
-      }
-
-      // ── Mise à jour des paramètres sur créneaux existants ──────
-      int updated = 0;
-      if (slotId != null) {
-        updated = await _updateSlotParameters(
-          timeSlotId: resolvedSlotId,
-          capacity: selectedCapacity,
-          duration: selectedDuration,
-          reservationDeadlineMinutes: selectedDelay,
-          maxAdvanceDays: selectedAdvanceDays,
-        );
-      }
-
-      if (!mounted) return;
-      Navigator.pop(context);
-      loadingDialogShown = false;
 
       final isEdit = slotId != null;
       final wasOnboarding = !isEdit && OnboardingService().step == 5;
@@ -1233,17 +993,20 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
         );
       }
 
+      final created = saved.created;
+      final updated = saved.updated;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             isEdit
-                ? 'Plage modifiée ✅'
-                    '${updated > 0 ? '  ·  $updated créneau${updated > 1 ? 'x' : ''} mis à jour' : ''}'
-                    '${created > 0 ? '  ·  $created nouveau${created > 1 ? 'x' : ''}' : ''}'
-                    '${cancelNotifyFailed ? '  ·  ⚠️ Annulation des réservations en conflit incomplète, réessaie' : ''}'
+                ? (saved.unchanged
+                      ? 'Aucune modification détectée'
+                      : 'Plage modifiée ✅'
+                            '${updated > 0 ? '  ·  $updated créneau${updated > 1 ? 'x' : ''} mis à jour' : ''}'
+                            '${created > 0 ? '  ·  $created nouveau${created > 1 ? 'x' : ''}' : ''}')
                 : 'Plage créée ✅  $created créneau${created > 1 ? 'x' : ''} générés',
           ),
-          backgroundColor: cancelNotifyFailed ? Colors.orange.shade700 : _kGreen,
+          backgroundColor: _kGreen,
         ),
       );
 
@@ -1252,10 +1015,24 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
         await showOnboardingCelebration(
           context,
           title: 'Tout est en place !',
-          body: 'Vos créneaux sont actifs dès maintenant.\n\nRetournez sur l\'accueil pour consulter votre agenda et suivre vos réservations.',
+          body:
+              'Vos créneaux sont actifs dès maintenant.\n\nRetournez sur l\'accueil pour consulter votre agenda et suivre vos réservations.',
         );
         if (mounted) await OnboardingService().complete();
       }
+    } on CompanyActionException catch (e) {
+      if (loadingDialogShown && mounted) Navigator.pop(context);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message),
+          backgroundColor: e.reason == 'overlap'
+              ? const Color(0xFFC62828)
+              : null,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 5),
+        ),
+      );
     } catch (e) {
       if (loadingDialogShown && mounted) Navigator.pop(context);
       if (!mounted) return;
@@ -1320,7 +1097,8 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
                       title: 'Plage horaire',
                       body:
                           'L\'heure d\'ouverture et de fermeture de vos créneaux.',
-                      example: '9h → 17h : créneaux proposés sur cette tranche.',
+                      example:
+                          '9h → 17h : créneaux proposés sur cette tranche.',
                     ),
                     _HelpStep(
                       number: 3,

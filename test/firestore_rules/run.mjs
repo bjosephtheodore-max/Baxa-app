@@ -15,6 +15,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const testFiles = [
   "test/firestore_rules/rules.test.mjs",
   "test/server/booking.test.mjs",
+  "test/server/company_account.test.mjs",
+  "test/server/company_booking.test.mjs",
+  "test/server/company_schedule.test.mjs",
 ].join(" ");
 
 const result = spawnSync(

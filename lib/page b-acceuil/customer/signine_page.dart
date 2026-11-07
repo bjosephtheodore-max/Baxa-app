@@ -13,6 +13,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:baxa/services/locale_service.dart';
 import 'package:baxa/services/location_service.dart';
+import 'package:baxa/services/password_rules.dart';
+import 'package:baxa/widgets/password_checklist.dart';
 import 'package:baxa/widgets/profession_picker_sheet.dart';
 
 // ── Modes d'authentification téléphone ────────────────────────────────────────
@@ -74,7 +76,8 @@ class _SigninePageState extends State<SigninePage> {
       case 'invalid-email':
         return 'Adresse email invalide.';
       case 'weak-password':
-        return 'Mot de passe trop faible. Minimum 6 caractères.';
+        return 'Mot de passe trop faible : $kPasswordMinLength caractères '
+            'minimum, avec au moins une lettre et un chiffre.';
       case 'network-request-failed':
         return 'Vérifiez votre connexion internet.';
       case 'too-many-requests':
@@ -641,7 +644,9 @@ class _SigninePageState extends State<SigninePage> {
                 onChanged: (_) => _clearError(),
                 decoration: _inputDeco(
                   label: 'Mot de passe',
-                  hint: 'Minimum 6 caractères',
+                  hint: signingUp
+                      ? '8 caractères, une lettre, un chiffre'
+                      : 'Votre mot de passe',
                   icon: Icons.lock_outline,
                 ).copyWith(
                   suffixIcon: IconButton(
@@ -654,10 +659,21 @@ class _SigninePageState extends State<SigninePage> {
                     onPressed: () => setState(() => _isObscure = !_isObscure),
                   ),
                 ),
-                validator: (v) => (v == null || v.length < 6)
-                    ? 'Mot de passe >= 6 caractères'
-                    : null,
+                // Inscription : règle Baxa. Connexion : non vide seulement
+                // (les comptes créés avant la règle se connectent toujours).
+                validator: (v) => signingUp
+                    ? validateNewPassword(v)
+                    : ((v == null || v.isEmpty)
+                          ? 'Veuillez entrer un mot de passe'
+                          : null),
               ),
+              if (signingUp) ...[
+                const SizedBox(height: 4),
+                PasswordChecklist(
+                  controller: _passwordController,
+                  okColor: _green,
+                ),
+              ],
               const SizedBox(height: 20),
               SizedBox(
                 height: 52,

@@ -277,6 +277,7 @@ async function reserve(db, user, data, now = new Date()) {
   const resRef = db.collection("companies").doc(companyId)
     .collection("reservations").doc();
 
+  let totalReservations = 0;
   await db.runTransaction(async (tx) => {
     const target = await loadTargetSlot(tx, db, {companyId, queueId, slotId,
       fallbackTimeSlotId: optionalLabel(data, "timeSlotId")}, now);
@@ -306,14 +307,18 @@ async function reserve(db, user, data, now = new Date()) {
     stats.add(dailyStatsRef(db, companyId, queueId, target.start, target.tz),
       {reserved: 1, available: -1});
     stats.apply(tx);
-    // Quota du jour (les annulations ne le restituent pas).
+    // Quota du jour (les annulations ne le restituent pas) et nombre total
+    // de réservations du client (l'app s'en sert pour proposer, à la 1re
+    // et à la 3e, de compléter son profil — elle ne l'écrit plus).
+    totalReservations = Number(userData.totalReservations || 0) + 1;
     tx.set(userRef, {
       lastBookingDate: today,
       dailyBookingCount: used + 1,
+      totalReservations,
     }, {merge: true});
   });
 
-  return {reservationId: resRef.id};
+  return {reservationId: resRef.id, totalReservations};
 }
 
 // ── REMPLACER (annule l'ancienne + crée la nouvelle, atomique) ──────

@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
-import 'package:baxa/services/company_lifecycle_service.dart';
+import 'package:baxa/services/company_functions.dart';
+import 'package:baxa/services/company_schedule_service.dart';
 
 // ============================================================
 // GATE affiché à la connexion quand l'entreprise a demandé à quitter Baxa.
@@ -47,18 +48,22 @@ class _CompanyDeletionGatePageState extends State<CompanyDeletionGatePage> {
   Future<void> _revive() async {
     setState(() => _working = true);
     try {
-      await cancelCompanyDeletion(
-        firestore: FirebaseFirestore.instance,
-        companyId: widget.companyId,
-      );
+      // Côté serveur (companySchedule · returnToBaxa) : files rouvertes,
+      // demande de départ supprimée, créneaux recréés. Les réservations
+      // déjà annulées ne sont pas rétablies.
+      await CompanyScheduleService.returnToBaxa(companyId: widget.companyId);
       if (!mounted) return;
       widget.onRevived();
     } catch (e) {
       if (!mounted) return;
       setState(() => _working = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            e is CompanyActionException ? e.message : 'Erreur : $e',
+          ),
+        ),
+      );
     }
   }
 

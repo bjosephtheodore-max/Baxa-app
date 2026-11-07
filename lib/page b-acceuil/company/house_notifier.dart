@@ -41,11 +41,9 @@ class _HouseNotifier extends ChangeNotifier {
 
   final String? _staffCompanyId;
 
-  // Personne connectée (admin : uid == companyId) et, pour un membre du
-  // staff, son nom tel que l'admin l'a renseigné (lu dans le suivi de
-  // statut, sans requête de plus).
+  // Personne connectée (admin : uid == companyId). Le nom d'un membre
+  // (« Ajouté par … ») est posé par le serveur depuis sa fiche d'équipe.
   String? get _myUid => FirebaseAuth.instance.currentUser?.uid;
-  String _myStaffName = '';
 
   // ── Services ──────────────────────────────────────────────────────────────
   final _db = FirebaseFirestore.instance;
@@ -135,6 +133,9 @@ class _HouseNotifier extends ChangeNotifier {
     _initialized = true;
     _agenda.initialize();
     _loadCompanyData();
+    // Inscriptions au guichet : la fonction serveur est réveillée dès
+    // l'ouverture de l'accueil, pour répondre sans délai au premier appui.
+    unawaited(CompanyBookingService.warmup());
   }
 
   void refreshSilent() => _refreshAgenda(silent: true);
@@ -235,177 +236,54 @@ class _HouseNotifier extends ChangeNotifier {
     required String reason,
   }) async {
     if (_companyId == null) return 'Aucune entreprise trouvée';
+    // Côté serveur (companyBooking · block) : seuls les créneaux pas encore
+    // terminés sont bloqués, un créneau déjà bloqué garde sa raison, et les
+    // réservations concernées passent « suspendues » en une fois.
     try {
-      final dayStart = DateTime(
-        _selectedDate.year,
-        _selectedDate.month,
-        _selectedDate.day,
+      await CompanyBookingService.block(
+        companyId: _companyId!,
+        queueId: queueId,
+        day: _selectedDate,
+        timeSlotId: timeSlotId,
+        reason: reason,
       );
-      final dayEnd = dayStart.add(const Duration(days: 1));
-      final slotsRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queueId)
-          .collection('slots');
-
-      final snap = await slotsRef
-          .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(dayStart))
-          .where('start', isLessThan: Timestamp.fromDate(dayEnd))
-          .orderBy('start')
-          .get();
-
-      // Seuls les créneaux pas encore terminés sont bloqués : un créneau
-      // passé a déjà eu lieu (ses clients ont été servis) — le suspendre
-      // ferait croire à ces clients que leur réservation est annulée. Un
-      // créneau déjà bloqué est laissé tel quel (raison d'origine gardée).
-      final now = DateTime.now();
-      final docs = snap.docs.where((d) {
-        final data = d.data();
-        if (timeSlotId != null && data['timeSlotId'] != timeSlotId) {
-          return false;
-        }
-        if (data['status'] == 'blocked') return false;
-        final end = (data['end'] as Timestamp?)?.toDate();
-        return end != null && end.isAfter(now);
-      }).toList();
-      if (docs.isEmpty) {
-        return 'Aucun créneau à venir à bloquer sur cette plage.';
-      }
-
-      // La raison part telle quelle dans une notification client.
-      final trimmed = reason.trim();
-      final safeReason = trimmed.length > 120
-          ? '${trimmed.substring(0, 117)}…'
-          : trimmed;
-      final reasonValue = safeReason.isEmpty ? null : safeReason;
-
-      WriteBatch batch = _db.batch();
-      int count = 0;
-      Future<void> flush() async {
-        if (count >= 380) {
-          await batch.commit();
-          batch = _db.batch();
-          count = 0;
-        }
-      }
-
-      for (final doc in docs) {
-        batch.update(doc.reference, {
-          'status': 'blocked',
-          'blockReason': reasonValue,
-          'blockedAt': FieldValue.serverTimestamp(),
-        });
-        count++;
-        await flush();
-
-        final reserved = (doc.data()['reserved'] as num?)?.toInt() ?? 0;
-        if (reserved > 0) {
-          final resSnap = await _db
-              .collection('companies')
-              .doc(_companyId)
-              .collection('reservations')
-              .where('slotId', isEqualTo: doc.id)
-              .where('status', isEqualTo: 'confirmed')
-              .get();
-          for (final resDoc in resSnap.docs) {
-            batch.update(resDoc.reference, {
-              'suspended': true,
-              'suspendedReason': reasonValue,
-              'suspendedAt': FieldValue.serverTimestamp(),
-            });
-            count++;
-            await flush();
-          }
-        }
-      }
-      if (count > 0) await batch.commit();
-
       await _refreshAgenda(silent: true);
       return null;
-    } catch (e) {
-      return 'Erreur: $e';
+    } on CompanyActionException catch (e) {
+      return e.message;
     }
   }
 
   // ── Déblocage ─────────────────────────────────────────────────────────────
+  // Côté serveur (companyBooking · unblock) : créneaux à venir rouverts,
+  // réservations suspendues rétablies — ou annulées si leur créneau est
+  // passé pendant le blocage (`company_block_unresolved`, compteurs
+  // corrigés). Les notifications partent des Cloud Functions habituelles.
   Future<ModificationResult> unblockPlage(String queueId) async {
+    if (_companyId == null) {
+      return const ModificationResult(
+        success: false,
+        message: 'Aucune entreprise trouvée',
+      );
+    }
     setQueueLoading(queueId);
-    final result = await _agenda.unblockPlage(
-      queueId: queueId,
-      date: _selectedDate,
-    );
-    if (result.success) {
-      await _reactivateSuspendedReservations(queueId);
+    ModificationResult result;
+    try {
+      final n = await CompanyBookingService.unblock(
+        companyId: _companyId!,
+        queueId: queueId,
+        day: _selectedDate,
+      );
+      result = ModificationResult(
+        success: true,
+        message: '$n créneau(x) débloqué(s).',
+        slotsAffected: n,
+      );
+    } on CompanyActionException catch (e) {
+      result = ModificationResult(success: false, message: e.message);
     }
     await _refreshAgenda(silent: true);
     return result;
-  }
-
-  // Après déblocage : rétablit les réservations suspendues du jour dont le
-  // créneau est encore à venir ; annule celles dont le créneau est déjà
-  // passé (`company_block_unresolved`). Les notifications sont envoyées par
-  // les Cloud Functions (onReservationBlockChange / onReservationCancelledByCompany).
-  Future<void> _reactivateSuspendedReservations(String queueId) async {
-    if (_companyId == null) return;
-    try {
-      final dayStart = DateTime(
-        _selectedDate.year,
-        _selectedDate.month,
-        _selectedDate.day,
-      );
-      final dayEnd = dayStart.add(const Duration(days: 1));
-      final now = DateTime.now();
-
-      final resSnap = await _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('reservations')
-          .where('queueId', isEqualTo: queueId)
-          .where('status', isEqualTo: 'confirmed')
-          .get();
-
-      final suspended = resSnap.docs.where((d) {
-        final data = d.data();
-        if (data['suspended'] != true) return false;
-        final ss = (data['slotStart'] as Timestamp?)?.toDate();
-        return ss != null && !ss.isBefore(dayStart) && ss.isBefore(dayEnd);
-      }).toList();
-      if (suspended.isEmpty) return;
-
-      WriteBatch batch = _db.batch();
-      int count = 0;
-      for (final d in suspended) {
-        final se = (d.data()['slotEnd'] as Timestamp?)?.toDate();
-        final passed = se != null && se.isBefore(now);
-        batch.update(
-          d.reference,
-          passed
-              ? {
-                  'status': 'cancelled',
-                  'cancelledAt': FieldValue.serverTimestamp(),
-                  'cancellationSource': 'company_block_unresolved',
-                  'suspended': FieldValue.delete(),
-                  'suspendedReason': FieldValue.delete(),
-                  'suspendedAt': FieldValue.delete(),
-                }
-              : {
-                  'suspended': FieldValue.delete(),
-                  'suspendedReason': FieldValue.delete(),
-                  'suspendedAt': FieldValue.delete(),
-                },
-        );
-        count++;
-        if (count >= 380) {
-          await batch.commit();
-          batch = _db.batch();
-          count = 0;
-        }
-      }
-      if (count > 0) await batch.commit();
-    } catch (_) {
-      // non bloquant : les créneaux sont débloqués, c'est l'essentiel
-    }
   }
 
   // ── RDV manuel ────────────────────────────────────────────────────────────
@@ -415,82 +293,23 @@ class _HouseNotifier extends ChangeNotifier {
     AgendaSlot slot,
   ) async {
     if (_companyId == null) return 'Aucune entreprise trouvée';
+    // Côté serveur (companyBooking · addManual), en une seule transaction :
+    // file ouverte, jour hors fermeture, plage non supprimée, créneau ni
+    // bloqué ni terminé, et surtout une place ENCORE libre au moment
+    // d'écrire (deux inscriptions simultanées ne peuvent plus surbooker).
+    // L'auteur (admin / membre et son nom) est fixé par le serveur.
     try {
-      final queuePath = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id);
-
-      // Garde-fou : une file fermée ou une plage en suppression programmée
-      // n'accepte plus AUCUNE nouvelle réservation, manuelle comprise.
-      final queueDoc = await queuePath.get();
-      final qd = queueDoc.data();
-      final closureStart = (qd?['closureStart'] as Timestamp?)?.toDate();
-      final closureEnd = (qd?['closureEnd'] as Timestamp?)?.toDate();
-      if (isQueueClosedNow(closureStart, closureEnd)) {
-        return 'Cette file est fermée aux réservations.';
-      }
-      // Fermeture PROGRAMMÉE qui couvre le jour de ce créneau (même règle
-      // que les réservations client, refusées côté serveur).
-      if (isSlotInClosure(closureStart, closureEnd, slot.start)) {
-        return 'La structure est fermée ce jour-là.';
-      }
-      if (slot.timeSlotId.isNotEmpty) {
-        final tsDoc = await queuePath
-            .collection('timeSlots')
-            .doc(slot.timeSlotId)
-            .get();
-        if (tsDoc.data()?['deleteAfter'] != null) {
-          return 'Cette plage est en cours de suppression, plus de réservation possible.';
-        }
-      }
-
-      final slotRef = queuePath.collection('slots').doc(slot.id);
-
-      final d = slot.start.toLocal();
-      final dateKey =
-          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-      final dailyRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('dailyStats')
-          .doc(dateKey);
-
-      await Future.wait([
-        _db
-            .collection('companies')
-            .doc(_companyId)
-            .collection('reservations')
-            .add({
-              'customerId': 'manual_booking',
-              'customerName': clientName,
-              'companyId': _companyId,
-              'queueId': queue.id,
-              'queueName': queue.name,
-              'slotId': slot.id,
-              'slotStart': slot.start,
-              'slotEnd': slot.end,
-              'status': 'confirmed',
-              'createdAt': FieldValue.serverTimestamp(),
-              'source': 'company_manual',
-              // Auteur de l'inscription : décide qui peut la supprimer
-              // (l'admin toujours, un membre seulement les siennes) et
-              // alimente « Ajouté par … ». Contrôlé aussi par les règles.
-              if (_myUid != null) 'createdBy': _myUid,
-              'createdByRole': _isStaff ? 'staff' : 'admin',
-              if (_isStaff && _myStaffName.isNotEmpty)
-                'createdByName': _myStaffName,
-            }),
-        slotRef.update({'reserved': FieldValue.increment(1)}),
-        dailyRef.update({'reserved': FieldValue.increment(1)}),
-      ]);
+      await CompanyBookingService.addManual(
+        companyId: _companyId!,
+        queueId: queue.id,
+        slotId: slot.id,
+        clientName: clientName,
+        queueName: queue.name,
+      );
       _recordManualAdd();
       return null;
-    } catch (e) {
-      return 'Erreur: $e';
+    } on CompanyActionException catch (e) {
+      return e.message;
     }
   }
 
@@ -550,42 +369,17 @@ class _HouseNotifier extends ChangeNotifier {
     required AgendaSlot slot,
   }) async {
     if (_companyId == null) return 'Aucune entreprise trouvée';
+    // Côté serveur (companyBooking · removeManual) : droits vérifiés
+    // (membre : seulement les siennes), place rendue une seule fois même
+    // en cas de double appui.
     try {
-      final slotRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('slots')
-          .doc(slot.id);
-
-      final d = slot.start.toLocal();
-      final dateKey =
-          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-      final dailyRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('dailyStats')
-          .doc(dateKey);
-
-      await Future.wait([
-        _db
-            .collection('companies')
-            .doc(_companyId)
-            .collection('reservations')
-            .doc(reservationId)
-            .delete(),
-        slotRef.update({'reserved': FieldValue.increment(-1)}),
-        dailyRef.update({
-          'reserved': FieldValue.increment(-1),
-          'available': FieldValue.increment(1),
-        }),
-      ]);
+      await CompanyBookingService.removeManual(
+        companyId: _companyId!,
+        reservationId: reservationId,
+      );
       return null;
-    } catch (e) {
-      return 'Erreur: $e';
+    } on CompanyActionException catch (e) {
+      return e.message;
     }
   }
 
@@ -703,170 +497,24 @@ class _HouseNotifier extends ChangeNotifier {
     // l'instant présent pour une édition normale.
     final effectiveNow = anchorNow ?? DateTime.now();
     try {
-      // ── Modif DU JOUR uniquement (free-spans) ───────────────────────────
-      // L'accueil ne modifie que le jour affiché : la plage elle-même (ses
-      // valeurs habituelles) ne change que depuis la page des plages.
-      final dayStart = DateTime(
-        _selectedDate.year,
-        _selectedDate.month,
-        _selectedDate.day,
+      // Côté serveur (companySchedule · changeDayDuration), en une
+      // transaction : modif DU JOUR uniquement (la plage elle-même ne change
+      // que depuis la page des plages), créneaux vides remplacés, espaces
+      // libres autour des réservations remplis avec la nouvelle durée,
+      // jamais dans le passé, places du jour recalculées. Un client qui
+      // réserve au même instant n'est plus jamais rattaché à un créneau
+      // supprimé ; une plage bloquée ce jour-là est refusée.
+      final createdCount = await CompanyScheduleService.changeDayDuration(
+        companyId: _companyId!,
+        queueId: queue.id,
+        timeSlotId: tsInfo.id,
+        day: _selectedDate,
+        duration: newDuration,
+        // Capacité DU JOUR (une modif de capacité du jour ne doit pas être
+        // perdue quand on change ensuite la durée).
+        capacity: tsInfo.effectiveCapacity > 0 ? tsInfo.effectiveCapacity : 1,
+        anchor: anchorNow,
       );
-      final dayEnd = dayStart.add(const Duration(days: 1));
-
-      final slotsQuery = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('slots')
-          .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(dayStart))
-          .where('start', isLessThan: Timestamp.fromDate(dayEnd))
-          .orderBy('start');
-
-      QuerySnapshot slotsSnap;
-      try {
-        slotsSnap = await slotsQuery.get();
-      } on FirebaseException catch (e) {
-        if (e.code == 'unavailable') {
-          slotsSnap = await slotsQuery.get(
-            const GetOptions(source: Source.cache),
-          );
-        } else {
-          rethrow;
-        }
-      }
-
-      final allDocs = slotsSnap.docs
-          .where(
-            (doc) =>
-                (doc.data() as Map<String, dynamic>)['timeSlotId'] == tsInfo.id,
-          )
-          .toList();
-
-      if (allDocs.isEmpty) {
-        return ModificationResult(
-          success: false,
-          message: 'Aucun créneau trouvé pour cette plage',
-        );
-      }
-
-      final allSlots =
-          allDocs
-              .map((doc) => _agenda.slotFromDoc(doc, queueId: queue.id))
-              .toList()
-            ..sort((a, b) => a.start.compareTo(b.start));
-
-      // Plage bloquée ce jour-là (incident en cours) : aucune modif. Sans ce
-      // garde-fou, ses créneaux vides bloqués seraient supprimés puis
-      // recréés « ouverts » — la plage serait débloquée en silence.
-      if (allSlots.any((s) => s.isBlocked && s.end.isAfter(DateTime.now()))) {
-        return const ModificationResult(
-          success: false,
-          message:
-              'Cette plage est bloquée aujourd\'hui — débloquez-la d\'abord pour la modifier.',
-        );
-      }
-
-      final emptySlotIds = allSlots
-          .where((s) => s.reserved == 0)
-          .map((s) => s.id)
-          .toList();
-
-      // Espaces libres = [plageStart, plageEnd] minus les créneaux réservés.
-      final freeSpans = _agenda.freeSpans(allSlots, plageStart, plageEnd);
-
-      final batch = _db.batch();
-      final slotsRef = _db
-          .collection('companies')
-          .doc(_companyId)
-          .collection('queues')
-          .doc(queue.id)
-          .collection('slots');
-
-      // Supprimer tous les créneaux vides
-      for (final id in emptySlotIds) {
-        batch.delete(slotsRef.doc(id));
-      }
-
-      // Remplir chaque espace libre avec la nouvelle durée
-      // On ne crée jamais de créneaux dans le passé (cas création de plage le jour J)
-      int createdCount = 0;
-      final roundedNow = _agenda.roundUpToNext5Minutes(effectiveNow);
-      // Capacité DU JOUR (une modif de capacité du jour ne doit pas être
-      // perdue quand on change ensuite la durée).
-      final slotCapacity = tsInfo.effectiveCapacity > 0
-          ? tsInfo.effectiveCapacity
-          : 1;
-      for (final span in freeSpans) {
-        var t = span.start.isBefore(effectiveNow) ? roundedNow : span.start;
-        while (true) {
-          final newEnd = t.add(Duration(minutes: newDuration));
-          if (!newEnd.isAfter(span.end) &&
-              newEnd.difference(t).inMinutes >= 5) {
-            batch.set(slotsRef.doc(), {
-              'start': Timestamp.fromDate(t),
-              'end': Timestamp.fromDate(newEnd),
-              'duration': newDuration,
-              'capacity': slotCapacity,
-              'reserved': 0,
-              'cancelled': 0,
-              'status': 'open',
-              'isLegacy': false,
-              'timeSlotId': tsInfo.id,
-              'reservationDeadlineMinutes': tsInfo.reservationDeadlineMinutes,
-            });
-            createdCount++;
-            t = newEnd;
-          } else {
-            break;
-          }
-        }
-      }
-
-      // Recalculer dailyStats pour que "disponible" soit correct après
-      // refresh. Le résumé couvre TOUTE la file ce jour-là : les créneaux
-      // des autres plages comptent aussi (avant, seuls ceux de la plage
-      // modifiée étaient comptés et le reste était effacé).
-      final keptSlots = [
-        ...slotsSnap.docs
-            .where(
-              (doc) =>
-                  (doc.data() as Map<String, dynamic>)['timeSlotId'] !=
-                  tsInfo.id,
-            )
-            .map((doc) => _agenda.slotFromDoc(doc, queueId: queue.id)),
-        ...allSlots.where((s) => s.reserved > 0),
-      ];
-      final int keptCapacity = keptSlots.fold(0, (acc, s) => acc + s.capacity);
-      final int keptReserved = keptSlots.fold(0, (acc, s) => acc + s.reserved);
-      final int keptCancelled = keptSlots.fold(
-        0,
-        (acc, s) => acc + s.cancelled,
-      );
-      final int totalCapacity = keptCapacity + createdCount * slotCapacity;
-      final dateStr =
-          '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
-      batch.set(
-        _db
-            .collection('companies')
-            .doc(_companyId)
-            .collection('queues')
-            .doc(queue.id)
-            .collection('dailyStats')
-            .doc(dateStr),
-        {
-          'date': dateStr,
-          'totalCapacity': totalCapacity,
-          'available': totalCapacity - keptReserved,
-          'reserved': keptReserved,
-          'cancelled': keptCancelled,
-          'totalSlots': keptSlots.length + createdCount,
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
-
-      await batch.commit();
       if (!isRevertAction) {
         // L'annulation (5 min) revient à la durée DU JOUR d'avant la modif,
         // pas à la durée habituelle de la plage.
@@ -885,10 +533,46 @@ class _HouseNotifier extends ChangeNotifier {
         message: '$createdCount créneau(x) créés ✅',
         slotsAffected: createdCount,
       );
+    } on CompanyActionException catch (e) {
+      return ModificationResult(success: false, message: e.message);
     } catch (e) {
       return ModificationResult(success: false, message: 'Erreur : $e');
     } finally {
       _busyTimeSlotIds.remove(tsInfo.id);
+    }
+  }
+
+  // ── Capacité des créneaux du jour (accueil) ───────────────────────────────
+  // Côté serveur (companySchedule · changeDayCapacity) : créneaux ouverts à
+  // venir du jour affiché, jamais sous le nombre de réservations ; places
+  // du jour recalculées.
+  Future<ModificationResult> changeDayCapacity({
+    required String queueId,
+    required int newCapacity,
+    String? timeSlotId,
+  }) async {
+    if (_companyId == null) {
+      return const ModificationResult(
+        success: false,
+        message: 'Aucune entreprise trouvée',
+      );
+    }
+    try {
+      final affected = await CompanyScheduleService.changeDayCapacity(
+        companyId: _companyId!,
+        queueId: queueId,
+        day: _selectedDate,
+        capacity: newCapacity,
+        timeSlotId: timeSlotId,
+      );
+      return ModificationResult(
+        success: true,
+        message:
+            'Capacité mise à jour à $newCapacity pers. ($affected créneaux)',
+        slotsAffected: affected,
+      );
+    } on CompanyActionException catch (e) {
+      return ModificationResult(success: false, message: e.message);
     }
   }
 
@@ -1136,8 +820,6 @@ class _HouseNotifier extends ChangeNotifier {
         .snapshots()
         .listen(
           (doc) {
-            _myStaffName =
-                (doc.data()?['displayName'] as String?)?.trim() ?? '';
             final isActive = doc.data()?['isActive'] as bool? ?? false;
             if (!isActive) {
               _handleRevocation(doc.data()?['revokedReason'] as String?);
@@ -1414,11 +1096,11 @@ class _HouseNotifier extends ChangeNotifier {
                 : <int>[];
             final queueName = qData['name'] ?? 'File sans nom';
 
-            // TimeSlot count — flux borné à 2 docs (peu coûteux). En direct
+            // Plages de la file — nombre et jours d'ouverture. En direct
             // plutôt qu'une lecture ponctuelle : une plage peut être créée ou
             // supprimée depuis l'onglet Settings pendant que l'accueil reste
             // vivant en parallèle via l'IndexedStack de company_page.dart.
-            final Future<int> tsCountFuture = _subscribeTimeSlotCount(qDoc.id);
+            final plagesFuture = _subscribePlages(qDoc.id, weekdays);
 
             final List<AgendaSlot> allSlots;
             final QueueStats stats;
@@ -1510,7 +1192,7 @@ class _HouseNotifier extends ChangeNotifier {
               stats = _agenda.computeStats(allSlots, now: now);
             }
 
-            final timeSlotCount = await tsCountFuture;
+            final plages = await plagesFuture;
 
             // État de blocage (en cours / total / partiel) calculé dans
             // rebuiltAt, à partir des créneaux et de l'heure.
@@ -1519,8 +1201,8 @@ class _HouseNotifier extends ChangeNotifier {
               name: queueName,
               slots: allSlots,
               stats: stats,
-              weekdays: weekdays,
-              timeSlotCount: timeSlotCount,
+              weekdays: plages.days,
+              timeSlotCount: plages.count,
               closureStart: (qData['closureStart'] as Timestamp?)?.toDate(),
               closureEnd: (qData['closureEnd'] as Timestamp?)?.toDate(),
             ).rebuiltAt(now, newStats: stats);
@@ -1686,10 +1368,19 @@ class _HouseNotifier extends ChangeNotifier {
     _notify();
   }
 
-  // ── Flux temps réel sur le nombre de plages d'une file ────────────────────
+  // ── Flux temps réel sur les plages d'une file ─────────────────────────────
   // Résout avec le premier instantané (chargement initial), puis met à jour
-  // `timeSlotCount` de la file affichée à chaque création/suppression.
-  Future<int> _subscribeTimeSlotCount(String queueId) {
+  // la file affichée à chaque création / modification / suppression :
+  //  • `timeSlotCount` — nombre de plages ;
+  //  • `weekdays` — jours où AU MOINS UNE plage est ouverte. Ce sont les
+  //    plages qui portent leurs jours (le champ `weekdays` de la file, resté
+  //    à lun–ven par défaut, ne reflète plus la réalité : avec lui, les
+  //    boutons de modification disparaissaient le week-end).
+  //    [queueWeekdays] ne sert que de repli pour une plage sans jours.
+  Future<({int count, List<int> days})> _subscribePlages(
+    String queueId,
+    List<int> queueWeekdays,
+  ) {
     _tsCountSubs.remove(queueId)?.cancel();
 
     final query = _db
@@ -1697,27 +1388,47 @@ class _HouseNotifier extends ChangeNotifier {
         .doc(_companyId)
         .collection('queues')
         .doc(queueId)
-        .collection('timeSlots')
-        .limit(2);
+        .collection('timeSlots');
 
-    final completer = Completer<int>();
+    ({int count, List<int> days}) summarize(
+      QuerySnapshot<Map<String, dynamic>> snap,
+    ) {
+      final days = <int>{};
+      for (final doc in snap.docs) {
+        final raw = doc.data()['workingDays'];
+        days.addAll(
+          raw is List
+              ? raw.map((e) => (e as num).toInt())
+              : (queueWeekdays.isNotEmpty
+                    ? queueWeekdays
+                    : const [1, 2, 3, 4, 5]),
+        );
+      }
+      return (count: snap.docs.length, days: days.toList()..sort());
+    }
+
+    final completer = Completer<({int count, List<int> days})>();
     _tsCountSubs[queueId] = query.snapshots().listen(
       (snap) {
-        final count = snap.docs.length;
+        final plages = summarize(snap);
         if (!completer.isCompleted) {
-          completer.complete(count);
+          completer.complete(plages);
           return;
         }
-        // Un rechargement complet relira lui-même le compteur.
+        // Un rechargement complet relira lui-même les plages.
         if (_isRefreshing) return;
         final idx = _queues.indexWhere((q) => q?.id == queueId);
         if (idx == -1) return;
         final old = _queues[idx]!;
-        if (old.timeSlotCount == count) return;
+        if (old.timeSlotCount == plages.count &&
+            listEquals(old.weekdays, plages.days)) {
+          return;
+        }
         _queues[idx] = old.rebuiltAt(
           DateTime.now(),
           newStats: old.stats,
-          newTimeSlotCount: count,
+          newTimeSlotCount: plages.count,
+          newWeekdays: plages.days,
         );
         _notify();
       },
