@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/services/booking_constants.dart';
 import 'package:baxa/services/favorites_service.dart';
+import 'package:baxa/widgets/favorite_snackbar.dart';
 import 'package:baxa/services/reservation_rules_service.dart';
 
 class SlotsPage extends StatefulWidget {
@@ -2187,21 +2188,11 @@ class _SlotsPageState extends State<SlotsPage>
             nom: resolvedNom,
             type: companyType,
           );
-          messenger.showSnackBar(
-            SnackBar(
-              content: const Row(
-                children: [
-                  Icon(Icons.star_rounded, color: Colors.white, size: 16),
-                  SizedBox(width: 8),
-                  Text('Ajouté aux favoris'),
-                ],
-              ),
-              backgroundColor: widget.primaryGreen,
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
+          showFavoriteSnackBar(
+            messenger,
+            nom: resolvedNom,
+            added: true,
+            addedColor: widget.primaryGreen,
           );
         } catch (e) {
           messenger.showSnackBar(

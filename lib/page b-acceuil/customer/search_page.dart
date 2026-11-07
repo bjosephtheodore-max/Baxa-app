@@ -7,6 +7,7 @@ import 'package:baxa/page%20b-acceuil/customer/companyqueue_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/page%20b-acceuil/customer/slots_page.dart';
 import 'package:baxa/services/favorites_service.dart';
+import 'package:baxa/widgets/favorite_snackbar.dart';
 import 'package:baxa/services/geo_address_service.dart';
 import 'package:baxa/services/locale_service.dart';
 import 'package:baxa/services/location_service.dart';
@@ -545,38 +546,27 @@ class _SearchPageState extends State<SearchPage> {
     try {
       if (isFav) {
         await ref.delete();
+        if (!mounted) return;
         setState(() => _favoriteIds.remove(companyId));
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('$nom retiré des favoris'),
-              behavior: SnackBarBehavior.floating,
-              backgroundColor: Colors.grey.shade700,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-          );
-        }
+        showFavoriteSnackBar(
+          ScaffoldMessenger.of(context),
+          nom: nom,
+          added: false,
+        );
       } else {
         await FavoritesService.addFavorite(
           companyId: companyId,
           nom: nom,
           type: type,
         );
+        if (!mounted) return;
         setState(() => _favoriteIds.add(companyId));
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('$nom ajouté aux favoris ⭐'),
-              behavior: SnackBarBehavior.floating,
-              backgroundColor: _green,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-          );
-        }
+        showFavoriteSnackBar(
+          ScaffoldMessenger.of(context),
+          nom: nom,
+          added: true,
+          addedColor: _green,
+        );
       }
     } catch (e) {
       if (mounted) {

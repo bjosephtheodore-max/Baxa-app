@@ -850,18 +850,26 @@ class _ControlRow extends StatelessWidget {
             enabled: canDecrease,
             onTap: () => onChanged(-step),
           ),
-          const SizedBox(width: 8),
-          Text(
-            value != null ? '$value $unit' : '—',
-            overflow: TextOverflow.ellipsis,
-            maxLines: 1,
-            style: const TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.bold,
-              color: Colors.black87,
+          // Valeur dans une case de largeur FIXE, centrée : les − de
+          // « Durée » et « Capacité » tombent dans une même colonne, les +
+          // dans une autre, quelle que soit la longueur du texte
+          // (« 5 min » / « 30 pers. »).
+          SizedBox(
+            width: 84,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                value != null ? '$value $unit' : '—',
+                maxLines: 1,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black87,
+                ),
+              ),
             ),
           ),
-          const SizedBox(width: 8),
           _PlusMinusBtn(
             icon: Icons.add,
             enabled: canIncrease,

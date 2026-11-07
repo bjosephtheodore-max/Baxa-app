@@ -416,6 +416,12 @@ class _HousePageState extends State<HousePage>
     return AppBar(
       elevation: 0,
       backgroundColor: Colors.white,
+      // Toujours blanc, même quand la liste défile dessous : sans ça,
+      // Material 3 teinte l'en-tête en vert pâle (visible avec une seule
+      // file ; avec plusieurs, le défilement est dans un PageView et la
+      // teinte ne se déclenchait pas).
+      scrolledUnderElevation: 0,
+      surfaceTintColor: Colors.transparent,
       automaticallyImplyLeading: false,
       toolbarHeight: 48,
       title: Text(
