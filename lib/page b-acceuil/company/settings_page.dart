@@ -44,11 +44,12 @@ class _SettingsPageState extends State<SettingsPage> {
   int _queueCount = 0;
   bool _isCreatingQueue = false;
   late final Stream<QuerySnapshot> _queuesStream;
-  final Map<String, Stream<_QueueCapacity>> _capacityStreams = {};
-  // Dernière valeur reçue par file : les snapshots Firestore sont diffusés
-  // (broadcast) sans rejouer le dernier état, donc une carte recréée qui se
-  // réabonne au flux en cache n'obtiendrait rien tant que les plages ne
-  // changent pas → spinner infini. On la lui fournit en initialData.
+  // Dernière capacité connue par file : affichée tout de suite par une
+  // carte recréée, le temps que son propre flux réponde. (Chaque carte
+  // ouvre son PROPRE flux : un flux Firestore partagé ne rejoue pas sa
+  // dernière valeur à un nouvel abonné — d'où, avant, une carte qui
+  // chargeait sans fin après la 1re file, ou une capacité qui disparaissait
+  // sur la carte suivante après une suppression.)
   final Map<String, _QueueCapacity> _lastCapacity = {};
 
   @override
@@ -236,14 +237,17 @@ class _SettingsPageState extends State<SettingsPage> {
     final deleteAfter = (queueData['deleteAfter'] as Timestamp?)?.toDate();
 
     final card = _AnimatedQueueCard(
+      // Clé = file : après une suppression, la carte suivante n'hérite pas
+      // de l'état (ni du flux) de la carte supprimée.
+      key: ValueKey('queue-card-$queueId'),
       name: name,
       subtitle: subtitle,
       open: !closedNow,
       closurePlannedFor: closurePlannedFor,
       deleteAfter: deleteAfter,
-      capacityStream: _capacityStreams.putIfAbsent(
+      capacityStreamFactory: () => _calculateTotalCapacity(
         queueId,
-        () => _calculateTotalCapacity(queueId),
+        queueWeekdays: _weekdaysOf(queueData),
       ),
       initialCapacity: _lastCapacity[queueId],
       onTap: () {
@@ -1533,7 +1537,21 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Stream<_QueueCapacity> _calculateTotalCapacity(String queueId) {
+  List<int> _weekdaysOf(Map<String, dynamic> queueData) {
+    final raw = queueData['weekdays'];
+    return raw is List
+        ? raw.map((e) => (e as num).toInt()).toList()
+        : const [1, 2, 3, 4, 5];
+  }
+
+  // Capacité affichée sur la carte : celle de la JOURNÉE LA PLUS CHARGÉE
+  // (avant : la somme de toutes les plages, quels que soient leurs jours —
+  // 4470 pour une file qui reçoit au plus 3030 personnes par jour). Même
+  // calcul jour par jour que la page des plages (« Capacité d'accueil »).
+  Stream<_QueueCapacity> _calculateTotalCapacity(
+    String queueId, {
+    required List<int> queueWeekdays,
+  }) {
     return _firestore
         .collection('companies')
         .doc(_companyId)
@@ -1542,7 +1560,7 @@ class _SettingsPageState extends State<SettingsPage> {
         .collection('timeSlots')
         .snapshots()
         .map((snapshot) {
-          int total = 0;
+          final perDay = {for (int d = 1; d <= 7; d++) d: 0};
           for (final doc in snapshot.docs) {
             final d = doc.data();
             final start = d['startTime'] as String? ?? '00:00';
@@ -1550,11 +1568,20 @@ class _SettingsPageState extends State<SettingsPage> {
             final duration =
                 (d['serviceDurationMinutes'] as num?)?.toInt() ?? 0;
             final capacity = (d['capacityPerSlot'] as num?)?.toInt() ?? 0;
-            if (duration > 0) {
-              final slotsCount = _countSlots(start, end, duration);
-              total += slotsCount * capacity;
+            if (duration <= 0) continue;
+            final perPlage = _countSlots(start, end, duration) * capacity;
+            final days =
+                (d['workingDays'] as List<dynamic>?)
+                    ?.map((e) => (e as num).toInt())
+                    .toList() ??
+                queueWeekdays;
+            for (final day in days) {
+              if (perDay.containsKey(day)) {
+                perDay[day] = perDay[day]! + perPlage;
+              }
             }
           }
+          final total = perDay.values.fold(0, (a, b) => a > b ? a : b);
           final result = (total: total);
           _lastCapacity[queueId] = result;
           return result;
@@ -1652,7 +1679,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
-// Nombre de plages de la file + capacité totale (clients/jour) qu'elles offrent.
+// Capacité de la file : clients accueillis sur sa journée la plus chargée.
 typedef _QueueCapacity = ({int total});
 
 // ============================================================
@@ -1663,18 +1690,20 @@ class _AnimatedQueueCard extends StatefulWidget {
   final String subtitle;
   final bool open; // false = fermée aux nouvelles réservations maintenant
   final DateTime? closurePlannedFor; // fermeture planifiée, pas encore active
-  final Stream<_QueueCapacity> capacityStream;
+  // Appelée UNE fois par carte : chaque carte écoute son propre flux.
+  final Stream<_QueueCapacity> Function() capacityStreamFactory;
   final _QueueCapacity? initialCapacity;
   final VoidCallback onTap;
   final VoidCallback onMoreTap;
   final DateTime? deleteAfter;
 
   const _AnimatedQueueCard({
+    super.key,
     required this.name,
     required this.subtitle,
     required this.open,
     this.closurePlannedFor,
-    required this.capacityStream,
+    required this.capacityStreamFactory,
     this.initialCapacity,
     required this.onTap,
     required this.onMoreTap,
@@ -1687,6 +1716,8 @@ class _AnimatedQueueCard extends StatefulWidget {
 
 class _AnimatedQueueCardState extends State<_AnimatedQueueCard> {
   bool _pressed = false;
+  late final Stream<_QueueCapacity> _capacityStream = widget
+      .capacityStreamFactory();
 
   @override
   Widget build(BuildContext context) {
@@ -1819,7 +1850,7 @@ class _AnimatedQueueCardState extends State<_AnimatedQueueCard> {
 
                                 // Capacité totale
                                 StreamBuilder<_QueueCapacity>(
-                                  stream: widget.capacityStream,
+                                  stream: _capacityStream,
                                   initialData: widget.initialCapacity,
                                   builder: (context, snap) {
                                     final data = snap.data;

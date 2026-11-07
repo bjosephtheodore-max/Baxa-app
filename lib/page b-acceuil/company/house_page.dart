@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -32,6 +33,14 @@ part 'house_notifier.dart';
 // ── Palette (niveau bibliothèque — accessible dans tous les parts) ────────────
 const Color _green = Color.fromARGB(255, 75, 139, 94);
 const Color _lightGreen = Color.fromARGB(255, 178, 211, 194);
+
+// Bornes des modifs du jour à l'accueil : les MÊMES que la page des plages
+// (durées 5 à 30 min, capacité 1 à 30 pers.). MIROIR de company_schedule.js
+// (changeDayDuration / changeDayCapacity), qui refuse au-delà.
+const int _kMinDuration = 5;
+const int _kMaxDuration = 30;
+const int _kMinCapacity = 1;
+const int _kMaxCapacity = 30;
 
 // ============================================================
 // HOUSE PAGE — AGENDA INTERACTIF DE L'ENTREPRISE
@@ -1479,12 +1488,16 @@ class _HousePageState extends State<HousePage>
   Future<void> _onDurationChanged(_QueueAgenda queue, int delta) async {
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
     try {
-      final tsInfo = await _selectTimeSlot(queue, forDuration: true);
+      final tsInfo = await _selectTimeSlot(
+        queue,
+        forDuration: true,
+        delta: delta,
+      );
       // La page a pu être quittée pendant le choix de la plage.
       if (tsInfo == null || !mounted) return;
 
       final current = tsInfo.effectiveDuration;
-      final newDuration = (current + delta).clamp(5, 120);
+      final newDuration = (current + delta).clamp(_kMinDuration, _kMaxDuration);
       if (newDuration == current) return;
 
       final plageStart = _parseTimeString(tsInfo.startTime, _n.selectedDate);
@@ -1563,12 +1576,16 @@ class _HousePageState extends State<HousePage>
   Future<void> _onCapacityChanged(_QueueAgenda queue, int delta) async {
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
     try {
-      final tsInfo = await _selectTimeSlot(queue, forDuration: false);
+      final tsInfo = await _selectTimeSlot(
+        queue,
+        forDuration: false,
+        delta: delta,
+      );
       // La page a pu être quittée pendant le choix de la plage.
       if (tsInfo == null || !mounted) return;
 
       final current = tsInfo.effectiveCapacity;
-      final newCapacity = (current + delta).clamp(1, 50);
+      final newCapacity = (current + delta).clamp(_kMinCapacity, _kMaxCapacity);
       if (newCapacity == current) return;
 
       final confirmed = await _showModifDialog(
@@ -1607,9 +1624,15 @@ class _HousePageState extends State<HousePage>
   // apparaît grisée avec sa raison : bloquée, terminée, suppression
   // programmée, sans créneau ce jour, ou — pour la durée seulement — sans
   // créneau libre à recalculer (tous les créneaux restants sont réservés).
+  //
+  // [delta] : sens du changement demandé. Une plage déjà à la borne dans ce
+  // sens (durée 5 / 30 min, capacité 1 / 30 pers.) est grisée avec la
+  // raison, comme les boutons + / − de la carte. Une plage sans créneau ce
+  // jour-là est simplement grisée, sans mention (raison vide).
   Future<_TimeSlotInfo?> _selectTimeSlot(
     _QueueAgenda queue, {
     required bool forDuration,
+    required int delta,
   }) async {
     final fetched = await _n.fetchTimeSlots(queue.id);
     if (fetched.isEmpty || !mounted) return null;
@@ -1620,10 +1643,13 @@ class _HousePageState extends State<HousePage>
         () {
           final info = _n.withDayValues(queue, ts);
           final state = _plageDayState(info, queue.slots, now);
-          String? disabledReason = _plageDayStateLabel(state, info);
+          String? disabledReason = state == _PlageDayState.noSlots
+              ? ''
+              : _plageDayStateLabel(state, info);
           if (disabledReason == null && forDuration && !info.hasFreeSlot) {
             disabledReason = 'Aucun créneau libre à modifier';
           }
+          disabledReason ??= _boundReason(info, forDuration, delta);
           return (ts: info, disabledReason: disabledReason);
         }(),
     ];
@@ -1633,12 +1659,12 @@ class _HousePageState extends State<HousePage>
     if (entries.length == 1) {
       final only = entries.first;
       if (only.disabledReason == null) return only.ts;
+      final reason = only.disabledReason!.isEmpty
+          ? 'pas de créneau ce jour'
+          : only.disabledReason!.toLowerCase();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            'Modification impossible pour le moment : '
-            '${only.disabledReason!.toLowerCase()}.',
-          ),
+          content: Text('Modification impossible pour le moment : $reason.'),
         ),
       );
       return null;
@@ -1653,6 +1679,29 @@ class _HousePageState extends State<HousePage>
         title: 'Quelle plage modifier ?',
       ),
     );
+  }
+
+  /// Raison de griser une plage déjà à la borne dans le sens demandé, ou
+  /// null si le changement est possible.
+  String? _boundReason(_TimeSlotInfo ts, bool forDuration, int delta) {
+    if (forDuration) {
+      final d = ts.effectiveDuration;
+      if (delta > 0 && d >= _kMaxDuration) {
+        return 'Durée maximale atteinte ($_kMaxDuration min)';
+      }
+      if (delta < 0 && d <= _kMinDuration) {
+        return 'Durée minimale atteinte ($_kMinDuration min)';
+      }
+    } else {
+      final c = ts.effectiveCapacity;
+      if (delta > 0 && c >= _kMaxCapacity) {
+        return 'Capacité maximale atteinte ($_kMaxCapacity pers.)';
+      }
+      if (delta < 0 && c <= _kMinCapacity) {
+        return 'Capacité minimale atteinte ($_kMinCapacity pers.)';
+      }
+    }
+    return null;
   }
 
   DateTime _parseTimeString(String time, DateTime date) {
@@ -2212,6 +2261,8 @@ class _QueueAgenda {
   final String? blockedPlagesLabel;
   final String? blockReason;
   final QueueStats stats;
+  /// Jours où au moins une plage de la file est ouverte (1 = lundi) ; vide
+  /// = aucune plage connue (tous les jours traités comme ouvrés).
   final List<int> weekdays;
   final int timeSlotCount;
   final DateTime? closureStart;
@@ -2240,6 +2291,7 @@ class _QueueAgenda {
     List<AgendaSlot>? newSlots,
     QueueStats? newStats,
     int? newTimeSlotCount,
+    List<int>? newWeekdays,
   }) {
     final s = newSlots ?? slots;
     final block = _blockStateOf(s, now);
@@ -2252,7 +2304,7 @@ class _QueueAgenda {
       blockedPlagesLabel: block.blockedPlagesLabel,
       blockReason: block.reason,
       stats: newStats ?? AgendaService().computeStats(s, now: now),
-      weekdays: weekdays,
+      weekdays: newWeekdays ?? weekdays,
       timeSlotCount: newTimeSlotCount ?? timeSlotCount,
       closureStart: closureStart,
       closureEnd: closureEnd,

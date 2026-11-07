@@ -1096,11 +1096,11 @@ class _HouseNotifier extends ChangeNotifier {
                 : <int>[];
             final queueName = qData['name'] ?? 'File sans nom';
 
-            // TimeSlot count — flux borné à 2 docs (peu coûteux). En direct
+            // Plages de la file — nombre et jours d'ouverture. En direct
             // plutôt qu'une lecture ponctuelle : une plage peut être créée ou
             // supprimée depuis l'onglet Settings pendant que l'accueil reste
             // vivant en parallèle via l'IndexedStack de company_page.dart.
-            final Future<int> tsCountFuture = _subscribeTimeSlotCount(qDoc.id);
+            final plagesFuture = _subscribePlages(qDoc.id, weekdays);
 
             final List<AgendaSlot> allSlots;
             final QueueStats stats;
@@ -1192,7 +1192,7 @@ class _HouseNotifier extends ChangeNotifier {
               stats = _agenda.computeStats(allSlots, now: now);
             }
 
-            final timeSlotCount = await tsCountFuture;
+            final plages = await plagesFuture;
 
             // État de blocage (en cours / total / partiel) calculé dans
             // rebuiltAt, à partir des créneaux et de l'heure.
@@ -1201,8 +1201,8 @@ class _HouseNotifier extends ChangeNotifier {
               name: queueName,
               slots: allSlots,
               stats: stats,
-              weekdays: weekdays,
-              timeSlotCount: timeSlotCount,
+              weekdays: plages.days,
+              timeSlotCount: plages.count,
               closureStart: (qData['closureStart'] as Timestamp?)?.toDate(),
               closureEnd: (qData['closureEnd'] as Timestamp?)?.toDate(),
             ).rebuiltAt(now, newStats: stats);
@@ -1368,10 +1368,19 @@ class _HouseNotifier extends ChangeNotifier {
     _notify();
   }
 
-  // ── Flux temps réel sur le nombre de plages d'une file ────────────────────
+  // ── Flux temps réel sur les plages d'une file ─────────────────────────────
   // Résout avec le premier instantané (chargement initial), puis met à jour
-  // `timeSlotCount` de la file affichée à chaque création/suppression.
-  Future<int> _subscribeTimeSlotCount(String queueId) {
+  // la file affichée à chaque création / modification / suppression :
+  //  • `timeSlotCount` — nombre de plages ;
+  //  • `weekdays` — jours où AU MOINS UNE plage est ouverte. Ce sont les
+  //    plages qui portent leurs jours (le champ `weekdays` de la file, resté
+  //    à lun–ven par défaut, ne reflète plus la réalité : avec lui, les
+  //    boutons de modification disparaissaient le week-end).
+  //    [queueWeekdays] ne sert que de repli pour une plage sans jours.
+  Future<({int count, List<int> days})> _subscribePlages(
+    String queueId,
+    List<int> queueWeekdays,
+  ) {
     _tsCountSubs.remove(queueId)?.cancel();
 
     final query = _db
@@ -1379,27 +1388,47 @@ class _HouseNotifier extends ChangeNotifier {
         .doc(_companyId)
         .collection('queues')
         .doc(queueId)
-        .collection('timeSlots')
-        .limit(2);
+        .collection('timeSlots');
 
-    final completer = Completer<int>();
+    ({int count, List<int> days}) summarize(
+      QuerySnapshot<Map<String, dynamic>> snap,
+    ) {
+      final days = <int>{};
+      for (final doc in snap.docs) {
+        final raw = doc.data()['workingDays'];
+        days.addAll(
+          raw is List
+              ? raw.map((e) => (e as num).toInt())
+              : (queueWeekdays.isNotEmpty
+                    ? queueWeekdays
+                    : const [1, 2, 3, 4, 5]),
+        );
+      }
+      return (count: snap.docs.length, days: days.toList()..sort());
+    }
+
+    final completer = Completer<({int count, List<int> days})>();
     _tsCountSubs[queueId] = query.snapshots().listen(
       (snap) {
-        final count = snap.docs.length;
+        final plages = summarize(snap);
         if (!completer.isCompleted) {
-          completer.complete(count);
+          completer.complete(plages);
           return;
         }
-        // Un rechargement complet relira lui-même le compteur.
+        // Un rechargement complet relira lui-même les plages.
         if (_isRefreshing) return;
         final idx = _queues.indexWhere((q) => q?.id == queueId);
         if (idx == -1) return;
         final old = _queues[idx]!;
-        if (old.timeSlotCount == count) return;
+        if (old.timeSlotCount == plages.count &&
+            listEquals(old.weekdays, plages.days)) {
+          return;
+        }
         _queues[idx] = old.rebuiltAt(
           DateTime.now(),
           newStats: old.stats,
-          newTimeSlotCount: count,
+          newTimeSlotCount: plages.count,
+          newWeekdays: plages.days,
         );
         _notify();
       },

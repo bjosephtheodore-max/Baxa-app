@@ -8,6 +8,8 @@ import 'package:baxa/services/booking_constants.dart';
 import 'package:baxa/services/company_booking_service.dart';
 import 'package:baxa/services/company_functions.dart';
 import 'package:baxa/services/company_schedule_service.dart';
+import 'package:baxa/services/password_rules.dart';
+import 'package:baxa/widgets/password_checklist.dart';
 import 'package:baxa/widgets/account_status_card.dart';
 import 'package:baxa/widgets/qr_code_section.dart';
 import 'package:baxa/services/location_service.dart';
@@ -2105,6 +2107,7 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     bool obscureNew = true;
     bool obscureConfirm = true;
     bool isLoading = false;
+    String? newError;
     String? confirmError;
 
     await showModalBottomSheet(
@@ -2201,14 +2204,15 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                   hint: 'Nouveau mot de passe',
                   obscure: obscureNew,
                   onToggle: () => setSheet(() => obscureNew = !obscureNew),
+                  errorText: newError,
+                  onChanged: (_) {
+                    if (newError != null) setSheet(() => newError = null);
+                  },
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 Padding(
                   padding: const EdgeInsets.only(left: 4),
-                  child: Text(
-                    'Au moins 6 caractères recommandés',
-                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                  ),
+                  child: PasswordChecklist(controller: newCtrl, okColor: _green),
                 ),
                 const SizedBox(height: 14),
 
@@ -2236,6 +2240,11 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                     onPressed: isLoading
                         ? null
                         : () async {
+                            final rule = validateNewPassword(newCtrl.text);
+                            if (rule != null) {
+                              setSheet(() => newError = rule);
+                              return;
+                            }
                             if (newCtrl.text != confirmCtrl.text) {
                               setSheet(
                                 () => confirmError =
@@ -2427,7 +2436,9 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
       if (e.code == 'wrong-password' || e.code == 'invalid-credential') {
         message = 'Ancien mot de passe incorrect';
       } else if (e.code == 'weak-password') {
-        message = 'Le nouveau mot de passe est trop faible';
+        message =
+            'Mot de passe trop faible : $kPasswordMinLength caractères '
+            'minimum, avec au moins une lettre et un chiffre.';
       } else if (e.code == 'too-many-requests') {
         message = 'Trop de tentatives. Réessayez dans quelques minutes.';
       } else if (e.code == 'network-request-failed') {

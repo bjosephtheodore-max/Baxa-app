@@ -709,8 +709,8 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                           icon: Icons.timer,
                           value: widget.currentDuration,
                           unit: 'min',
-                          min: 5,
-                          max: 120,
+                          min: _kMinDuration,
+                          max: _kMaxDuration,
                           step: 5,
                           onChanged: widget.onDurationChanged,
                           onRevert: widget.onRevertDuration,
@@ -721,8 +721,8 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                           icon: Icons.people,
                           value: widget.currentCapacity,
                           unit: 'pers.',
-                          min: 1,
-                          max: 50,
+                          min: _kMinCapacity,
+                          max: _kMaxCapacity,
                           step: 1,
                           onChanged: widget.onCapacityChanged,
                         ),
@@ -910,10 +910,7 @@ class _ControlRow extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: Colors.orange.shade600,
                   shape: BoxShape.circle,
-                  border: Border.all(
-                    color: Colors.white,
-                    width: 1.5,
-                  ),
+                  border: Border.all(color: Colors.white, width: 1.5),
                 ),
                 child: const Icon(
                   Icons.undo_rounded,
@@ -1315,12 +1312,22 @@ class _TimeslotPickerSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Hauteur bornée (85 % de l'écran) et liste qui défile : avec beaucoup
+    // de plages, la feuille ne touche plus le haut du téléphone.
     return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.85,
+      ),
       decoration: const BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+      padding: EdgeInsets.fromLTRB(
+        20,
+        8,
+        20,
+        28 + MediaQuery.of(context).padding.bottom,
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1362,67 +1369,14 @@ class _TimeslotPickerSheet extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 16),
-          ...entries.map((entry) {
-            final ts = entry.ts;
-            final deferred = entry.disabledReason != null;
-            return Container(
-              margin: const EdgeInsets.only(bottom: 10),
-              decoration: BoxDecoration(
-                color: deferred
-                    ? Colors.grey.shade100
-                    : const Color(0xFFE8F5ED),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: deferred
-                      ? Colors.grey.shade300
-                      : _green.withValues(alpha: 0.3),
-                ),
+          Flexible(
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: entries.map(_entryTile).toList(),
               ),
-              child: ListTile(
-                enabled: !deferred,
-                // Sous-titre sur 2 lignes quand les valeurs du jour
-                // diffèrent des habituelles (« Habituellement … »).
-                isThreeLine:
-                    !deferred && _valuesLine(ts).contains('\n'),
-                leading: Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: deferred
-                        ? Colors.grey.shade300
-                        : _green.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Center(
-                    child: Icon(
-                      ts.deleteAfter != null
-                          ? Icons.auto_delete_outlined
-                          : deferred
-                          ? Icons.lock_clock_outlined
-                          : Icons.access_time_rounded,
-                      color: deferred ? Colors.grey.shade500 : _green,
-                      size: 20,
-                    ),
-                  ),
-                ),
-                title: Text(
-                  '${ts.startTime} – ${ts.endTime}',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 15,
-                  ),
-                ),
-                subtitle: Text(
-                  entry.disabledReason ?? _valuesLine(ts),
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
-                trailing: deferred
-                    ? null
-                    : const Icon(Icons.chevron_right_rounded, color: _green),
-                onTap: deferred ? null : () => Navigator.pop(context, ts),
-              ),
-            );
-          }),
+            ),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: SizedBox(
@@ -1436,6 +1390,72 @@ class _TimeslotPickerSheet extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _entryTile(({_TimeSlotInfo ts, String? disabledReason}) entry) {
+    return Builder(
+      builder: (context) {
+        final ts = entry.ts;
+        final deferred = entry.disabledReason != null;
+        // Raison vide = plage sans créneau ce jour : simplement grisée.
+        final subtitle = deferred
+            ? (entry.disabledReason!.isEmpty ? null : entry.disabledReason)
+            : _valuesLine(ts);
+        return Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          decoration: BoxDecoration(
+            color: deferred ? Colors.grey.shade100 : const Color(0xFFE8F5ED),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: deferred
+                  ? Colors.grey.shade300
+                  : _green.withValues(alpha: 0.3),
+            ),
+          ),
+          child: ListTile(
+            enabled: !deferred,
+            // Sous-titre sur 2 lignes quand les valeurs du jour
+            // diffèrent des habituelles (« Habituellement … »).
+            isThreeLine: subtitle != null && subtitle.contains('\n'),
+            leading: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: deferred
+                    ? Colors.grey.shade300
+                    : _green.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Center(
+                child: Icon(
+                  ts.deleteAfter != null
+                      ? Icons.auto_delete_outlined
+                      : deferred
+                      ? Icons.lock_clock_outlined
+                      : Icons.access_time_rounded,
+                  color: deferred ? Colors.grey.shade500 : _green,
+                  size: 20,
+                ),
+              ),
+            ),
+            title: Text(
+              '${ts.startTime} – ${ts.endTime}',
+              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+            ),
+            subtitle: subtitle == null
+                ? null
+                : Text(
+                    subtitle,
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+            trailing: deferred
+                ? null
+                : const Icon(Icons.chevron_right_rounded, color: _green),
+            onTap: deferred ? null : () => Navigator.pop(context, ts),
+          ),
+        );
+      },
     );
   }
 }
@@ -1570,6 +1590,9 @@ class _BlockSheetState extends State<_BlockSheet> {
   Widget build(BuildContext context) {
     final hasMultiple = widget.timeslots.length > 1;
     return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.92,
+      ),
       decoration: const BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
@@ -1622,119 +1645,136 @@ class _BlockSheetState extends State<_BlockSheet> {
               ),
             ],
           ),
-          if (hasMultiple) ...[
-            const SizedBox(height: 16),
-            Text(
-              'Quelle plage ?',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: Colors.grey.shade700,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                ...widget.timeslots.map((ts) {
-                  final state = _states[ts.id]!;
-                  final mention = switch (state) {
-                    _PlageDayState.available => null,
-                    _PlageDayState.ended => 'terminée',
-                    _PlageDayState.blocked => 'bloquée',
-                    _PlageDayState.deferred => 'suppr. programmée',
-                    _PlageDayState.noSlots => 'pas de créneau',
-                  };
-                  return _selectChip(
-                    label: mention == null
-                        ? '${ts.startTime}–${ts.endTime}'
-                        : '${ts.startTime}–${ts.endTime} · $mention',
-                    selected: _selectedId == ts.id,
-                    disabled: !_isAvailable(ts),
-                    onTap: () => setState(() {
-                      _selectedId = ts.id;
-                      _showReasonError = false;
-                    }),
-                  );
-                }),
-                // « Toutes » = toutes les plages encore blocables.
-                _selectChip(
-                  label: 'Toutes les plages',
-                  selected: _selectedId == null && _anyAvailable,
-                  disabled: !_anyAvailable,
-                  onTap: () => setState(() {
-                    _selectedId = null;
-                    _showReasonError = false;
-                  }),
-                ),
-              ],
-            ),
-          ],
-          const SizedBox(height: 16),
-          TextField(
-            controller: _reasonController,
-            // Autofocus seulement s'il n'y a pas de créneau à choisir
-            // avant : sinon le clavier masquerait les puces de sélection.
-            autofocus: !hasMultiple,
-            onChanged: (_) {
-              if (_showReasonError) {
-                setState(() => _showReasonError = false);
-              }
-            },
-            decoration: InputDecoration(
-              labelText: _reasonRequired
-                  ? 'Raison (visible par les clients)'
-                  : 'Raison (optionnel)',
-              hintText: 'Ex : Panne technique, urgence, personnel absent…',
-              prefixIcon: const Icon(Icons.info_outline_rounded),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              errorBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.red.shade400),
-              ),
-              focusedErrorBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.red.shade400, width: 2),
-              ),
-              errorText: _showReasonError
-                  ? 'Raison requise — des réservations sont en cours sur ce créneau'
-                  : null,
-              errorMaxLines: 2,
-              filled: true,
-              fillColor: Colors.grey.shade50,
-            ),
-            maxLines: 2,
-            // La raison part telle quelle dans la notification client.
-            maxLength: 120,
-          ),
-          if (_reasonRequired) ...[
-            const SizedBox(height: 4),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  Icons.notifications_active_outlined,
-                  size: 15,
-                  color: Colors.grey.shade500,
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    'Les clients ayant réservé via l\'app seront prévenus que '
-                    'le service est suspendu. Ceux venus réserver sur place ne '
-                    'recevront rien — pensez à les prévenir.',
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Colors.grey.shade500,
+          // Plages, raison et note défilent ; le bouton « Bloquer » reste
+          // visible en bas, au-dessus du clavier (avant : débordement avec
+          // beaucoup de plages et le clavier ouvert).
+          Flexible(
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (hasMultiple) ...[
+                    const SizedBox(height: 16),
+                    Text(
+                      'Quelle plage ?',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.grey.shade700,
+                      ),
                     ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        ...widget.timeslots.map((ts) {
+                          final state = _states[ts.id]!;
+                          final mention = switch (state) {
+                            _PlageDayState.available => null,
+                            _PlageDayState.ended => 'terminée',
+                            _PlageDayState.blocked => 'bloquée',
+                            _PlageDayState.deferred => 'suppr. programmée',
+                            _PlageDayState.noSlots => null,
+                          };
+                          return _selectChip(
+                            label: mention == null
+                                ? '${ts.startTime}–${ts.endTime}'
+                                : '${ts.startTime}–${ts.endTime} · $mention',
+                            selected: _selectedId == ts.id,
+                            disabled: !_isAvailable(ts),
+                            onTap: () => setState(() {
+                              _selectedId = ts.id;
+                              _showReasonError = false;
+                            }),
+                          );
+                        }),
+                        // « Toutes » = toutes les plages encore blocables.
+                        _selectChip(
+                          label: 'Toutes les plages',
+                          selected: _selectedId == null && _anyAvailable,
+                          disabled: !_anyAvailable,
+                          onTap: () => setState(() {
+                            _selectedId = null;
+                            _showReasonError = false;
+                          }),
+                        ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _reasonController,
+                    // Autofocus seulement s'il n'y a pas de créneau à choisir
+                    // avant : sinon le clavier masquerait les puces de sélection.
+                    autofocus: !hasMultiple,
+                    onChanged: (_) {
+                      if (_showReasonError) {
+                        setState(() => _showReasonError = false);
+                      }
+                    },
+                    decoration: InputDecoration(
+                      labelText: _reasonRequired
+                          ? 'Raison (visible par les clients)'
+                          : 'Raison (optionnel)',
+                      hintText:
+                          'Ex : Panne technique, urgence, personnel absent…',
+                      prefixIcon: const Icon(Icons.info_outline_rounded),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      errorBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: Colors.red.shade400),
+                      ),
+                      focusedErrorBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(
+                          color: Colors.red.shade400,
+                          width: 2,
+                        ),
+                      ),
+                      errorText: _showReasonError
+                          ? 'Raison requise — des réservations sont en cours sur ce créneau'
+                          : null,
+                      errorMaxLines: 2,
+                      filled: true,
+                      fillColor: Colors.grey.shade50,
+                    ),
+                    maxLines: 2,
+                    // La raison part telle quelle dans la notification client.
+                    maxLength: 120,
                   ),
-                ),
-              ],
+                  if (_reasonRequired) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          Icons.notifications_active_outlined,
+                          size: 15,
+                          color: Colors.grey.shade500,
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            'Les clients ayant réservé via l\'app seront prévenus que '
+                            'le service est suspendu. Ceux venus réserver sur place ne '
+                            'recevront rien — pensez à les prévenir.',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: Colors.grey.shade500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
             ),
-          ],
+          ),
           const SizedBox(height: 20),
           SizedBox(
             width: double.infinity,

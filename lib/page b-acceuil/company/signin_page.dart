@@ -4,6 +4,8 @@ import 'package:baxa/page%20b-acceuil/company/company_page.dart';
 import 'package:baxa/page%20b-acceuil/company/password_reset_page.dart';
 import 'package:baxa/services/company_account_service.dart';
 import 'package:baxa/services/company_functions.dart';
+import 'package:baxa/services/password_rules.dart';
+import 'package:baxa/widgets/password_checklist.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
@@ -117,7 +119,8 @@ class SigninPageState extends State<SigninPage> {
       case 'invalid-email':
         return 'Adresse email invalide.';
       case 'weak-password':
-        return 'Mot de passe trop faible. Minimum 6 caractères.';
+        return 'Mot de passe trop faible : $kPasswordMinLength caractères '
+            'minimum, avec au moins une lettre et un chiffre.';
       case 'network-request-failed':
         return 'Vérifiez votre connexion internet.';
       case 'too-many-requests':
@@ -559,20 +562,23 @@ class SigninPageState extends State<SigninPage> {
                                       setState(() => _isObscure = !_isObscure),
                                 ),
                               ),
-                              validator: (value) {
-                                if (value == null || value.isEmpty) {
-                                  return "Veuillez entrer un mot de passe";
-                                }
-                                if (value.length < 6) {
-                                  return "Minimum 6 caractères";
-                                }
-                                return null;
-                              },
+                              // Inscription : règle Baxa (8 caractères, une
+                              // lettre, un chiffre). Connexion : non vide
+                              // seulement — les comptes créés avant la règle
+                              // se connectent toujours.
+                              validator: (value) => _isLoginMode
+                                  ? ((value == null || value.isEmpty)
+                                        ? 'Veuillez entrer un mot de passe'
+                                        : null)
+                                  : validateNewPassword(value),
                             ),
 
                             if (!_isLoginMode) ...[
-                              const SizedBox(height: 8),
-                              _PasswordRule(controller: _passwordController),
+                              const SizedBox(height: 4),
+                              PasswordChecklist(
+                                controller: _passwordController,
+                                okColor: _greenText,
+                              ),
                             ] else
                               Align(
                                 alignment: Alignment.centerRight,
@@ -994,44 +1000,6 @@ class _FieldLabel extends StatelessWidget {
         fontWeight: FontWeight.w600,
         color: _labelDark,
       ),
-    );
-  }
-}
-
-// ── Règle du mot de passe, cochée dès qu'elle est respectée (affichage seul :
-// la validation reste celle du TextFormField) ──────────────────────────────
-class _PasswordRule extends StatelessWidget {
-  final TextEditingController controller;
-  const _PasswordRule({required this.controller});
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<TextEditingValue>(
-      valueListenable: controller,
-      builder: (_, value, _) {
-        final ok = value.text.length >= 6;
-        final color = ok ? _greenText : _subtle;
-        return Row(
-          children: [
-            Icon(
-              ok
-                  ? Icons.check_circle_outline_rounded
-                  : Icons.radio_button_unchecked_rounded,
-              size: 16,
-              color: ok ? _green : _subtle,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              '6 caractères minimum',
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w500,
-                color: color,
-              ),
-            ),
-          ],
-        );
-      },
     );
   }
 }

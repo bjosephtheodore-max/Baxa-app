@@ -472,6 +472,19 @@ describe("Accueil : durée et capacité du jour", () => {
   it("aucun créneau ce jour : refusé", () =>
     expectRefused(change(), "noSlots"));
 
+  it("bornes de la page des plages : 5–30 min, 1–30 pers.", async () => {
+    await putSlot("a", day(1), "09:00");
+    const invalid = (e) => e.code === "invalid-argument";
+    await assert.rejects(change({duration: 35}), invalid);
+    await assert.rejects(change({capacity: 31}), invalid);
+    await assert.rejects(sc.changeDayCapacity(db, ADMIN, {companyId: "compA",
+      queueId: "q1", day: day(1), capacity: 31}, now), invalid);
+    await assert.rejects(sc.changeDayCapacity(db, ADMIN, {companyId: "compA",
+      queueId: "q1", day: day(1), capacity: 0}, now), invalid);
+    await assert.rejects(sc.saveTimeSlot(db, ADMIN, form({capacity: 31}), now),
+      invalid);
+  });
+
   it("capacité du jour : créneaux ouverts à venir, jamais sous les réservés",
     async () => {
       await putSlot("a", day(1), "09:00", {reserved: 3, capacity: 3});

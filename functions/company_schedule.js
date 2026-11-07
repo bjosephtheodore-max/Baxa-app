@@ -48,6 +48,12 @@ const HORIZON_DAYS = 7;
 // Préchauffage avant une réouverture datée (MIROIR de la génération de nuit).
 const REOPEN_PREHEAT_MS = 48 * HOUR;
 const DEFAULT_WEEKDAYS = [1, 2, 3, 4, 5];
+// Bornes d'un créneau : MIROIR de la page des plages et des boutons + / −
+// de l'accueil (_kMin/_kMax dans house_page.dart).
+const MIN_DURATION = 5;
+const MAX_DURATION = 30;
+const MIN_CAPACITY = 1;
+const MAX_CAPACITY = 30;
 
 // ════════════════════════════════════════════════════════════════════
 // MOTEUR — fonctions pures (testées seules)
@@ -457,8 +463,8 @@ function configFromForm(data, current) {
   }
   return {
     startTime, endTime,
-    duration: intIn(data, "duration", 5, 240),
-    capacity: intIn(data, "capacity", 1, 100),
+    duration: intIn(data, "duration", MIN_DURATION, MAX_DURATION),
+    capacity: intIn(data, "capacity", MIN_CAPACITY, MAX_CAPACITY),
     workingDays: days.sort((a, b) => a - b),
     reservationDeadlineMinutes: intIn(data, "reservationDeadlineMinutes", 0,
       1440, current ? current.reservationDeadlineMinutes : 0),
@@ -796,8 +802,8 @@ async function changeDayDuration(db, user, data, now = new Date()) {
   const {qRef, tz} = ctx;
   const timeSlotId = requireString(data, "timeSlotId");
   const day = requireDay(data, "day");
-  const duration = intIn(data, "duration", 5, 240);
-  const capacity = intIn(data, "capacity", 1, 100);
+  const duration = intIn(data, "duration", MIN_DURATION, MAX_DURATION);
+  const capacity = intIn(data, "capacity", MIN_CAPACITY, MAX_CAPACITY);
   // Ancre horaire : celle de la modification d'origine pour une annulation
   // (« retour » sous 5 min), sinon maintenant.
   const anchorMs = data.anchor;
@@ -862,7 +868,7 @@ async function changeDayCapacity(db, user, data, now = new Date()) {
   const ctx = await contextFor(db, user, data, now);
   const {qRef, tz} = ctx;
   const day = requireDay(data, "day");
-  const capacity = intIn(data, "capacity", 1, 100);
+  const capacity = intIn(data, "capacity", MIN_CAPACITY, MAX_CAPACITY);
   const timeSlotId = data && typeof data.timeSlotId === "string" &&
     data.timeSlotId ? data.timeSlotId : null;
   const {start, end} = zone.dayBounds(day, tz);
