@@ -177,7 +177,10 @@ extension _QueueTimeSlotsDialogs on _QueueTimeSlotsPageState {
         ? List<int>.from(slotData!['workingDays'])
         : List<int>.from(_queueWeekdays);
 
-    int selectedCapacity = (slotData?['capacityPerSlot'] as num?)?.toInt() ?? 1;
+    // Ramenée dans 1–30 (bornes du serveur) : une plage enregistrée avant
+    // ces bornes (ex. 40 pers.) serait sinon refusée à l'enregistrement.
+    int selectedCapacity =
+        ((slotData?['capacityPerSlot'] as num?)?.toInt() ?? 1).clamp(1, 30);
     int selectedDelay =
         (slotData?['reservationDeadlineMinutes'] as num?)?.toInt() ?? 0;
     int selectedAdvanceDays =
