@@ -648,7 +648,8 @@ async function leave(db, user, data, now = new Date()) {
 // ── Point d'entrée ──────────────────────────────────────────────────
 const ACTIONS = {addManual, removeManual, block, unblock, close, leave};
 
-const companyBooking = onCall({region: REGION}, async (request) => {
+const companyBooking = onCall({region: REGION, enforceAppCheck: true},
+  async (request) => {
   const action = request.data && request.data.action;
   if (action === "warmup") return {ok: true};
 

@@ -1079,7 +1079,8 @@ const ACTIONS = {
   restoreQueueDeletion,
 };
 
-const companySchedule = onCall({region: REGION, timeoutSeconds: 120},
+const companySchedule = onCall(
+  {region: REGION, timeoutSeconds: 120, enforceAppCheck: true},
   async (request) => {
     const action = request.data && request.data.action;
     if (action === "warmup") return {ok: true};

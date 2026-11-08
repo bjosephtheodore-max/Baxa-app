@@ -445,7 +445,11 @@ async function cancel(db, user, data) {
 // ── Point d'entrée ──────────────────────────────────────────────────
 const ACTIONS = {reserve, replace, cancel};
 
-const booking = onCall({region: REGION}, async (request) => {
+// enforceAppCheck : seuls les appels venant de la vraie app (jeton App Check
+// valide) sont acceptés ; les autres sont refusés avant d'exécuter quoi que
+// ce soit. Même réglage sur toutes les fonctions appelées par l'app.
+const booking = onCall({region: REGION, enforceAppCheck: true},
+  async (request) => {
   const action = request.data && request.data.action;
   // Réveil anticipé (page créneaux ouverte) : répond sans rien faire.
   if (action === "warmup") return {ok: true};

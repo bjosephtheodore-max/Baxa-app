@@ -172,7 +172,8 @@ async function resolveRole(db, auth, user) {
 // ── Point d'entrée ──────────────────────────────────────────────────
 const ACTIONS = {create, resolveRole};
 
-const companyAccount = onCall({region: REGION}, async (request) => {
+const companyAccount = onCall({region: REGION, enforceAppCheck: true},
+  async (request) => {
   const action = request.data && request.data.action;
   if (action === "warmup") return {ok: true};
 

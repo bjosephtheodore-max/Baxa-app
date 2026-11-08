@@ -48,7 +48,8 @@ const v2Updated = (d, handler) => onDocumentUpdated(triggerOpts(d), asV1(handler
 const v2Written = (d, handler) => onDocumentWritten(triggerOpts(d), asV1(handler));
 const v2Deleted = (d, handler) => onDocumentDeleted(triggerOpts(d), asV1(handler));
 const v2Callable = (handler) => onCall(
-  { region: DB_REGION },
+  // App Check exigé : appels refusés s'ils ne viennent pas de la vraie app.
+  { region: DB_REGION, enforceAppCheck: true },
   (request) => handler(request.data, { auth: request.auth }),
 );
 
