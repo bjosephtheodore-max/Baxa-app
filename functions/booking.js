@@ -1,9 +1,9 @@
 // ════════════════════════════════════════════════════════════════════
 // RÉSERVATIONS CLIENT — le serveur est l'arbitre
 //
-// Une seule fonction appelable `booking` (2e génération) gère les quatre
-// actions du client : warmup / reserve / replace / cancel. Le client ne
-// peut plus écrire lui-même réservations, compteurs de créneaux, places
+// Une seule fonction appelable `booking` (2e génération) gère les actions
+// du client : warmup / reserve / replace / cancel / deleteAccount. Le client
+// ne peut plus écrire lui-même réservations, compteurs de créneaux, places
 // par jour ni quota (voir firestore.rules) : tout passe par ici, vérifié
 // puis écrit en une seule transaction.
 //
@@ -401,6 +401,12 @@ async function cancel(db, user, data) {
   const reservationId = requireString(data, "reservationId");
   const source = data && data.source === "notification" ? "notification" :
     null;
+  await cancelOne(db, user, companyId, reservationId, source);
+  return {ok: true};
+}
+
+/** Annule UNE réservation du client (place rendue, stats du jour). */
+async function cancelOne(db, user, companyId, reservationId, source) {
   const resRef = db.collection("companies").doc(companyId)
     .collection("reservations").doc(reservationId);
 
@@ -438,12 +444,95 @@ async function cancel(db, user, data) {
       toDate(res.slotStart), tz), {reserved: -1, available: 1, cancelled: 1});
     stats.apply(tx);
   });
+}
 
-  return {ok: true};
+// ── SUPPRIMER SON COMPTE (client) ───────────────────────────────────
+// Suppression IMMÉDIATE et définitive, exigée par le Play Store
+// (voir aussi la page getbaxa.com/suppression) :
+//  1. réservations à venir annulées — les places sont rendues ;
+//  2. toutes ses réservations, passées comprises, rendues anonymes (nom et
+//     e-mail retirés) : la structure garde son historique, affiché
+//     « Client » ; elles disparaissent ensuite avec la purge des 30 jours ;
+//  3. profil (users/{uid}, favoris, structures récentes) et notifications
+//     (customers/{uid}) effacés ;
+//  4. compte de connexion supprimé.
+// Rejouable sans risque : si une étape échoue, un nouvel appel reprend.
+// Refusé pour une structure (« Quitter Baxa », délai de 7 jours) et pour
+// un membre d'équipe (son accès dépend de la structure).
+async function deleteAccount(db, user, data, now = new Date(),
+  deleteAuthUser = defaultDeleteAuthUser) {
+  const uid = user.uid;
+  const userRef = db.collection("users").doc(uid);
+  const [companySnap, userSnap] = await Promise.all([
+    db.collection("companies").doc(uid).get(), userRef.get(),
+  ]);
+  if (companySnap.exists) {
+    throw refuse("isCompany",
+      "Ce compte est celui d'une structure : utilisez « Quitter Baxa » " +
+      "dans les Réglages.");
+  }
+  if ((userSnap.data() || {}).role === "staff") {
+    throw refuse("isStaff",
+      "Ce compte est celui d'un membre d'équipe : demandez au gérant de " +
+      "la structure de retirer votre accès.");
+  }
+
+  // Les réservations n'ont que deux états ; « in » sur les deux utilise
+  // l'index (customerId, status) déjà en place.
+  const all = await db.collectionGroup("reservations")
+    .where("customerId", "==", uid)
+    .where("status", "in", ["confirmed", "cancelled"])
+    .get();
+
+  let cancelled = 0;
+  for (const doc of all.docs) {
+    const r = doc.data();
+    if (r.status !== "confirmed" || toDate(r.slotEnd) <= now) continue;
+    try {
+      await cancelOne(db, user, doc.ref.parent.parent.id, doc.id,
+        "account_deleted");
+      cancelled++;
+    } catch (e) {
+      // Déjà annulée entre-temps : rien à rendre.
+      if (!(e instanceof HttpsError && e.details &&
+          e.details.reason === "notActive")) {
+        throw e;
+      }
+    }
+  }
+
+  let batch = db.batch();
+  let n = 0;
+  for (const doc of all.docs) {
+    batch.update(doc.ref, {
+      customerName: FieldValue.delete(),
+      customerEmail: FieldValue.delete(),
+      customerDeleted: true,
+    });
+    if (++n % 400 === 0) {
+      await batch.commit();
+      batch = db.batch();
+    }
+  }
+  if (n % 400 !== 0) await batch.commit();
+
+  await db.recursiveDelete(userRef);
+  await db.recursiveDelete(db.collection("customers").doc(uid));
+  await deleteAuthUser(uid);
+
+  return {ok: true, cancelled};
+}
+
+async function defaultDeleteAuthUser(uid) {
+  try {
+    await admin.auth().deleteUser(uid);
+  } catch (e) {
+    if (e.code !== "auth/user-not-found") throw e;
+  }
 }
 
 // ── Point d'entrée ──────────────────────────────────────────────────
-const ACTIONS = {reserve, replace, cancel};
+const ACTIONS = {reserve, replace, cancel, deleteAccount};
 
 // enforceAppCheck : seuls les appels venant de la vraie app (jeton App Check
 // valide) sont acceptés ; les autres sont refusés avant d'exécuter quoi que
@@ -471,5 +560,6 @@ const booking = onCall({region: REGION, enforceAppCheck: true},
 module.exports = {
   booking,
   // Exposés pour les tests (émulateur).
-  reserve, replace, cancel, ymd, MAX_DAILY_RESERVATIONS, isSlotInClosure,
+  reserve, replace, cancel, deleteAccount, ymd, MAX_DAILY_RESERVATIONS,
+  isSlotInClosure,
 };

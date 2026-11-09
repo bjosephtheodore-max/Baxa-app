@@ -346,3 +346,92 @@ describe("Remplacer", () => {
     await expectRefused(replace(CLIENT, oldId, "s1"), "sameSlot");
   });
 });
+
+// ============================================================
+describe("Supprimer son compte (client)", () => {
+  const deleted = [];
+  const fakeDeleteAuth = async (uid) => {
+    deleted.push(uid);
+  };
+  const del = (user) => booking.deleteAccount(db, user, {}, now,
+    fakeDeleteAuth);
+
+  beforeEach(() => {
+    deleted.length = 0;
+  });
+
+  it("annule l'à-venir, anonymise tout, efface profil et notifications",
+    async () => {
+      await slot("s1", tomorrow10);
+      await slot("s2", at(tomorrow10, 60), {q: "q2"});
+      const {reservationId: r1} = await reserve(CLIENT, "s1");
+      // 2e file : une seule réservation active par file.
+      const {reservationId: r2} = await booking.reserve(db, CLIENT,
+        {companyId: "compA", queueId: "q2", slotId: "s2"}, now);
+      // Une réservation passée (déjà terminée), gardée par la structure.
+      await doc("companies/compA/reservations/old").set({
+        customerId: "cust1", customerName: "Awa Diop",
+        customerEmail: "client1@mail.com", status: "confirmed",
+        queueId: "q1", slotId: "sx",
+        slotStart: at(now, -120), slotEnd: at(now, -90),
+      });
+      await booking.cancel(db, CLIENT, {companyId: "compA",
+        reservationId: r2});
+      await doc("users/cust1/favorites/compA").set({nom: "Salon A"});
+      await doc("users/cust1/recentCompanies/compA").set({nom: "Salon A"});
+      await doc("customers/cust1/notifications/n1").set({title: "x"});
+
+      const res = await del(CLIENT);
+      assert.equal(res.cancelled, 1);
+
+      // À venir : annulée, place rendue.
+      const a = await read(`companies/compA/reservations/${r1}`);
+      assert.equal(a.status, "cancelled");
+      assert.equal(a.cancellationSource, "account_deleted");
+      assert.equal((await read(`${Q()}/slots/s1`)).reserved, 0);
+      // Toutes anonymisées, la passée reste « confirmée » (historique).
+      for (const id of [r1, r2, "old"]) {
+        const r = await read(`companies/compA/reservations/${id}`);
+        assert.equal(r.customerName, undefined);
+        assert.equal(r.customerEmail, undefined);
+        assert.equal(r.customerDeleted, true);
+      }
+      assert.equal((await read("companies/compA/reservations/old")).status,
+        "confirmed");
+      // Profil et notifications effacés, compte de connexion supprimé.
+      for (const p of ["users/cust1", "users/cust1/favorites/compA",
+        "users/cust1/recentCompanies/compA",
+        "customers/cust1/notifications/n1"]) {
+        assert.equal((await doc(p).get()).exists, false, p);
+      }
+      assert.deepEqual(deleted, ["cust1"]);
+    });
+
+  it("ne touche pas aux réservations des autres clients", async () => {
+    await slot("s1", tomorrow10);
+    await doc("users/cust2").set({prenom: "Moussa"});
+    const {reservationId} = await reserve(CLIENT_2, "s1");
+    await del(CLIENT);
+    const r = await read(`companies/compA/reservations/${reservationId}`);
+    assert.equal(r.status, "confirmed");
+    assert.equal(r.customerName, "Moussa");
+    assert.equal((await doc("users/cust2").get()).exists, true);
+  });
+
+  it("rejouable : un 2e appel ne casse rien", async () => {
+    await slot("s1", tomorrow10);
+    await reserve(CLIENT, "s1");
+    await del(CLIENT);
+    const res = await del(CLIENT);
+    assert.equal(res.cancelled, 0);
+    assert.equal((await read(`${Q()}/slots/s1`)).reserved, 0);
+  });
+
+  it("refusé pour une structure et pour un membre d'équipe", async () => {
+    await doc("companies/cust1").set({nom: "Ma structure"});
+    await expectRefused(del(CLIENT), "isCompany");
+    await doc("users/cust2").set({role: "staff", companyId: "compA"});
+    await expectRefused(del(CLIENT_2), "isStaff");
+    assert.deepEqual(deleted, []);
+  });
+});

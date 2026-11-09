@@ -442,6 +442,19 @@ class ReservationRulesService {
       if (fromNotification) 'source': 'notification',
     });
   }
+
+  // ── SUPPRIMER SON COMPTE ──────────────────────────────────────
+
+  /// Suppression immédiate et définitive du compte client, côté serveur :
+  /// réservations à venir annulées, historique anonymisé, profil, favoris
+  /// et notifications effacés, compte de connexion supprimé. L'appelant
+  /// déconnecte ensuite la session locale.
+  Future<void> deleteMyAccount() async {
+    if (_auth.currentUser == null) {
+      throw const BookingException('Utilisateur non connecté');
+    }
+    await _callBooking({'action': 'deleteAccount'});
+  }
 }
 
 /// Refus ou échec renvoyé par la fonction de réservation. [toString] donne

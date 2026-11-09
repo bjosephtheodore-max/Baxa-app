@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:baxa/services/firebase/auth.dart';
+import 'package:baxa/services/reservation_rules_service.dart';
 import 'package:baxa/services/support_constants.dart';
 import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
@@ -125,6 +126,90 @@ class _PersonaPageState extends State<PersonaPage> {
           ).showSnackBar(SnackBar(content: Text('Erreur déconnexion: $e')));
         }
       }
+    }
+  }
+
+  // ── Suppression du compte ────────────────────────────────────────────────
+  // Immédiate et définitive (exigence Play Store), faite par le serveur :
+  // réservations à venir annulées, profil, favoris et notifications effacés.
+  Future<void> _confirmAndDeleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Supprimer mon compte'),
+        content: const Text(
+          'Vos réservations à venir seront annulées, et votre profil, vos '
+          'favoris et vos notifications seront effacés.\n\n'
+          'Cette action est définitive.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Supprimer définitivement',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    // Attente non annulable : on ne laisse pas l'écran à moitié supprimé.
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const PopScope(
+        canPop: false,
+        child: Center(child: CircularProgressIndicator(color: _green)),
+      ),
+    );
+
+    try {
+      await ReservationRulesService().deleteMyAccount();
+      // Le compte n'existe plus côté serveur : on ferme la session locale.
+      await Auth().logout();
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const ChoosePage()),
+        (route) => false,
+      );
+      messenger.showSnackBar(
+        SnackBar(
+          content: const Text('Votre compte a été supprimé.'),
+          backgroundColor: _green,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop(); // ferme l'attente
+      final message =
+          e is BookingException &&
+              (e.reason != null || e.message.startsWith('Connexion'))
+          ? e.message
+          : 'La suppression n\'a pas abouti. Réessayez dans un instant.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: Colors.red.shade600,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+        ),
+      );
     }
   }
 
@@ -457,6 +542,27 @@ class _PersonaPageState extends State<PersonaPage> {
                       ),
                     ),
                   ),
+
+                  // ── Suppression du compte (discrète, sous la déconnexion :
+                  // même principe que « Quitter Baxa » côté structure). Pas
+                  // pour un compte invité : il n'a pas créé de compte.
+                  if (_auth.currentUser?.isAnonymous != true) ...[
+                    const SizedBox(height: 12),
+                    Center(
+                      child: TextButton(
+                        onPressed: _confirmAndDeleteAccount,
+                        child: Text(
+                          'Supprimer mon compte',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.grey.shade500,
+                            decoration: TextDecoration.underline,
+                            decorationColor: Colors.grey.shade400,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
 
                   const SizedBox(height: 24),
                 ],
