@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:baxa/services/firebase/cloud_functions_region.dart';
 import 'package:baxa/services/firebase/otp_cooldown.dart';
+import 'package:baxa/services/phone_number.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -43,6 +44,8 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
   bool _isGoogleLoading = false;
   String? _errorMessage;
   String? _verificationId;
+  // Numéro (format international) auquel le dernier code a été envoyé.
+  String? _sentTo;
   String? _inviteCode;
   String? _companyName;
 
@@ -147,13 +150,13 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
   // ==============================================================
   Future<void> _sendOtp() async {
     _clearError();
-    final phone = _phoneController.text.trim();
-    if (phone.isEmpty || phone.length < 8) {
-      _setError('Entrez un numero de telephone valide.');
+    // Numéro lu et vérifié avant tout envoi (espaces, +221 oublié…).
+    final parsed = parsePhoneNumber(_phoneController.text);
+    if (!parsed.isValid) {
+      _setError(parsed.error!);
       return;
     }
-
-    final formatted = phone.startsWith('+') ? phone : '+221$phone';
+    final formatted = parsed.e164!;
 
     final wait = OtpCooldown.secondsLeft(formatted);
     if (wait > 0) {
@@ -170,13 +173,10 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           await _signInWithPhoneCredential(credential);
         },
         verificationFailed: (FirebaseAuthException e) {
-          if (e.code == 'invalid-phone-number') {
-            _setError('Numero de telephone invalide.');
-          } else if (e.code == 'too-many-requests') {
-            _setError('Trop de tentatives. Reessayez dans quelques minutes.');
-          } else {
-            _setError('Erreur d\'envoi du SMS. Reessayez.');
-          }
+          _setError(
+            phoneAuthErrorMessage(e.code) ??
+                'Erreur d\'envoi du SMS. Réessayez.',
+          );
           if (mounted) setState(() => _isLoading = false);
         },
         codeSent: (String verificationId, int? resendToken) {
@@ -184,6 +184,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           if (mounted) {
             setState(() {
               _verificationId = verificationId;
+              _sentTo = formatted;
               _step = 2;
               _isLoading = false;
             });
@@ -825,7 +826,10 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
         ),
         const SizedBox(height: 8),
         Text(
-          'Entrez le code a 6 chiffres recu par SMS.',
+          _sentTo != null
+              ? 'Entrez le code à 6 chiffres envoyé au '
+                    '${formatPhoneForDisplay(_sentTo!)}.'
+              : 'Entrez le code à 6 chiffres reçu par SMS.',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
         ),

@@ -4,6 +4,7 @@ import 'package:baxa/page%20b-acceuil/customer/customer_page.dart';
 import 'package:flutter/material.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:baxa/services/firebase/otp_cooldown.dart';
+import 'package:baxa/services/phone_number.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -46,6 +47,8 @@ class _SigninePageState extends State<SigninePage> {
   // Phone auth state
   _PhoneStep _phoneStep = _PhoneStep.enterNumber;
   String? _verificationId;
+  // Numéro (format international) auquel le dernier code a été envoyé.
+  String? _sentTo;
 
   // true = anonymous user completing their profile
   bool get _isAnonymous =>
@@ -293,11 +296,13 @@ class _SigninePageState extends State<SigninePage> {
 
   Future<void> _sendOtp() async {
     _clearError();
-    final phone = _phoneController.text.trim();
-    if (phone.isEmpty) {
-      _setError('Entrez votre numéro de téléphone.');
+    // Numéro lu et vérifié avant tout envoi (espaces, +221 oublié…).
+    final parsed = parsePhoneNumber(_phoneController.text);
+    if (!parsed.isValid) {
+      _setError(parsed.error!);
       return;
     }
+    final phone = parsed.e164!;
     final wait = OtpCooldown.secondsLeft(phone);
     if (wait > 0) {
       _setError(OtpCooldown.waitMessage(wait));
@@ -313,7 +318,7 @@ class _SigninePageState extends State<SigninePage> {
       verificationFailed: (FirebaseAuthException e) {
         if (mounted) {
           setState(() => _isLoadingPhone = false);
-          _setError(_friendlyError(e));
+          _setError(phoneAuthErrorMessage(e.code) ?? _friendlyError(e));
         }
       },
       codeSent: (String verificationId, int? resendToken) {
@@ -321,6 +326,7 @@ class _SigninePageState extends State<SigninePage> {
         if (mounted) {
           setState(() {
             _verificationId = verificationId;
+            _sentTo = phone;
             _phoneStep = _PhoneStep.enterOtp;
             _isLoadingPhone = false;
           });
@@ -733,13 +739,14 @@ class _SigninePageState extends State<SigninePage> {
               onChanged: (_) => _clearError(),
               decoration: _inputDeco(
                 label: 'Numéro de téléphone',
-                hint: '+221 77 000 00 00',
+                hint: '77 000 00 00',
                 icon: Icons.phone_outlined,
               ),
             ),
             const SizedBox(height: 8),
             Text(
-              'Incluez le code pays (ex: +221 pour le Sénégal)',
+              'Numéro sénégalais : +221 ajouté automatiquement. '
+              'Autre pays : commencez par + et l\'indicatif.',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
             ),
             const SizedBox(height: 20),
@@ -776,7 +783,8 @@ class _SigninePageState extends State<SigninePage> {
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      'Code envoyé au ${_phoneController.text.trim()}',
+                      'Code envoyé au '
+                      '${_sentTo != null ? formatPhoneForDisplay(_sentTo!) : _phoneController.text.trim()}',
                       style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
                     ),
                   ),
