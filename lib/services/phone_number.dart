@@ -88,22 +88,41 @@ String formatPhoneForDisplay(String e164) {
   return '+221 ${m[1]} ${m[2]} ${m[3]} ${m[4]}';
 }
 
+/// Message quand Firebase n'envoie pas le SMS sans raison exploitable. Cas
+/// connu (14/11/2026) : numéros Yas (76) refusés par Firebase avec le code
+/// interne 39 (« 17499 Error code:39 »), ce que l'app ne peut pas corriger.
+/// On oriente vers Google, qui ne dépend pas de l'opérateur.
+const String kSmsUnavailableMessage =
+    'Impossible d\'envoyer un SMS à ce numéro pour le moment. '
+    'Continuez avec Google, c\'est plus rapide.';
+
 /// Message lisible pour une erreur Firebase lors de l'envoi d'un code SMS
-/// (null = code inconnu, à l'appelant de choisir le message générique).
+/// (null = code inconnu : l'appelant affiche [kSmsUnavailableMessage]).
 String? phoneAuthErrorMessage(String code) {
   switch (code) {
     case 'invalid-phone-number':
       return 'Ce numéro n\'est pas reconnu. Vérifiez-le et réessayez.';
     case 'too-many-requests':
       return 'Trop de codes demandés pour ce numéro. Réessayez dans '
-          'quelques heures, ou utilisez un autre numéro.';
+          'quelques heures, ou continuez avec Google.';
     case 'quota-exceeded':
-      return 'Le service SMS est momentanément saturé. Réessayez plus tard.';
+      return 'Le service SMS est momentanément saturé. Réessayez plus tard, '
+          'ou continuez avec Google.';
     case 'network-request-failed':
       return 'Vérifiez votre connexion internet.';
+    case 'web-context-cancelled':
+      // Page de vérification « je ne suis pas un robot » fermée.
+      return 'Vérification annulée. Réessayez, ou continuez avec Google.';
     case 'captcha-check-failed':
     case 'app-not-authorized':
-      return 'Vérification de l\'appareil impossible. Réessayez.';
+    case 'missing-client-identifier':
+    case 'web-internal-error':
+      return 'Vérification de l\'appareil impossible. Réessayez, ou '
+          'continuez avec Google.';
+    case 'internal-error':
+    case 'unknown':
+    case 'operation-not-allowed':
+      return kSmsUnavailableMessage;
     default:
       return null;
   }

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:baxa/services/firebase/auth.dart';
 import 'package:baxa/services/firebase/otp_cooldown.dart';
 import 'package:baxa/services/phone_number.dart';
+import 'package:baxa/widgets/google_sign_in_button.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -316,9 +317,10 @@ class _SigninePageState extends State<SigninePage> {
         await _linkPhoneCred(cred);
       },
       verificationFailed: (FirebaseAuthException e) {
+        debugPrint('⚠️ SMS client refusé : ${e.code} — ${e.message}');
         if (mounted) {
           setState(() => _isLoadingPhone = false);
-          _setError(phoneAuthErrorMessage(e.code) ?? _friendlyError(e));
+          _setError(phoneAuthErrorMessage(e.code) ?? kSmsUnavailableMessage);
         }
       },
       codeSent: (String verificationId, int? resendToken) {
@@ -455,7 +457,21 @@ class _SigninePageState extends State<SigninePage> {
                     const SizedBox(height: 16),
                   ],
 
-                  // Tab switcher (email / phone) — seulement en mode complétion
+                  // Google en premier : pas de SMS, donc pas de blocage selon
+                  // l'opérateur (voir google_sign_in_button.dart).
+                  GoogleSignInButton(
+                    onPressed: _isLoadingPhone ? null : _signInWithGoogle,
+                    loading: _isLoadingGoogle,
+                  ),
+                  const SizedBox(height: 22),
+                  SignInOrDivider(
+                    label: isCompletion
+                        ? 'ou avec votre numéro ou votre e-mail'
+                        : 'ou avec votre e-mail',
+                  ),
+                  const SizedBox(height: 22),
+
+                  // Tab switcher (téléphone / e-mail) — seulement en mode complétion
                   if (isCompletion) ...[
                     _buildTabSwitcher(),
                     const SizedBox(height: 20),
@@ -466,12 +482,6 @@ class _SigninePageState extends State<SigninePage> {
                     _buildEmailSection(isCompletion)
                   else
                     _buildPhoneSection(),
-
-                  // Google button
-                  const SizedBox(height: 20),
-                  _buildDivider(),
-                  const SizedBox(height: 20),
-                  _buildGoogleButton(),
 
                   // Toggle login/signup — seulement hors mode complétion
                   if (!isCompletion) ...[
@@ -859,66 +869,6 @@ class _SigninePageState extends State<SigninePage> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildDivider() {
-    return Row(
-      children: [
-        Expanded(child: Divider(color: Colors.grey.shade300)),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Text('ou', style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
-        ),
-        Expanded(child: Divider(color: Colors.grey.shade300)),
-      ],
-    );
-  }
-
-  Widget _buildGoogleButton() {
-    return SizedBox(
-      width: double.infinity,
-      height: 52,
-      child: OutlinedButton(
-        onPressed: _isLoadingGoogle ? null : _signInWithGoogle,
-        style: OutlinedButton.styleFrom(
-          side: BorderSide(color: Colors.grey.shade300, width: 1.5),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          backgroundColor: Colors.white,
-        ),
-        child: _isLoadingGoogle
-            ? const SizedBox(
-                height: 20,
-                width: 20,
-                child: CircularProgressIndicator(strokeWidth: 2, color: _green),
-              )
-            : Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Text(
-                    'G',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF4285F4),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Flexible(
-                    child: Text(
-                      'Continuer avec Google',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.poppins(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.black87,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
       ),
     );
   }

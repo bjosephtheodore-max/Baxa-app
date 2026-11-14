@@ -61,4 +61,12 @@ void main() {
     expect(phoneAuthErrorMessage('invalid-phone-number'), isNotNull);
     expect(phoneAuthErrorMessage('autre-chose'), isNull);
   });
+
+  test('SMS impossible (ex. numéros Yas, code interne 39) → renvoi vers Google', () {
+    for (final code in ['internal-error', 'unknown', 'operation-not-allowed']) {
+      expect(phoneAuthErrorMessage(code), kSmsUnavailableMessage);
+    }
+    expect(kSmsUnavailableMessage, contains('Google'));
+    expect(phoneAuthErrorMessage('web-context-cancelled'), contains('Google'));
+  });
 }

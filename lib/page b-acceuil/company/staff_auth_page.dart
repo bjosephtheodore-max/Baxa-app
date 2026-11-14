@@ -5,6 +5,7 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:baxa/services/firebase/cloud_functions_region.dart';
 import 'package:baxa/services/firebase/otp_cooldown.dart';
 import 'package:baxa/services/phone_number.dart';
+import 'package:baxa/widgets/google_sign_in_button.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -173,10 +174,8 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
           await _signInWithPhoneCredential(credential);
         },
         verificationFailed: (FirebaseAuthException e) {
-          _setError(
-            phoneAuthErrorMessage(e.code) ??
-                'Erreur d\'envoi du SMS. Réessayez.',
-          );
+          debugPrint('⚠️ SMS staff refusé : ${e.code} — ${e.message}');
+          _setError(phoneAuthErrorMessage(e.code) ?? kSmsUnavailableMessage);
           if (mounted) setState(() => _isLoading = false);
         },
         codeSent: (String verificationId, int? resendToken) {
@@ -684,14 +683,23 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
             ),
           ),
         const SizedBox(height: 28),
-        // Champ telephone
+        // Google en premier : pas de SMS, donc pas de blocage selon
+        // l'opérateur (voir google_sign_in_button.dart).
+        GoogleSignInButton(
+          onPressed: _isLoading ? null : _signInWithGoogle,
+          loading: _isGoogleLoading,
+        ),
+        const SizedBox(height: 22),
+        const SignInOrDivider(label: 'ou avec votre numéro'),
+        const SizedBox(height: 22),
+        // Champ téléphone
         TextField(
           controller: _phoneController,
           keyboardType: TextInputType.phone,
           // Pas d'ouverture automatique : le bouton Google doit rester visible.
           onChanged: (_) => _clearError(),
           decoration: InputDecoration(
-            labelText: 'Numero de telephone',
+            labelText: 'Numéro de téléphone',
             hintText: '77 000 00 00',
             prefixIcon: const Icon(Icons.phone_outlined),
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
@@ -701,7 +709,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
         ),
         const SizedBox(height: 8),
         Text(
-          'Un SMS de verification vous sera envoye.',
+          'Un code de vérification vous sera envoyé par SMS.',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
         ),
@@ -709,7 +717,7 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
         SizedBox(
           height: 52,
           child: ElevatedButton(
-            onPressed: _isLoading ? null : _sendOtp,
+            onPressed: _isLoading || _isGoogleLoading ? null : _sendOtp,
             style: ElevatedButton.styleFrom(
               backgroundColor: _green,
               foregroundColor: Colors.white,
@@ -730,70 +738,6 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
                 : const Text(
                     'Envoyer le code SMS',
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                  ),
-          ),
-        ),
-
-        // Separateur
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 20),
-          child: Row(
-            children: [
-              Expanded(child: Divider(color: Colors.grey.shade300)),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Text(
-                  'ou',
-                  style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
-                ),
-              ),
-              Expanded(child: Divider(color: Colors.grey.shade300)),
-            ],
-          ),
-        ),
-
-        // Bouton Google
-        SizedBox(
-          height: 52,
-          child: OutlinedButton(
-            onPressed: _isGoogleLoading ? null : _signInWithGoogle,
-            style: OutlinedButton.styleFrom(
-              foregroundColor: Colors.black87,
-              side: BorderSide(color: Colors.grey.shade300),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            child: _isGoogleLoading
-                ? const SizedBox(
-                    height: 20,
-                    width: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        'G',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF4285F4),
-                        ),
-                      ),
-                      SizedBox(width: 12),
-                      Flexible(
-                        child: Text(
-                          'Continuer avec Google',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                    ],
                   ),
           ),
         ),
