@@ -423,8 +423,10 @@ class _PersonaPageState extends State<PersonaPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // ── Bannière compte anonyme ────────────────────────────
-                  if (_auth.currentUser?.isAnonymous == true)
+                  if (_auth.currentUser?.isAnonymous == true) ...[
                     _buildAnonymousBanner(),
+                    _buildExistingAccountLink(),
+                  ],
 
                   // ── Avatar card ────────────────────────────────────────
                   _buildAvatarCard(),
@@ -637,6 +639,40 @@ class _PersonaPageState extends State<PersonaPage> {
             const Icon(Icons.chevron_right_rounded, color: _green, size: 22),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Client sans compte qui en a déjà un (autre téléphone, app
+  /// réinstallée) : il s'y connecte. Ce qu'il a fait ici sans compte est
+  /// abandonné, après avertissement (voir SigninePage).
+  Widget _buildExistingAccountLink() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            'Vous avez déjà un compte ?',
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+          ),
+          TextButton(
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const SigninePage(loginMode: true),
+              ),
+            ),
+            style: TextButton.styleFrom(
+              foregroundColor: _green,
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+            ),
+            child: const Text(
+              'Se connecter',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
       ),
     );
   }

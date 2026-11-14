@@ -2,9 +2,9 @@ import 'dart:async';
 
 import 'package:baxa/page%20b-acceuil/customer/customer_page.dart';
 import 'package:flutter/material.dart';
-import 'package:baxa/services/firebase/auth.dart';
 import 'package:baxa/services/firebase/otp_cooldown.dart';
 import 'package:baxa/services/phone_number.dart';
+import 'package:baxa/services/reservation_rules_service.dart';
 import 'package:baxa/widgets/google_sign_in_button.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -22,8 +22,19 @@ import 'package:baxa/widgets/profession_picker_sheet.dart';
 // ── Modes d'authentification téléphone ────────────────────────────────────────
 enum _PhoneStep { enterNumber, enterOtp }
 
+/// Connexion / inscription client.
+///  • `loginMode: false` (défaut) : un client sans compte (anonyme) sécurise
+///    son compte — ses réservations et favoris sont gardés.
+///  • `loginMode: true` : « Se connecter » à un compte existant (écran
+///    d'accueil client, ou « Mon profil » d'un client sans compte). Google
+///    et le téléphone créent aussi le compte s'il n'existe pas encore.
+/// Si les identifiants choisis appartiennent déjà à un autre compte Baxa,
+/// le client sans compte peut basculer dessus : ce qu'il avait fait sans
+/// compte est abandonné (compte supprimé côté serveur, réservations en
+/// cours annulées pour libérer les places) — choix du 14/11/2026.
 class SigninePage extends StatefulWidget {
-  const SigninePage({super.key});
+  final bool loginMode;
+  const SigninePage({super.key, this.loginMode = false});
 
   @override
   State<SigninePage> createState() => _SigninePageState();
@@ -51,12 +62,20 @@ class _SigninePageState extends State<SigninePage> {
   // Numéro (format international) auquel le dernier code a été envoyé.
   String? _sentTo;
 
-  // true = anonymous user completing their profile
   bool get _isAnonymous =>
       FirebaseAuth.instance.currentUser?.isAnonymous == true;
 
+  // Client sans compte qui sécurise SON compte (liaison, rien n'est perdu).
+  bool get _guestCompletion => _isAnonymous && !widget.loginMode;
+
   // Active tab: 0 = email, 1 = phone  — phone shown first by default
   int _selectedTab = 1;
+
+  @override
+  void initState() {
+    super.initState();
+    _isLoginMode = widget.loginMode;
+  }
 
   @override
   void dispose() {
@@ -111,18 +130,58 @@ class _SigninePageState extends State<SigninePage> {
     if (_errorMessage != null && mounted) setState(() => _errorMessage = null);
   }
 
-  // ── Post-auth Firestore update ────────────────────────────────
+  // ── Fin de connexion (commune à Google, téléphone, e-mail) ─────
 
-  Future<void> _postAuthActions(User user) async {
+  /// Compte professionnel (structure ou membre d'équipe) ? Il ne doit
+  /// jamais devenir un compte client : on ne touche pas à sa fiche.
+  Future<bool> _isProfessionalAccount(String uid) async {
+    final db = FirebaseFirestore.instance;
+    final results = await Future.wait([
+      db.collection('companies').doc(uid).get(),
+      db.collection('users').doc(uid).get(),
+    ]);
+    if (results[0].exists) return true;
+    return results[1].data()?['role'] == 'staff';
+  }
+
+  /// Après toute connexion réussie : vérifie le type de compte, complète
+  /// la fiche client SANS écraser l'existant, puis entre dans l'espace
+  /// client. [previousUid] = compte avant la connexion (null si aucun) :
+  /// s'il change, on repart d'un espace client neuf au lieu de revenir à
+  /// l'écran d'où l'on vient (qui affichait l'ancien compte).
+  Future<void> _finishSignIn(User user, {required String? previousUid}) async {
+    if (await _isProfessionalAccount(user.uid)) {
+      await _signOutEverywhere();
+      _setError(
+        'Ce compte est un compte professionnel (structure ou équipe) : '
+        'utilisez l\'espace Structure ou Équipe depuis l\'écran d\'accueil.',
+      );
+      return;
+    }
+
     final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    Map<String, dynamic> existing = const {};
+    try {
+      existing = (await ref.get()).data() ?? const {};
+    } catch (_) {}
+
     try {
       final updates = <String, dynamic>{
         'isAnonymous': false,
         'role': 'customer',
         ...LocaleService.toFirestoreMap(),
+        if (user.email != null && user.email!.isNotEmpty) 'email': user.email,
+        if (existing['createdAt'] == null)
+          'createdAt': FieldValue.serverTimestamp(),
       };
-      if (user.email != null && user.email!.isNotEmpty) {
-        updates['email'] = user.email;
+      // Nom : celui déjà saisi reste prioritaire ; sinon celui de Google.
+      final hasName =
+          (existing['prenom'] as String?)?.trim().isNotEmpty == true;
+      final display = (user.displayName ?? '').trim();
+      if (!hasName && display.isNotEmpty) {
+        final parts = display.split(RegExp(r'\s+'));
+        updates['prenom'] = parts.first;
+        updates['nom'] = parts.length > 1 ? parts.sublist(1).join(' ') : '';
       }
       await ref.set(updates, SetOptions(merge: true));
       await FirebaseAnalytics.instance.setUserProperty(
@@ -147,6 +206,108 @@ class _SigninePageState extends State<SigninePage> {
     // permission GPS ici (dialogue à la suite de celui des notifications)
     // puis on l'affine avec la position réelle en tâche de fond.
     await _requestGpsAndRefineCountry(ref);
+
+    if (!mounted) return;
+    await _askNameIfMissing(ref);
+    if (!mounted) return;
+    await _onSuccess(accountChanged: previousUid != user.uid);
+  }
+
+  Future<void> _signOutEverywhere() async {
+    try {
+      await GoogleSignIn().signOut();
+    } catch (_) {}
+    try {
+      await FirebaseAuth.instance.signOut();
+    } catch (_) {}
+  }
+
+  // ── Bascule d'un client sans compte vers un compte existant ─────
+
+  /// Réservations à venir du client sans compte (pour l'avertissement).
+  Future<int> _guestActiveReservations(String uid) async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collectionGroup('reservations')
+          .where('customerId', isEqualTo: uid)
+          .where('status', isEqualTo: 'confirmed')
+          .get();
+      final now = DateTime.now();
+      return snap.docs.where((d) {
+        final end = (d.data()['slotEnd'] as Timestamp?)?.toDate();
+        return end != null && end.isAfter(now);
+      }).length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<bool> _confirmSwitchToExisting(int activeCount) async {
+    final plural = activeCount > 1 ? 's' : '';
+    final lost = activeCount > 0
+        ? 'vos $activeCount réservation$plural en cours (annulée$plural) '
+              'et vos favoris'
+        : 'vos favoris et votre historique';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Ce compte Baxa existe déjà'),
+        content: Text(
+          'Se connecter à ce compte ?\n\n'
+          'Ce que vous avez fait sur ce téléphone sans compte sera perdu : '
+          '$lost.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _green,
+              foregroundColor: Colors.white,
+              elevation: 0,
+            ),
+            child: const Text('Se connecter'),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  /// Le client sans compte veut utiliser des identifiants qui ont déjà un
+  /// compte Baxa. Après accord : son compte sans inscription est supprimé
+  /// par le serveur (réservations en cours annulées, places libérées), puis
+  /// on se connecte au compte existant avec [signIn].
+  Future<void> _switchFromGuest(
+    Future<UserCredential> Function() signIn,
+  ) async {
+    final guest = FirebaseAuth.instance.currentUser;
+    if (guest == null || !guest.isAnonymous) return;
+    final active = await _guestActiveReservations(guest.uid);
+    if (!mounted || !await _confirmSwitchToExisting(active)) return;
+
+    try {
+      await ReservationRulesService().deleteMyAccount();
+    } catch (e) {
+      _setError('Impossible de changer de compte pour le moment. '
+          'Vérifiez votre connexion et réessayez.');
+      return;
+    }
+    try {
+      await FirebaseAuth.instance.signOut();
+    } catch (_) {}
+    // L'écran passe en mode connexion (utile si la connexion qui suit échoue).
+    if (mounted) setState(() => _isLoginMode = true);
+
+    // À partir d'ici il n'y a plus de compte sur ce téléphone : en cas
+    // d'échec, l'écran reste ouvert pour réessayer de se connecter.
+    final cred = await signIn();
+    final user = cred.user;
+    if (user != null) await _finishSignIn(user, previousUid: guest.uid);
   }
 
   // Demande la permission GPS (bloquant, le temps du dialogue système)
@@ -182,35 +343,36 @@ class _SigninePageState extends State<SigninePage> {
     _clearError();
     if (!_formKey.currentState!.validate()) return;
     setState(() => _isLoadingEmail = true);
+    final email = _emailController.text.trim();
+    final password = _passwordController.text.trim();
+    final current = FirebaseAuth.instance.currentUser;
+    final previousUid = current?.uid;
+    Future<UserCredential> signInExisting() => FirebaseAuth.instance
+        .signInWithEmailAndPassword(email: email, password: password);
     try {
-      final current = FirebaseAuth.instance.currentUser;
-      User? user;
-
       if (current != null && current.isAnonymous && !_isLoginMode) {
-        // Link anonymous → email/password
-        final cred = EmailAuthProvider.credential(
-          email: _emailController.text.trim(),
-          password: _passwordController.text.trim(),
-        );
-        final result = await current.linkWithCredential(cred);
-        user = result.user;
+        // Client sans compte qui crée son compte : liaison (rien n'est perdu).
+        try {
+          final result = await current.linkWithCredential(
+            EmailAuthProvider.credential(email: email, password: password),
+          );
+          await _finishSignIn(result.user!, previousUid: previousUid);
+        } on FirebaseAuthException catch (e) {
+          if (e.code != 'email-already-in-use') rethrow;
+          await _switchFromGuest(signInExisting);
+        }
       } else if (_isLoginMode) {
-        await Auth().loginWithEmailAndPassword(
-          _emailController.text.trim(),
-          _passwordController.text.trim(),
-        );
-        user = FirebaseAuth.instance.currentUser;
+        if (current != null && current.isAnonymous) {
+          await _switchFromGuest(signInExisting);
+        } else {
+          final result = await signInExisting();
+          await _finishSignIn(result.user!, previousUid: previousUid);
+        }
       } else {
-        final result = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-          email: _emailController.text.trim(),
-          password: _passwordController.text.trim(),
-        );
-        user = result.user;
+        final result = await FirebaseAuth.instance
+            .createUserWithEmailAndPassword(email: email, password: password);
+        await _finishSignIn(result.user!, previousUid: previousUid);
       }
-
-      if (user != null) await _postAuthActions(user);
-      if (!mounted) return;
-      _onSuccess();
     } on FirebaseAuthException catch (e) {
       _setError(_friendlyError(e));
     } catch (e) {
@@ -227,63 +389,13 @@ class _SigninePageState extends State<SigninePage> {
     setState(() => _isLoadingGoogle = true);
     try {
       final googleUser = await GoogleSignIn().signIn();
-      if (googleUser == null) {
-        setState(() => _isLoadingGoogle = false);
-        return;
-      }
+      if (googleUser == null) return; // choix annulé
       final googleAuth = await googleUser.authentication;
       final credential = GoogleAuthProvider.credential(
         accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
       );
-
-      final current = FirebaseAuth.instance.currentUser;
-      UserCredential userCred;
-      if (current != null && current.isAnonymous) {
-        userCred = await current.linkWithCredential(credential);
-      } else {
-        userCred = await FirebaseAuth.instance.signInWithCredential(credential);
-      }
-
-      final user = userCred.user;
-      if (user == null) throw Exception('Utilisateur introuvable');
-
-      // Preserve name from anonymous registration if already set
-      final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
-      final snap = await ref.get();
-      final existingNom = snap.data()?['nom'] as String?;
-
-      final updates = <String, dynamic>{
-        'isAnonymous': false,
-        'role': 'customer',
-        if (user.email != null) 'email': user.email,
-        'createdAt': FieldValue.serverTimestamp(),
-        ...LocaleService.toFirestoreMap(),
-      };
-      // Only set name from Google if not already entered manually
-      if (existingNom == null || existingNom.isEmpty) {
-        final parts = (user.displayName ?? '').split(' ');
-        updates['prenom'] = parts.isNotEmpty ? parts.first : '';
-        updates['nom'] = parts.length > 1 ? parts.sublist(1).join(' ') : '';
-      }
-      await ref.set(updates, SetOptions(merge: true));
-      await FirebaseAnalytics.instance.setUserProperty(
-        name: 'role',
-        value: 'customer',
-      );
-
-      try {
-        await FirebaseMessaging.instance.requestPermission();
-        final token = await FirebaseMessaging.instance.getToken();
-        if (token != null) {
-          await ref.set({'fcmToken': token}, SetOptions(merge: true));
-        }
-      } catch (_) {}
-
-      await _requestGpsAndRefineCountry(ref);
-
-      if (!mounted) return;
-      _onSuccess();
+      await _signInWithCredential(credential);
     } on FirebaseAuthException catch (e) {
       _setError(_friendlyError(e));
     } catch (e) {
@@ -291,6 +403,31 @@ class _SigninePageState extends State<SigninePage> {
     } finally {
       if (mounted) setState(() => _isLoadingGoogle = false);
     }
+  }
+
+  /// Google ou téléphone. Client sans compte : on LIE d'abord (il garde
+  /// tout) ; si ces identifiants ont déjà un compte Baxa, on propose de
+  /// basculer dessus. Sinon : connexion (ou création si nouveau compte).
+  Future<void> _signInWithCredential(AuthCredential credential) async {
+    final current = FirebaseAuth.instance.currentUser;
+    final previousUid = current?.uid;
+    if (current != null && current.isAnonymous) {
+      try {
+        final result = await current.linkWithCredential(credential);
+        await _finishSignIn(result.user!, previousUid: previousUid);
+      } on FirebaseAuthException catch (e) {
+        if (e.code != 'credential-already-in-use') rethrow;
+        // Firebase renvoie les identifiants vérifiés, réutilisables pour
+        // se connecter au compte existant.
+        final existing = e.credential ?? credential;
+        await _switchFromGuest(
+          () => FirebaseAuth.instance.signInWithCredential(existing),
+        );
+      }
+      return;
+    }
+    final result = await FirebaseAuth.instance.signInWithCredential(credential);
+    await _finishSignIn(result.user!, previousUid: previousUid);
   }
 
   // ── Phone / OTP ───────────────────────────────────────────────
@@ -346,75 +483,182 @@ class _SigninePageState extends State<SigninePage> {
       _setError('Entrez le code à 6 chiffres.');
       return;
     }
-    setState(() => _isLoadingPhone = true);
-    try {
-      final cred = PhoneAuthProvider.credential(
-        verificationId: _verificationId!,
-        smsCode: _otpController.text.trim(),
-      );
-      await _linkPhoneCred(cred);
-    } on FirebaseAuthException catch (e) {
-      if (mounted) {
-        setState(() => _isLoadingPhone = false);
-        _setError(_friendlyError(e));
-      }
+    if (_verificationId == null) {
+      _setError('Le code a expiré. Demandez un nouveau.');
+      return;
     }
+    setState(() => _isLoadingPhone = true);
+    final cred = PhoneAuthProvider.credential(
+      verificationId: _verificationId!,
+      smsCode: _otpController.text.trim(),
+    );
+    await _linkPhoneCred(cred);
   }
 
   Future<void> _linkPhoneCred(PhoneAuthCredential cred) async {
     try {
-      final current = FirebaseAuth.instance.currentUser;
-      User? user;
-      if (current != null && current.isAnonymous) {
-        final result = await current.linkWithCredential(cred);
-        user = result.user;
-      } else {
-        final result = await FirebaseAuth.instance.signInWithCredential(cred);
-        user = result.user;
-      }
-      if (user != null) await _postAuthActions(user);
-      if (!mounted) return;
-      _onSuccess();
+      await _signInWithCredential(cred);
     } on FirebaseAuthException catch (e) {
-      if (mounted) {
-        setState(() => _isLoadingPhone = false);
-        _setError(_friendlyError(e));
-      }
+      _setError(_friendlyError(e));
+    } catch (e) {
+      _setError('Une erreur est survenue. Réessayez.');
+    } finally {
+      if (mounted) setState(() => _isLoadingPhone = false);
     }
   }
 
   // ── Navigation on success ─────────────────────────────────────
 
-  Future<void> _onSuccess() async {
+  Future<void> _onSuccess({required bool accountChanged}) async {
     await _showProfessionSheet();
     if (!mounted) return;
 
-    // If this page is on top of the stack, pop back
-    if (Navigator.canPop(context)) {
+    // Même compte (client sans compte qui vient de le sécuriser) : retour à
+    // l'écran d'origine, qui attend ce résultat (ex. favori en attente).
+    if (!accountChanged && Navigator.canPop(context)) {
       Navigator.pop(context, true);
-    } else {
-      // Fallback: first-time sign-in without anonymous session
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const CustomerPage()),
-      );
+      return;
+    }
+    // Nouveau compte (connexion depuis l'accueil, ou bascule vers un compte
+    // existant) : espace client neuf, sans les écrans de l'ancien compte.
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const CustomerPage()),
+      (route) => route.isFirst,
+    );
+  }
+
+  // ── Prénom et nom (compte créé par téléphone ou e-mail) ────────
+
+  Future<void> _askNameIfMissing(
+    DocumentReference<Map<String, dynamic>> ref,
+  ) async {
+    Map<String, dynamic> data = const {};
+    try {
+      data = (await ref.get()).data() ?? const {};
+    } catch (_) {
+      return;
+    }
+    if ((data['prenom'] as String?)?.trim().isNotEmpty == true) return;
+    if (!mounted) return;
+
+    final prenomCtrl = TextEditingController();
+    final nomCtrl = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          24,
+          24,
+          24,
+          24 + MediaQuery.of(ctx).viewInsets.bottom,
+        ),
+        child: Form(
+          key: formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Comment vous appelez-vous ?',
+                style: GoogleFonts.poppins(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Votre nom apparaît sur vos réservations.',
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 18),
+              TextFormField(
+                controller: prenomCtrl,
+                textCapitalization: TextCapitalization.words,
+                decoration: _inputDeco(
+                  label: 'Prénom',
+                  hint: 'Votre prénom',
+                  icon: Icons.person_outline_rounded,
+                ),
+                validator: (v) => (v == null || v.trim().isEmpty)
+                    ? 'Entrez votre prénom'
+                    : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: nomCtrl,
+                textCapitalization: TextCapitalization.words,
+                decoration: _inputDeco(
+                  label: 'Nom de famille',
+                  hint: 'Votre nom',
+                  icon: Icons.badge_outlined,
+                ),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                height: 52,
+                child: ElevatedButton(
+                  onPressed: () {
+                    if (formKey.currentState!.validate()) {
+                      Navigator.pop(ctx, true);
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _green,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Text(
+                    'Continuer',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    final prenom = prenomCtrl.text.trim();
+    final nom = nomCtrl.text.trim();
+    prenomCtrl.dispose();
+    nomCtrl.dispose();
+    if (saved != true || prenom.isEmpty) return;
+    try {
+      await ref.set({'prenom': prenom, 'nom': nom}, SetOptions(merge: true));
+    } catch (e) {
+      debugPrint('Enregistrement du nom impossible : $e');
     }
   }
 
-  // ── Profession (une seule fois, juste après l'inscription) ─────
+  // ── Profession (une seule fois, à la première inscription) ─────
   // Affichée en bottom sheet AVANT le pop/pushReplacement ci-dessus, pour ne
   // jamais casser le flow "favori en attente" de search_dialogs.dart, qui
-  // attend que cette page se pop pour reprendre la main.
+  // attend que cette page se pop pour reprendre la main. Jamais redemandée
+  // à un client qui y a déjà répondu (reconnexion).
   Future<void> _showProfessionSheet() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null || !mounted) return;
+    final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    try {
+      final current = (await ref.get()).data()?['profession'];
+      if (current is String && current.isNotEmpty) return;
+    } catch (_) {}
+    if (!mounted) return;
     final selected = await showProfessionPickerSheet(context);
     if (selected == null || !mounted) return; // "Passer" ou fermée
     try {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .set({'profession': selected}, SetOptions(merge: true));
+      await ref.set({'profession': selected}, SetOptions(merge: true));
       unawaited(
         FirebaseAnalytics.instance.setUserProperty(
           name: 'profession',
@@ -430,7 +674,7 @@ class _SigninePageState extends State<SigninePage> {
 
   @override
   Widget build(BuildContext context) {
-    final isCompletion = _isAnonymous;
+    final isCompletion = _guestCompletion;
     return Scaffold(
       backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
@@ -464,27 +708,24 @@ class _SigninePageState extends State<SigninePage> {
                     loading: _isLoadingGoogle,
                   ),
                   const SizedBox(height: 22),
-                  SignInOrDivider(
-                    label: isCompletion
-                        ? 'ou avec votre numéro ou votre e-mail'
-                        : 'ou avec votre e-mail',
+                  const SignInOrDivider(
+                    label: 'ou avec votre numéro ou votre e-mail',
                   ),
                   const SizedBox(height: 22),
 
-                  // Tab switcher (téléphone / e-mail) — seulement en mode complétion
-                  if (isCompletion) ...[
-                    _buildTabSwitcher(),
-                    const SizedBox(height: 20),
-                  ],
+                  // Téléphone / e-mail : dans tous les modes (un client qui
+                  // revient peut s'être inscrit par téléphone).
+                  _buildTabSwitcher(),
+                  const SizedBox(height: 20),
 
                   // Content
-                  if (_selectedTab == 0 || !isCompletion)
+                  if (_selectedTab == 0)
                     _buildEmailSection(isCompletion)
                   else
                     _buildPhoneSection(),
 
-                  // Toggle login/signup — seulement hors mode complétion
-                  if (!isCompletion) ...[
+                  // Connexion / inscription par e-mail — hors complétion
+                  if (!isCompletion && _selectedTab == 0) ...[
                     const SizedBox(height: 20),
                     _buildLoginToggle(),
                   ],
@@ -532,7 +773,8 @@ class _SigninePageState extends State<SigninePage> {
           isCompletion
               ? 'Créez votre compte gratuit en deux clics\npour ne pas perdre vos réservations.'
               : (_isLoginMode
-                  ? 'Connectez-vous pour continuer'
+                  ? 'Retrouvez votre compte Baxa.\nPas encore de compte ? Google et le '
+                        'téléphone le créent pour vous.'
                   : 'Rejoignez Baxa dès aujourd\'hui'),
           style: TextStyle(
             fontSize: 14,

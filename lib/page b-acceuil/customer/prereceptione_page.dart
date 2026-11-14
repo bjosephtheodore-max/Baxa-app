@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:baxa/page%20b-acceuil/customer/customer_page.dart';
+import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/services/locale_service.dart';
 import 'package:baxa/services/location_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -25,6 +26,55 @@ class _PrereceptionePageState extends State<PrereceptionePage> {
   final _prenomController = TextEditingController();
   final _nomController = TextEditingController();
   bool _loading = false;
+  // Vrai le temps de vérifier si un client est déjà connecté (évite
+  // d'afficher le formulaire une fraction de seconde avant d'entrer).
+  bool _checkingSession = FirebaseAuth.instance.currentUser != null;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_checkingSession) _resumeExistingCustomer();
+  }
+
+  /// Client déjà connecté sur ce téléphone (avec ou sans compte) : on entre
+  /// directement dans son espace, sans redemander le nom ni relancer une
+  /// connexion anonyme — qui DÉCONNECTAIT un client inscrit (Google,
+  /// téléphone, e-mail) et lui créait un compte vide. Un compte structure ou
+  /// staff n'entre pas ici : le formulaire s'affiche comme avant (tests à
+  /// plusieurs espaces sur un seul téléphone).
+  Future<void> _resumeExistingCustomer() async {
+    final user = FirebaseAuth.instance.currentUser;
+    var isCustomer = false;
+    if (user != null) {
+      try {
+        final db = FirebaseFirestore.instance;
+        final results = await Future.wait([
+          db.collection('companies').doc(user.uid).get(),
+          db.collection('users').doc(user.uid).get(),
+        ]);
+        final userDoc = results[1];
+        isCustomer = !results[0].exists &&
+            userDoc.exists &&
+            userDoc.data()?['role'] != 'staff';
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    if (isCustomer) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const CustomerPage()),
+      );
+      return;
+    }
+    setState(() => _checkingSession = false);
+  }
+
+  void _openSignIn() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const SigninePage(loginMode: true)),
+    );
+  }
 
   @override
   void dispose() {
@@ -108,6 +158,12 @@ class _PrereceptionePageState extends State<PrereceptionePage> {
 
   @override
   Widget build(BuildContext context) {
+    if (_checkingSession) {
+      return const Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(child: CircularProgressIndicator(color: _green)),
+      );
+    }
     return Scaffold(
       resizeToAvoidBottomInset: true,
       backgroundColor: Colors.white,
@@ -211,6 +267,36 @@ class _PrereceptionePageState extends State<PrereceptionePage> {
                                   ],
                                 ),
                         ),
+                      ),
+                      const SizedBox(height: 8),
+                      // Client qui a déjà un compte (autre téléphone, app
+                      // réinstallée…) : il le retrouve ici.
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            'Déjà un compte ?',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: _loading ? null : _openSignIn,
+                            style: TextButton.styleFrom(
+                              foregroundColor: _green,
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 6),
+                            ),
+                            child: const Text(
+                              'Se connecter',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
