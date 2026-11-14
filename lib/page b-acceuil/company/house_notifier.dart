@@ -833,7 +833,13 @@ class _HouseNotifier extends ChangeNotifier {
           (doc) {
             final isActive = doc.data()?['isActive'] as bool? ?? false;
             if (!isActive) {
-              _handleRevocation(doc.data()?['revokedReason'] as String?);
+              // Fiche absente = structure entièrement supprimée (voir
+              // staff_auth_page._resumeMembership).
+              _handleRevocation(
+                doc.exists
+                    ? (doc.data()?['revokedReason'] as String?)
+                    : 'company_leaving',
+              );
             }
             if (!completer.isCompleted) completer.complete();
           },

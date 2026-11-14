@@ -431,6 +431,10 @@ class _SlotsPageState extends State<SlotsPage>
         setState(() {
           _companyDeleted = cd['status'] == 'deleted';
         });
+      } else if (!companyDoc.metadata.isFromCache) {
+        // Fiche absente côté serveur (pas juste hors ligne) : la structure
+        // a quitté Baxa et tout a été supprimé.
+        setState(() => _companyDeleted = true);
       }
     } catch (_) {
       // Doc entreprise illisible (droits, réseau) : on garde l'état courant.

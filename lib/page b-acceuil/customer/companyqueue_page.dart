@@ -39,6 +39,10 @@ class _CompanyQueuePageState extends State<CompanyQueuePage> {
   int _activeReservationsCount = 0;
   Map<String, dynamic>? _companyData;
 
+  /// Structure partie de Baxa : fiche supprimée (ou ancienne fiche marquée
+  /// « deleted »). Ex. : favori ou structure récente d'une structure partie.
+  bool _companyGone = false;
+
   late final Stream<QuerySnapshot> _queuesStream;
 
   @override
@@ -62,8 +66,15 @@ class _CompanyQueuePageState extends State<CompanyQueuePage> {
           .collection('companies')
           .doc(widget.entrepriseId)
           .get();
-      if (doc.exists && mounted) {
-        setState(() => _companyData = doc.data());
+      if (!mounted) return;
+      if (doc.exists) {
+        setState(() {
+          _companyData = doc.data();
+          _companyGone = doc.data()?['status'] == 'deleted';
+        });
+      } else if (!doc.metadata.isFromCache) {
+        // Absente côté serveur (pas juste hors ligne) : supprimée.
+        setState(() => _companyGone = true);
       }
     } catch (_) {}
   }
@@ -108,7 +119,7 @@ class _CompanyQueuePageState extends State<CompanyQueuePage> {
 
   @override
   Widget build(BuildContext context) {
-    if (_companyData?['status'] == 'deleted') {
+    if (_companyGone) {
       return Scaffold(
         backgroundColor: const Color(0xFFF6F8FA),
         appBar: _buildAppBar(),
