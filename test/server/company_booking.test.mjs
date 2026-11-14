@@ -205,10 +205,13 @@ describe("Inscrire un client au guichet", () => {
     await expectDenied(add(ADMIN_B, "s1"));
   });
 
-  it("nom du client manquant : refusé", async () => {
+  // Nom facultatif au guichet (numéros de passage) : sans nom, la
+  // réservation porte « Client n°X ».
+  it("nom du client vide : accepté, nommé d'après son numéro", async () => {
     await slot("s1", tomorrow10);
-    await assert.rejects(add(ADMIN, "s1", {clientName: "  "}),
-      (e) => e.code === "invalid-argument");
+    const r = await add(ADMIN, "s1", {clientName: "  "});
+    assert.ok(r.ticketNumber >= 1);
+    assert.equal(r.customerName, `Client n°${r.ticketNumber}`);
   });
 });
 

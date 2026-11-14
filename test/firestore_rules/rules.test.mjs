@@ -131,6 +131,7 @@ beforeEach(async () => {
     seed(`${Q}/slots/s1`, {capacity: 3, reserved: 1, cancelled: 0}),
     seed(`${Q}/timeSlots/t1`, {startTime: "09:00", endTime: "12:00"}),
     seed(`${Q}/dailyStats/${TODAY}`, {reserved: 1, available: 9}),
+    seed(`${Q}/ticketCounters/${TODAY}`, {last: 4}),
     seed(`${A}/reservations/r1`, {customerId: CLIENT, source: "app",
       status: "confirmed", customerEmail: "client1@mail.com",
       customerName: "Awa Diop"}),
@@ -279,6 +280,23 @@ describe("Places libres par jour (dailyStats)", () => {
 });
 
 // ============================================================
+// ============================================================
+// Numéros de passage : compteur du jour tenu UNIQUEMENT par le serveur
+// (functions/ticket.js). Aucune règle ne l'ouvre sous queues/ : tout accès
+// depuis l'app est refusé, même pour l'admin et le staff.
+describe("Compteur des numéros de passage (ticketCounters)", () => {
+  const T = `${Q}/ticketCounters/${TODAY}`;
+  it("l'admin ne le lit pas", () => denied(op.get(T, ADMIN)));
+  it("l'admin ne le modifie pas", () =>
+    denied(op.update(T, {last: 0}, ADMIN)));
+  it("l'admin ne le crée pas", () => denied(op.create(
+    `${Q}/ticketCounters`, "2026-09-27", {last: 0}, ADMIN)));
+  it("un membre actif ne le modifie pas", () =>
+    denied(op.update(T, {last: 0}, STAFF)));
+  it("un client ne le lit pas", () => denied(op.get(T, CLIENT)));
+  it("un visiteur ne le lit pas", () => denied(op.get(T, ANON)));
+});
+
 describe("Réservations", () => {
   const R1 = `${A}/reservations/r1`;
   it("un client ne peut pas créer de réservation (serveur uniquement)",

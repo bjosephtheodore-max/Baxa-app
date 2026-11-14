@@ -26,6 +26,7 @@ const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const {FieldValue, Timestamp} = require("firebase-admin/firestore");
 const zone = require("./zone");
+const ticket = require("./ticket");
 
 const REGION = "africa-south1";
 const MINUTE = 60 * 1000;
@@ -267,7 +268,10 @@ async function addManual(db, user, data, now = new Date()) {
   const companyId = requireString(data, "companyId");
   const queueId = requireString(data, "queueId");
   const slotId = requireString(data, "slotId");
-  const clientName = requireString(data, "clientName", {max: 80});
+  // Nom FACULTATIF : laissé vide, le client est inscrit sous son numéro de
+  // passage (« Client n°42 »). Les anciennes versions de l'app envoient
+  // toujours un nom : elles continuent de marcher.
+  const clientName = optionalString(data, "clientName", {max: 80});
   const requestId = optionalString(data, "requestId", {max: 40});
   if (requestId && !/^[A-Za-z0-9]{10,40}$/.test(requestId)) {
     throw new HttpsError("invalid-argument", "Identifiant de demande invalide.");
@@ -288,7 +292,13 @@ async function addManual(db, user, data, now = new Date()) {
     if (existing.exists) {
       if (existing.get("createdBy") === user.uid &&
           existing.get("slotId") === slotId) {
-        return {reservationId: resRef.id, alreadyDone: true};
+        // Nouvelle tentative après une coupure : même réponse que la 1re.
+        return {
+          reservationId: resRef.id,
+          alreadyDone: true,
+          ticketNumber: existing.get("ticketNumber") || null,
+          customerName: existing.get("customerName") || null,
+        };
       }
       throw new HttpsError("already-exists", "Demande déjà utilisée.");
     }
@@ -327,9 +337,17 @@ async function addManual(db, user, data, now = new Date()) {
         "Ce créneau vient d'être complété. Choisissez-en un autre.");
     }
 
+    // Numéro de passage du jour (lu avant toute écriture de la transaction).
+    const counterRef = ticket.ticketCounterRef(qRef,
+      zone.ymdIn(start, access.tz));
+    const ticketNumber = ticket.nextTicketNumber(
+      (await tx.get(counterRef)).data());
+    const customerName = ticket.manualCustomerName(clientName, ticketNumber);
+
     tx.set(resRef, {
       customerId: "manual_booking",
-      customerName: clientName,
+      customerName,
+      ticketNumber,
       companyId,
       queueId,
       queueName: queue.name || optionalString(data, "queueName") || "",
@@ -346,6 +364,8 @@ async function addManual(db, user, data, now = new Date()) {
       ...(!access.isAdmin && access.staffName ?
         {createdByName: access.staffName} : {}),
     });
+    tx.set(counterRef, ticket.counterUpdate(ticketNumber, FieldValue),
+      {merge: true});
     tx.update(slotRef, {reserved: FieldValue.increment(1)});
     // Une place de moins ce jour-là (avant : seul `reserved` bougeait, et
     // les places libres dérivaient à chaque ajout puis retrait).
@@ -353,7 +373,7 @@ async function addManual(db, user, data, now = new Date()) {
       reserved: FieldValue.increment(1),
       available: FieldValue.increment(-1),
     }, {merge: true});
-    return {reservationId: resRef.id};
+    return {reservationId: resRef.id, ticketNumber, customerName};
   });
 }
 

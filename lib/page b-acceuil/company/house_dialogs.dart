@@ -182,7 +182,6 @@ class _QuickAddSheetState extends State<_QuickAddSheet> {
   final _nameController = TextEditingController();
   late final PageController _pageController;
   int _currentIndex = 0;
-  String? _nameError;
 
   @override
   void initState() {
@@ -354,19 +353,18 @@ class _QuickAddSheetState extends State<_QuickAddSheet> {
             ),
 
             const SizedBox(height: 16),
-            // Champ nom
+            // Champ nom — FACULTATIF : laissé vide, le client est inscrit
+            // sous son numéro de passage du jour (attribué par le serveur).
+            // Pas d'ouverture automatique du clavier : « + » puis
+            // « Inscrire » suffisent ; on touche le champ pour saisir un nom.
             TextField(
               controller: _nameController,
               textCapitalization: TextCapitalization.words,
-              autofocus: true,
-              onChanged: (_) {
-                if (_nameError != null) setState(() => _nameError = null);
-              },
               decoration: InputDecoration(
-                labelText: 'Nom du client',
+                labelText: 'Nom du client (facultatif)',
                 hintText: widget.showNameHint ? 'Ex : Jean Dupont' : null,
+                helperText: 'Laissez vide : un numéro sera attribué',
                 prefixIcon: const Icon(Icons.person_outline_rounded),
-                errorText: _nameError,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
@@ -380,10 +378,6 @@ class _QuickAddSheetState extends State<_QuickAddSheet> {
               child: ElevatedButton.icon(
                 onPressed: () async {
                   final name = _nameController.text.trim();
-                  if (name.isEmpty) {
-                    setState(() => _nameError = 'Veuillez entrer un nom');
-                    return;
-                  }
                   final slot = _currentSlot;
                   Navigator.pop(context);
                   await widget.onConfirm(name, slot);

@@ -235,14 +235,6 @@ class CompanyPageState extends State<CompanyPage> {
     );
   }
 
-  double _getTextScaleFactor(BuildContext context) {
-    final width = MediaQuery.of(context).size.width;
-    if (width < 340) return 0.80;
-    if (width < 380) return 0.88;
-    if (width < 420) return 0.95;
-    return 1.0;
-  }
-
   @override
   Widget build(BuildContext context) {
     if (_notACompany) return _buildNotACompany();
@@ -304,111 +296,108 @@ class CompanyPageState extends State<CompanyPage> {
       );
     }
 
-    return MediaQuery(
-      data: MediaQuery.of(
-        context,
-      ).copyWith(textScaler: TextScaler.linear(_getTextScaleFactor(context))),
-      child: Stack(
-        children: [
-          Scaffold(
-            body: IndexedStack(index: pageIndex, children: _adminPages),
-            // Fin trait au-dessus de la barre (façon WhatsApp) plutôt qu'une
-            // ombre. Posé DEVANT la barre via un Column : mis en fond
-            // (DecoratedBox), le blanc opaque de la barre le recouvrait.
-            bottomNavigationBar: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  height: 1,
-                  color: Colors.black.withValues(alpha: 0.06),
-                ),
-                NavigationBar(
-                  selectedIndex: pageIndex,
-                  onDestinationSelected: (int index) {
-                    if (index == 1) OnboardingService().advance(1);
-                    // "Lu" à l'entrée comme à la sortie de l'onglet Notifications
-                    // (couvre une notif arrivée pendant la consultation).
-                    final leavingNotifs = pageIndex == 2 && index != 2;
-                    final enteringNotifs = index == 2;
-                    if (leavingNotifs || enteringNotifs) {
-                      NotificationsNavIcon.markSeen();
-                    }
-                    setState(() => pageIndex = index);
-                  },
-                  destinations: [
-                    const NavigationDestination(
-                      icon: Icon(Icons.home_outlined),
-                      selectedIcon: Icon(Icons.home_rounded),
-                      label: 'Accueil',
-                    ),
-                    NavigationDestination(
-                      icon: ListenableBuilder(
-                        listenable: OnboardingService(),
-                        builder: (_, __) => Stack(
-                          clipBehavior: Clip.none,
-                          children: [
-                            const Icon(Icons.settings_outlined),
-                            if (OnboardingService().step == 1)
-                              const Positioned(
-                                top: -4,
-                                right: -4,
-                                child: PulsingDot(),
-                              ),
-                          ],
-                        ),
-                      ),
-                      selectedIcon: ListenableBuilder(
-                        listenable: OnboardingService(),
-                        builder: (_, __) => Stack(
-                          clipBehavior: Clip.none,
-                          children: [
-                            const Icon(Icons.settings_rounded),
-                            if (OnboardingService().step == 1)
-                              const Positioned(
-                                top: -4,
-                                right: -4,
-                                child: PulsingDot(),
-                              ),
-                          ],
-                        ),
-                      ),
-                      label: 'Réglages',
-                    ),
-                    NavigationDestination(
-                      icon: NotificationsNavIcon(
-                        recentNotifications: _recentNotifs,
-                        unreadWhere: (d) =>
-                            (d['audience'] ?? 'admin') == 'admin',
-                        selected: pageIndex == 2,
-                      ),
-                      label: 'Notifications',
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          Positioned(
-            bottom: 80 + MediaQuery.of(context).padding.bottom,
-            left: 0,
-            right: 0,
-            child: ListenableBuilder(
-              listenable: OnboardingService(),
-              builder: (_, __) {
-                if (OnboardingService().step != 1) {
-                  return const SizedBox.shrink();
-                }
-                return const Center(
-                  child: PulsingHint(
-                    text: 'Appuyez sur Réglages',
-                    icon: Icons.settings,
+    // Taille du texte : plus aucune réduction forcée ici — celle du
+    // téléphone s'applique, plafonnée pour toute l'app dans main.dart.
+    return Stack(
+      children: [
+        Scaffold(
+          body: IndexedStack(index: pageIndex, children: _adminPages),
+          // Fin trait au-dessus de la barre (façon WhatsApp) plutôt qu'une
+          // ombre. Posé DEVANT la barre via un Column : mis en fond
+          // (DecoratedBox), le blanc opaque de la barre le recouvrait.
+          bottomNavigationBar: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                height: 1,
+                color: Colors.black.withValues(alpha: 0.06),
+              ),
+              NavigationBar(
+                selectedIndex: pageIndex,
+                onDestinationSelected: (int index) {
+                  if (index == 1) OnboardingService().advance(1);
+                  // "Lu" à l'entrée comme à la sortie de l'onglet Notifications
+                  // (couvre une notif arrivée pendant la consultation).
+                  final leavingNotifs = pageIndex == 2 && index != 2;
+                  final enteringNotifs = index == 2;
+                  if (leavingNotifs || enteringNotifs) {
+                    NotificationsNavIcon.markSeen();
+                  }
+                  setState(() => pageIndex = index);
+                },
+                destinations: [
+                  const NavigationDestination(
+                    icon: Icon(Icons.home_outlined),
+                    selectedIcon: Icon(Icons.home_rounded),
+                    label: 'Accueil',
                   ),
-                );
-              },
-            ),
+                  NavigationDestination(
+                    icon: ListenableBuilder(
+                      listenable: OnboardingService(),
+                      builder: (_, __) => Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          const Icon(Icons.settings_outlined),
+                          if (OnboardingService().step == 1)
+                            const Positioned(
+                              top: -4,
+                              right: -4,
+                              child: PulsingDot(),
+                            ),
+                        ],
+                      ),
+                    ),
+                    selectedIcon: ListenableBuilder(
+                      listenable: OnboardingService(),
+                      builder: (_, __) => Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          const Icon(Icons.settings_rounded),
+                          if (OnboardingService().step == 1)
+                            const Positioned(
+                              top: -4,
+                              right: -4,
+                              child: PulsingDot(),
+                            ),
+                        ],
+                      ),
+                    ),
+                    label: 'Réglages',
+                  ),
+                  NavigationDestination(
+                    icon: NotificationsNavIcon(
+                      recentNotifications: _recentNotifs,
+                      unreadWhere: (d) =>
+                          (d['audience'] ?? 'admin') == 'admin',
+                      selected: pageIndex == 2,
+                    ),
+                    label: 'Notifications',
+                  ),
+                ],
+              ),
+            ],
           ),
-        ],
-      ),
+        ),
+        Positioned(
+          bottom: 80 + MediaQuery.of(context).padding.bottom,
+          left: 0,
+          right: 0,
+          child: ListenableBuilder(
+            listenable: OnboardingService(),
+            builder: (_, __) {
+              if (OnboardingService().step != 1) {
+                return const SizedBox.shrink();
+              }
+              return const Center(
+                child: PulsingHint(
+                  text: 'Appuyez sur Réglages',
+                  icon: Icons.settings,
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }

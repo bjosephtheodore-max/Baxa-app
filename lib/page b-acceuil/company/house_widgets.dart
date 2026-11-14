@@ -445,6 +445,10 @@ class _QueueHeaderCard extends StatefulWidget {
   final bool readOnly;
   final VoidCallback? onRevertDuration;
 
+  /// Bouton appuyé en attente de la lecture réseau ('duration-',
+  /// 'duration+', 'capacity-', 'capacity+', 'block'), ou null.
+  final String? pendingTap;
+
   const _QueueHeaderCard({
     required this.queue,
     required this.currentDuration,
@@ -458,6 +462,7 @@ class _QueueHeaderCard extends StatefulWidget {
     required this.onToggle,
     this.readOnly = false,
     this.onRevertDuration,
+    this.pendingTap,
   });
 
   @override
@@ -714,6 +719,8 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                           step: 5,
                           onChanged: widget.onDurationChanged,
                           onRevert: widget.onRevertDuration,
+                          pendingKey: 'duration',
+                          pendingTap: widget.pendingTap,
                         ),
                         Divider(height: 1, color: Colors.grey.shade200),
                         _ControlRow(
@@ -725,6 +732,8 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                           max: _kMaxCapacity,
                           step: 1,
                           onChanged: widget.onCapacityChanged,
+                          pendingKey: 'capacity',
+                          pendingTap: widget.pendingTap,
                         ),
                         const SizedBox(height: 20),
                       ],
@@ -732,52 +741,78 @@ class _QueueHeaderCardState extends State<_QueueHeaderCard>
                       // Un seul bouton qui bascule : « Débloquer » tant
                       // qu'un créneau bloqué est encore à venir (rouvre
                       // tout ce qui est bloqué), sinon « Bloquer ».
-                      GestureDetector(
-                        onTap: q.hasActiveBlock
-                            ? widget.onUnblock
-                            : widget.onBlock,
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 11,
-                            horizontal: 14,
+                      // Ondulation + légère vibration à l'appui, indicateur
+                      // de chargement tant que l'appui attend le réseau.
+                      Material(
+                        color: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          side: BorderSide(
+                            color: q.hasActiveBlock
+                                ? _green
+                                : Colors.red.shade300,
+                            width: 1.5,
                           ),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                              color: q.hasActiveBlock
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          onTap: widget.pendingTap == 'block'
+                              ? null
+                              : () {
+                                  HapticFeedback.selectionClick();
+                                  (q.hasActiveBlock
+                                      ? widget.onUnblock
+                                      : widget.onBlock)();
+                                },
+                          splashColor: (q.hasActiveBlock
                                   ? _green
-                                  : Colors.red.shade300,
-                              width: 1.5,
+                                  : Colors.red.shade300)
+                              .withValues(alpha: 0.18),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 11,
+                              horizontal: 14,
                             ),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                q.hasActiveBlock
-                                    ? Icons.lock_open_rounded
-                                    : Icons.lock_outline_rounded,
-                                size: 16,
-                                color: q.hasActiveBlock
-                                    ? _green
-                                    : Colors.red.shade400,
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                q.hasActiveBlock
-                                    ? 'Débloquer la plage'
-                                    : 'Bloquer la plage',
-                                style: TextStyle(
-                                  color: q.hasActiveBlock
-                                      ? _green
-                                      : Colors.red.shade600,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 14,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                if (widget.pendingTap == 'block')
+                                  SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: q.hasActiveBlock
+                                          ? _green
+                                          : Colors.red.shade400,
+                                    ),
+                                  )
+                                else
+                                  Icon(
+                                    q.hasActiveBlock
+                                        ? Icons.lock_open_rounded
+                                        : Icons.lock_outline_rounded,
+                                    size: 16,
+                                    color: q.hasActiveBlock
+                                        ? _green
+                                        : Colors.red.shade400,
+                                  ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  q.hasActiveBlock
+                                      ? 'Débloquer la plage'
+                                      : 'Bloquer la plage',
+                                  style: TextStyle(
+                                    color: q.hasActiveBlock
+                                        ? _green
+                                        : Colors.red.shade600,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14,
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -807,6 +842,12 @@ class _ControlRow extends StatelessWidget {
   final void Function(int delta) onChanged;
   final VoidCallback? onRevert;
 
+  /// Préfixe de cette ligne ('duration' / 'capacity') et bouton de la carte
+  /// en attente de la lecture réseau : le « − » ou le « + » correspondant
+  /// affiche un indicateur de chargement.
+  final String pendingKey;
+  final String? pendingTap;
+
   const _ControlRow({
     required this.label,
     required this.icon,
@@ -816,6 +857,8 @@ class _ControlRow extends StatelessWidget {
     required this.max,
     required this.step,
     required this.onChanged,
+    required this.pendingKey,
+    this.pendingTap,
     this.onRevert,
   });
 
@@ -824,7 +867,9 @@ class _ControlRow extends StatelessWidget {
     final canDecrease = value == null || value! > min;
     final canIncrease = value == null || value! < max;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      // 2 + zone tactile de 48 (boutons − / +) + 2 = même hauteur qu'avant
+      // (8 + 36 + 8) : la ligne ne bouge pas.
+      padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
         children: [
           _buildLeadingIcon(),
@@ -848,14 +893,17 @@ class _ControlRow extends StatelessWidget {
           _PlusMinusBtn(
             icon: Icons.remove,
             enabled: canDecrease,
+            busy: pendingTap == '$pendingKey-',
             onTap: () => onChanged(-step),
           ),
           // Valeur dans une case de largeur FIXE, centrée : les − de
           // « Durée » et « Capacité » tombent dans une même colonne, les +
           // dans une autre, quelle que soit la longueur du texte
-          // (« 5 min » / « 30 pers. »).
+          // (« 5 min » / « 30 pers. »). 60 px : assez pour la valeur la plus
+          // longue, et le − reste proche du + (le FittedBox réduit le texte
+          // si la police du téléphone est très grande, sans déborder).
           SizedBox(
-            width: 84,
+            width: 60,
             child: FittedBox(
               fit: BoxFit.scaleDown,
               child: Text(
@@ -873,6 +921,7 @@ class _ControlRow extends StatelessWidget {
           _PlusMinusBtn(
             icon: Icons.add,
             enabled: canIncrease,
+            busy: pendingTap == '$pendingKey+',
             onTap: () => onChanged(step),
           ),
         ],
@@ -934,33 +983,71 @@ class _ControlRow extends StatelessWidget {
   }
 }
 
+// Bouton − / + : carré visible de 36 px, zone tactile de 44 × 48 autour
+// (plus facile à viser au pouce), ondulation + légère vibration à l'appui,
+// et indicateur de chargement tant que l'appui attend le réseau ([busy]).
 class _PlusMinusBtn extends StatelessWidget {
   final IconData icon;
   final bool enabled;
+  final bool busy;
   final VoidCallback onTap;
   const _PlusMinusBtn({
     required this.icon,
     required this.enabled,
     required this.onTap,
+    this.busy = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: enabled ? onTap : null,
-      child: Container(
-        width: 36,
-        height: 36,
-        decoration: BoxDecoration(
-          color: enabled ? _green.withValues(alpha: 0.1) : Colors.grey.shade200,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: enabled ? _green : Colors.grey.shade300),
-        ),
-        child: Center(
-          child: Icon(
-            icon,
-            size: 18,
-            color: enabled ? _green : Colors.grey.shade400,
+    final tappable = enabled && !busy;
+    return SizedBox(
+      width: 44,
+      height: 48,
+      // Material transparent : l'ondulation se dessine au-dessus de la
+      // carte blanche (sinon elle serait peinte dessous, invisible).
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkResponse(
+          onTap: tappable
+              ? () {
+                  HapticFeedback.selectionClick();
+                  onTap();
+                }
+              : null,
+          radius: 24,
+          splashColor: _green.withValues(alpha: 0.22),
+          highlightColor: _green.withValues(alpha: 0.10),
+          child: Center(
+            child: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: enabled
+                    ? _green.withValues(alpha: 0.1)
+                    : Colors.grey.shade200,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: enabled ? _green : Colors.grey.shade300,
+                ),
+              ),
+              child: Center(
+                child: busy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: _green,
+                        ),
+                      )
+                    : Icon(
+                        icon,
+                        size: 18,
+                        color: enabled ? _green : Colors.grey.shade400,
+                      ),
+              ),
+            ),
           ),
         ),
       ),

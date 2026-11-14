@@ -146,6 +146,14 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      // Taille du texte : celle choisie dans les réglages du téléphone
+      // (accessibilité), partout et pour tous les comptes — avec un plafond
+      // à 130 % pour que les très grandes polices ne cassent pas les mises
+      // en page. Jamais réduite en dessous du réglage du téléphone.
+      builder: (context, child) => MediaQuery.withClampedTextScaling(
+        maxScaleFactor: 1.3,
+        child: child ?? const SizedBox.shrink(),
+      ),
       // ── Localisation française ─────────────────────────────────────────
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,

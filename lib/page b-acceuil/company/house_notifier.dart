@@ -287,19 +287,24 @@ class _HouseNotifier extends ChangeNotifier {
   }
 
   // ── RDV manuel ────────────────────────────────────────────────────────────
-  Future<String?> createManualAppointment(
+  // [clientName] facultatif : vide, le serveur attribue un numéro de passage
+  // (« Client n°42 »). Renvoie soit l'erreur à afficher, soit le libellé de
+  // la personne inscrite (son nom, ou « n°42 »).
+  Future<({String? error, String? label})> createManualAppointment(
     String clientName,
     _QueueAgenda queue,
     AgendaSlot slot,
   ) async {
-    if (_companyId == null) return 'Aucune entreprise trouvée';
+    if (_companyId == null) {
+      return (error: 'Aucune entreprise trouvée', label: null);
+    }
     // Côté serveur (companyBooking · addManual), en une seule transaction :
     // file ouverte, jour hors fermeture, plage non supprimée, créneau ni
     // bloqué ni terminé, et surtout une place ENCORE libre au moment
     // d'écrire (deux inscriptions simultanées ne peuvent plus surbooker).
     // L'auteur (admin / membre et son nom) est fixé par le serveur.
     try {
-      await CompanyBookingService.addManual(
+      final added = await CompanyBookingService.addManual(
         companyId: _companyId!,
         queueId: queue.id,
         slotId: slot.id,
@@ -307,9 +312,15 @@ class _HouseNotifier extends ChangeNotifier {
         queueName: queue.name,
       );
       _recordManualAdd();
-      return null;
+      final typed = clientName.trim();
+      final label = typed.isNotEmpty
+          ? typed
+          : added.ticketNumber != null
+          ? 'n°${added.ticketNumber}'
+          : added.customerName;
+      return (error: null, label: label);
     } on CompanyActionException catch (e) {
-      return e.message;
+      return (error: e.message, label: null);
     }
   }
 

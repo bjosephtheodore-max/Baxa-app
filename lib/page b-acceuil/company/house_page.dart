@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -79,6 +80,24 @@ class _HousePageState extends State<HousePage>
   // encore, et on se retrouve avec 2 dialogs superposés. Un verrou par file,
   // posé dès l'entrée du handler, empêche ça.
   final Set<String> _liveEditBusyQueueIds = {};
+
+  // Bouton de modif en direct appuyé, en attente de la lecture réseau des
+  // plages (clé = file, valeur = 'duration-', 'duration+', 'capacity-',
+  // 'capacity+' ou 'block') : il affiche un petit indicateur de chargement
+  // pour que l'appui soit visiblement pris en compte.
+  final Map<String, String> _pendingTap = {};
+
+  void _setPendingTap(String queueId, String? action) {
+    if (!mounted) return;
+    if (action == null && !_pendingTap.containsKey(queueId)) return;
+    setState(() {
+      if (action == null) {
+        _pendingTap.remove(queueId);
+      } else {
+        _pendingTap[queueId] = action;
+      }
+    });
+  }
 
   // Bouton « + » : se range vers la barre du bas quand on défile vers le bas
   // (l'utilisateur cherche un créneau plus loin), revient quand on défile
@@ -1060,6 +1079,7 @@ class _HousePageState extends State<HousePage>
       isExpanded: isExpanded,
       onToggle: () => setState(() => _headerExpanded[queue.id] = !isExpanded),
       readOnly: _n.isStaff,
+      pendingTap: _pendingTap[queue.id],
       onRevertDuration: pendingRevert != null
           ? () => _onRevertDuration(pendingRevert.tsInfo.id)
           : null,
@@ -1283,7 +1303,12 @@ class _HousePageState extends State<HousePage>
     _QueueAgenda queue,
     AgendaSlot slot,
   ) async {
-    final error = await _n.createManualAppointment(clientName, queue, slot);
+    final res = await _n.createManualAppointment(clientName, queue, slot);
+    final error = res.error;
+    // « Inscrit : Awa Diop » ou « Inscrit : n°42 » (nom laissé vide).
+    final success = res.label != null && res.label!.isNotEmpty
+        ? 'Inscrit : ${res.label}'
+        : 'Client ajouté avec succès';
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -1308,7 +1333,7 @@ class _HousePageState extends State<HousePage>
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                error ?? 'Client ajouté avec succès',
+                error ?? success,
                 style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.w500,
@@ -1386,9 +1411,11 @@ class _HousePageState extends State<HousePage>
   // ── Blocage ───────────────────────────────────────────────
   Future<void> _onBlockRequest(_QueueAgenda queue) async {
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
+    _setPendingTap(queue.id, 'block');
     try {
       if (_n.companyId == null) return;
       final timeslots = await _n.fetchTimeSlots(queue.id);
+      _setPendingTap(queue.id, null);
       final now = DateTime.now();
       final anyBlockable = timeslots.any(
         (ts) =>
@@ -1436,17 +1463,20 @@ class _HousePageState extends State<HousePage>
       );
     } finally {
       _liveEditBusyQueueIds.remove(queue.id);
+      _setPendingTap(queue.id, null);
     }
   }
 
   Future<void> _onUnblock(_QueueAgenda queue) async {
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
+    _setPendingTap(queue.id, 'block');
     try {
       final result = await _n.unblockPlage(queue.id);
       if (result.success) _logQuickEdit('unblock');
       if (mounted) _snackBar(result);
     } finally {
       _liveEditBusyQueueIds.remove(queue.id);
+      _setPendingTap(queue.id, null);
     }
   }
 
@@ -1493,6 +1523,7 @@ class _HousePageState extends State<HousePage>
   // ── Modification durée ────────────────────────────────────
   Future<void> _onDurationChanged(_QueueAgenda queue, int delta) async {
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
+    _setPendingTap(queue.id, delta > 0 ? 'duration+' : 'duration-');
     try {
       final tsInfo = await _selectTimeSlot(
         queue,
@@ -1558,6 +1589,7 @@ class _HousePageState extends State<HousePage>
       }
     } finally {
       _liveEditBusyQueueIds.remove(queue.id);
+      _setPendingTap(queue.id, null);
     }
   }
 
@@ -1581,6 +1613,7 @@ class _HousePageState extends State<HousePage>
   // plage est complet.
   Future<void> _onCapacityChanged(_QueueAgenda queue, int delta) async {
     if (!_liveEditBusyQueueIds.add(queue.id)) return;
+    _setPendingTap(queue.id, delta > 0 ? 'capacity+' : 'capacity-');
     try {
       final tsInfo = await _selectTimeSlot(
         queue,
@@ -1622,6 +1655,7 @@ class _HousePageState extends State<HousePage>
       }
     } finally {
       _liveEditBusyQueueIds.remove(queue.id);
+      _setPendingTap(queue.id, null);
     }
   }
 
@@ -1641,6 +1675,9 @@ class _HousePageState extends State<HousePage>
     required int delta,
   }) async {
     final fetched = await _n.fetchTimeSlots(queue.id);
+    // Lecture terminée : le bouton appuyé quitte son état « en attente »
+    // (le sélecteur ou le dialogue prend le relais).
+    _setPendingTap(queue.id, null);
     if (fetched.isEmpty || !mounted) return null;
 
     final now = DateTime.now();
@@ -1794,7 +1831,6 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
   bool _showAddForm = false;
   final _nameCtrl = TextEditingController();
   final _listCtrl = ScrollController();
-  String? _nameError;
   late int _reservedCount;
 
   @override
@@ -2023,18 +2059,17 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
 
             // Formulaire inline ou bouton
             if (_showAddForm) ...[
+              // Nom FACULTATIF : laissé vide, le client est inscrit sous son
+              // numéro de passage du jour (attribué par le serveur). Pas
+              // d'ouverture automatique du clavier.
               TextField(
                 controller: _nameCtrl,
                 textCapitalization: TextCapitalization.words,
-                autofocus: true,
-                onChanged: (_) {
-                  if (_nameError != null) setState(() => _nameError = null);
-                },
                 decoration: InputDecoration(
-                  labelText: 'Nom du client',
+                  labelText: 'Nom du client (facultatif)',
                   hintText: widget.showNameHint ? 'Ex : Jean Dupont' : null,
+                  helperText: 'Laissez vide : un numéro sera attribué',
                   prefixIcon: const Icon(Icons.person_outline_rounded),
-                  errorText: _nameError,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
@@ -2049,7 +2084,6 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                     onPressed: () => setState(() {
                       _showAddForm = false;
                       _nameCtrl.clear();
-                      _nameError = null;
                     }),
                     child: const Text('Annuler'),
                   ),
@@ -2058,10 +2092,6 @@ class _SlotDetailDialogState extends State<_SlotDetailDialog> {
                     child: ElevatedButton.icon(
                       onPressed: () async {
                         final name = _nameCtrl.text.trim();
-                        if (name.isEmpty) {
-                          setState(() => _nameError = 'Veuillez entrer un nom');
-                          return;
-                        }
                         Navigator.pop(context);
                         await widget.onAddClient!(name);
                       },

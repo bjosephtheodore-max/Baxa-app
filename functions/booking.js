@@ -18,6 +18,7 @@
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const zone = require("./zone");
+const ticket = require("./ticket");
 const {FieldValue, Timestamp} = require("firebase-admin/firestore");
 
 const REGION = "africa-south1";
@@ -121,6 +122,14 @@ function dailyStatsRef(db, companyId, queueId, date, tz) {
   return db.collection("companies").doc(companyId)
     .collection("queues").doc(queueId)
     .collection("dailyStats").doc(ymd(date, tz));
+}
+
+/** Compteur des numéros de passage d'une file, pour le jour local du
+ * créneau (voir ticket.js). */
+function ticketCounterFor(db, companyId, queueId, date, tz) {
+  const qRef = db.collection("companies").doc(companyId)
+    .collection("queues").doc(queueId);
+  return ticket.ticketCounterRef(qRef, ymd(date, tz));
 }
 
 /** Fuseau d'une structure, lu dans la transaction (avant toute écriture). */
@@ -278,6 +287,7 @@ async function reserve(db, user, data, now = new Date()) {
     .collection("reservations").doc();
 
   let totalReservations = 0;
+  let ticketNumber = null;
   await db.runTransaction(async (tx) => {
     const target = await loadTargetSlot(tx, db, {companyId, queueId, slotId,
       fallbackTimeSlotId: optionalLabel(data, "timeSlotId")}, now);
@@ -297,11 +307,22 @@ async function reserve(db, user, data, now = new Date()) {
     }
     checkConflicts(active, target, {companyId, queueId});
 
-    tx.set(resRef, reservationData({
-      user, userData, target, companyId, queueId, slotId,
-      companyName: optionalLabel(data, "companyName"),
-      queueName: optionalLabel(data, "queueName"),
-    }));
+    // Numéro de passage du jour (lu avant toute écriture de la transaction).
+    const counterRef = ticketCounterFor(db, companyId, queueId,
+      target.start, target.tz);
+    ticketNumber = ticket.nextTicketNumber(
+      (await tx.get(counterRef)).data());
+
+    tx.set(resRef, {
+      ...reservationData({
+        user, userData, target, companyId, queueId, slotId,
+        companyName: optionalLabel(data, "companyName"),
+        queueName: optionalLabel(data, "queueName"),
+      }),
+      ticketNumber,
+    });
+    tx.set(counterRef, ticket.counterUpdate(ticketNumber, FieldValue),
+      {merge: true});
     tx.update(target.slotRef, {reserved: FieldValue.increment(1)});
     const stats = new StatsDelta();
     stats.add(dailyStatsRef(db, companyId, queueId, target.start, target.tz),
@@ -318,7 +339,7 @@ async function reserve(db, user, data, now = new Date()) {
     }, {merge: true});
   });
 
-  return {reservationId: resRef.id, totalReservations};
+  return {reservationId: resRef.id, totalReservations, ticketNumber};
 }
 
 // ── REMPLACER (annule l'ancienne + crée la nouvelle, atomique) ──────
@@ -361,6 +382,22 @@ async function replace(db, user, data, now = new Date()) {
     const active = await loadActive(tx, db, user.uid, now, oldResRef.path);
     checkConflicts(active, target, {companyId, queueId});
 
+    // Numéro de passage : gardé si le client reste dans la même file le
+    // même jour (il change seulement d'horaire), sinon pris dans le
+    // compteur du jour visé (lu avant toute écriture).
+    let ticketNumber = ticket.keptTicketNumber(old, {
+      companyId, queueId,
+      oldDayKey: ymd(toDate(old.slotStart), oldTz),
+      newDayKey: ymd(target.start, target.tz),
+    });
+    let counterRef = null;
+    if (ticketNumber === null) {
+      counterRef = ticketCounterFor(db, companyId, queueId,
+        target.start, target.tz);
+      ticketNumber = ticket.nextTicketNumber(
+        (await tx.get(counterRef)).data());
+    }
+
     // Ancienne réservation : annulée (un remplacement n'est pas compté
     // comme une annulation dans les statistiques, comme avant).
     tx.update(oldResRef, {
@@ -379,7 +416,12 @@ async function replace(db, user, data, now = new Date()) {
         queueName: optionalLabel(data, "queueName"),
       }),
       replacedReservationId: oldReservationId,
+      ticketNumber,
     });
+    if (counterRef) {
+      tx.set(counterRef, ticket.counterUpdate(ticketNumber, FieldValue),
+        {merge: true});
+    }
     tx.update(target.slotRef, {reserved: FieldValue.increment(1)});
 
     const stats = new StatsDelta();

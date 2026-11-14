@@ -36,8 +36,13 @@ class CompanyBookingService {
   static String newRequestId() =>
       FirebaseFirestore.instance.collection('companies').doc().id;
 
-  /// Inscrit [clientName] sur le créneau [slotId].
-  static Future<String> addManual({
+  /// Inscrit un client sur le créneau [slotId]. [clientName] est
+  /// facultatif : vide, le serveur l'inscrit sous son numéro de passage du
+  /// jour (« Client n°42 »). Renvoie l'inscription telle qu'enregistrée.
+  static Future<
+    ({String reservationId, int? ticketNumber, String? customerName})
+  >
+  addManual({
     required String companyId,
     required String queueId,
     required String slotId,
@@ -45,15 +50,20 @@ class CompanyBookingService {
     String? queueName,
     String? requestId,
   }) async {
+    final name = clientName.trim();
     final res = await _call('addManual', {
       'companyId': companyId,
       'queueId': queueId,
       'slotId': slotId,
-      'clientName': clientName,
+      if (name.isNotEmpty) 'clientName': name,
       if (queueName != null) 'queueName': queueName,
       'requestId': requestId ?? newRequestId(),
     });
-    return res['reservationId'] as String? ?? '';
+    return (
+      reservationId: res['reservationId'] as String? ?? '',
+      ticketNumber: (res['ticketNumber'] as num?)?.toInt(),
+      customerName: res['customerName'] as String?,
+    );
   }
 
   /// Retire une inscription faite par la structure.
