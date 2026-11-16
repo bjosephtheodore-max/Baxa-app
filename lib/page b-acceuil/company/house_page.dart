@@ -26,6 +26,7 @@ import 'package:baxa/widgets/onboarding_widgets.dart';
 import 'package:baxa/widgets/baxa_date_picker_theme.dart';
 import 'package:baxa/page%20d-d%C3%A9but/choose_page.dart';
 import 'package:baxa/page%20b-acceuil/company/staff_revocation.dart';
+import 'package:baxa/widgets/notifications_permission_prompt.dart';
 
 part 'house_widgets.dart';
 part 'house_dialogs.dart';
@@ -380,6 +381,9 @@ class _HousePageState extends State<HousePage>
                       ),
                       child: _buildDateBar(),
                     ),
+                    // Notifications coupées sur ce téléphone (structure ou
+                    // staff) : sinon personne n'est averti des réservations.
+                    const NotificationsOffBanner(),
                     Expanded(child: _buildAgendaBody()),
                   ],
                 ),

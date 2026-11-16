@@ -10,6 +10,7 @@ import 'package:baxa/page%20b-acceuil/customer/signine_page.dart';
 import 'package:baxa/services/booking_constants.dart';
 import 'package:baxa/services/favorites_service.dart';
 import 'package:baxa/widgets/favorite_snackbar.dart';
+import 'package:baxa/widgets/notifications_permission_prompt.dart';
 import 'package:baxa/services/reservation_rules_service.dart';
 
 class SlotsPage extends StatefulWidget {
@@ -2021,10 +2022,18 @@ class _SlotsPageState extends State<SlotsPage>
         _showSuccessSnackbar('Réservation confirmée !');
         widget.onReservationSuccess();
 
+        // Notifications coupées : c'est le message le plus important (sans
+        // elles, pas de « c'est bientôt votre tour »). S'il s'affiche, les
+        // deux invitations ci-dessous attendent la prochaine réservation.
+        final notifPromptShown = await maybePromptCustomerNotifications(
+          context,
+        );
+        if (!mounted) return;
+
         // Widget A : invite à l'inscription (utilisateurs anonymes uniquement)
         bool widgetAShown = false;
         final fbUser = FirebaseAuth.instance.currentUser;
-        if (fbUser != null && fbUser.isAnonymous) {
+        if (!notifPromptShown && fbUser != null && fbUser.isAnonymous) {
           final result = await _maybeShowProfilePrompt(
             booked.totalReservations,
           );
@@ -2040,7 +2049,7 @@ class _SlotsPageState extends State<SlotsPage>
         }
 
         // Widget B : invite aux favoris (différé si Widget A vient d'apparaître)
-        if (mounted) {
+        if (mounted && !notifPromptShown) {
           await _maybeShowFavoritePrompt(widgetAShown: widgetAShown);
         }
 
