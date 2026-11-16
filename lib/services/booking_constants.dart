@@ -21,6 +21,11 @@ const int kMinGapDifferentCompanyMinutes = 30;
 /// libère une place. Contrôlé côté app au moment où un membre rejoint.
 const int kMaxActiveStaff = 5;
 
+/// Durée de validité d'un code d'invitation d'équipe (un code sert à une
+/// seule personne). MIROIR de INVITE_VALIDITY_MS (functions/invite.js),
+/// qui la fait respecter côté serveur.
+const Duration kInviteValidity = Duration(hours: 48);
+
 /// ============================================================
 /// FERMETURE D'UNE FILE
 /// ============================================================

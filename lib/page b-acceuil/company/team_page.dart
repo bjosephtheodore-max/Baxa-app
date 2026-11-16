@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -26,16 +27,24 @@ class _TeamPageState extends State<TeamPage> {
   String? _companyName;
   bool _isLoading = true;
 
-  // Code d'invitation actif
+  // Dernière invitation de l'équipe, suivie EN DIRECT : dès qu'un membre
+  // utilise le code (le serveur le désactive), la carte se met à jour.
+  // Avant, le dernier code vu restait affiché (mémoire de l'app) et
+  // laissait croire qu'il servait encore.
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _inviteSub;
+  Map<String, dynamic>? _latestInvite;
+  String? _usedByName;
+  String? _usedByUid;
+
+  // Code d'invitation encore utilisable (actif et non expiré), sinon null.
   String? _activeCode;
   bool _isGeneratingCode = false;
 
-  // Cache mémoire (durée de l'app) pour éviter un rechargement à vide à
-  // chaque ouverture de la page : on affiche tout de suite ce qu'on a déjà
-  // vu, pendant qu'un rafraîchissement silencieux tourne en arrière-plan.
+  // Cache mémoire (durée de l'app) du NOM de la structure seulement, pour
+  // afficher la page sans attendre. Jamais le code : il peut avoir servi
+  // ou expiré entre-temps.
   static String? _cachedCompanyId;
   static String? _cachedCompanyName;
-  static String? _cachedActiveCode;
 
   @override
   void initState() {
@@ -46,45 +55,92 @@ class _TeamPageState extends State<TeamPage> {
     final hasCache = _cachedCompanyId == _companyId && _cachedCompanyId != null;
     if (hasCache) {
       _companyName = _cachedCompanyName;
-      _activeCode = _cachedActiveCode;
       _isLoading = false;
     }
     _loadData();
+    _listenToLatestInvite();
+  }
+
+  @override
+  void dispose() {
+    _inviteSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadData() async {
     if (_companyId == null) return;
     try {
-      // Les deux lectures sont indépendantes : on les lance ensemble au lieu
-      // de les enchaîner pour ne pas payer deux allers-retours réseau.
-      final docFuture = _firestore.collection('companies').doc(_companyId).get();
-      final inviteFuture = _firestore
-          .collection('companies')
-          .doc(_companyId)
-          .collection('invitations')
-          .where('active', isEqualTo: true)
-          .limit(1)
-          .get();
-
-      final doc = await docFuture;
-      final inviteSnap = await inviteFuture;
-
+      final doc = await _firestore.collection('companies').doc(_companyId).get();
       if (doc.exists) {
         _companyName =
             (doc.data() as Map<String, dynamic>)['nom'] as String? ?? 'Baxa';
       }
-      _activeCode = inviteSnap.docs.isNotEmpty
-          ? (inviteSnap.docs.first.data())['code'] as String?
-          : null;
-
       _cachedCompanyId = _companyId;
       _cachedCompanyName = _companyName;
-      _cachedActiveCode = _activeCode;
     } catch (e) {
       debugPrint('TeamPage load error: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  void _listenToLatestInvite() {
+    if (_companyId == null) return;
+    _inviteSub = _firestore
+        .collection('companies')
+        .doc(_companyId)
+        .collection('invitations')
+        .orderBy('createdAt', descending: true)
+        .limit(1)
+        .snapshots()
+        .listen(
+          (snap) {
+            final data = snap.docs.isEmpty ? null : snap.docs.first.data();
+            if (!mounted) return;
+            setState(() {
+              _latestInvite = data;
+              _activeCode = _usableCode(data);
+            });
+            final usedBy = data?['usedBy'] as String?;
+            if (usedBy != null && usedBy != _usedByUid) {
+              _usedByUid = usedBy;
+              _usedByName = null;
+              _loadUsedByName(usedBy);
+            }
+          },
+          onError: (e) => debugPrint('TeamPage invite stream error: $e'),
+        );
+  }
+
+  /// Le code, s'il peut encore servir : actif et pas expiré.
+  String? _usableCode(Map<String, dynamic>? invite) {
+    if (invite == null || invite['active'] != true) return null;
+    if (_inviteTimeLeft(invite) == Duration.zero) return null;
+    return invite['code'] as String?;
+  }
+
+  /// Temps restant avant expiration (null = date inconnue, ex. code à
+  /// peine créé ; Duration.zero = expiré). MIROIR de functions/invite.js.
+  Duration? _inviteTimeLeft(Map<String, dynamic> invite) {
+    final created = (invite['createdAt'] as Timestamp?)?.toDate();
+    if (created == null) return null;
+    final left = created.add(kInviteValidity).difference(DateTime.now());
+    return left.isNegative ? Duration.zero : left;
+  }
+
+  Future<void> _loadUsedByName(String uid) async {
+    try {
+      final doc = await _firestore
+          .collection('companies')
+          .doc(_companyId)
+          .collection('staff')
+          .doc(uid)
+          .get();
+      final name = (doc.data()?['displayName'] as String?)?.trim();
+      if (mounted && uid == _usedByUid && name != null && name.isNotEmpty) {
+        setState(() => _usedByName = name);
+      }
+    } catch (_) {}
   }
 
   // ==============================================================
@@ -127,7 +183,6 @@ class _TeamPageState extends State<TeamPage> {
             'createdAt': FieldValue.serverTimestamp(),
           });
 
-      _cachedActiveCode = code;
       if (mounted) setState(() => _activeCode = code);
     } catch (e) {
       if (mounted) {
@@ -504,6 +559,67 @@ class _TeamPageState extends State<TeamPage> {
   }
 
   // ── Carte d'invitation ────────────────────────────────────
+  /// « Valable pour une seule personne · expire dans 47 h ».
+  String _activeCodeInfo() {
+    final invite = _latestInvite;
+    final left = invite == null ? null : _inviteTimeLeft(invite);
+    const base = 'Valable pour une seule personne';
+    if (left == null) return '$base · 48 h';
+    final when = left.inHours >= 1
+        ? '${left.inHours} h'
+        : '${left.inMinutes.clamp(1, 59)} min';
+    return '$base · expire dans $when';
+  }
+
+  /// Pourquoi il n'y a plus de code utilisable : utilisé ou expiré.
+  List<Widget> _buildInviteStatus() {
+    final invite = _latestInvite;
+    if (invite == null) return const [];
+    final String text;
+    final IconData icon;
+    final Color color;
+    if (invite['usedBy'] != null) {
+      final who = _usedByName ?? 'un membre';
+      text = 'Code ${invite['code'] ?? ''} utilisé par $who.';
+      icon = Icons.check_circle_rounded;
+      color = _green;
+    } else if (invite['active'] == true &&
+        _inviteTimeLeft(invite) == Duration.zero) {
+      text = 'Le code ${invite['code'] ?? ''} a expiré (valable 48 h).';
+      icon = Icons.timer_off_outlined;
+      color = Colors.orange.shade800;
+    } else {
+      return const [];
+    }
+    return [
+      Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                text,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: color,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 12),
+    ];
+  }
+
   Widget _buildInviteCard() {
     return Container(
       padding: const EdgeInsets.all(20),
@@ -596,6 +712,11 @@ class _TeamPageState extends State<TeamPage> {
                 ],
               ),
             ),
+            const SizedBox(height: 8),
+            Text(
+              _activeCodeInfo(),
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
             const SizedBox(height: 12),
             Row(
               children: [
@@ -633,6 +754,7 @@ class _TeamPageState extends State<TeamPage> {
               ],
             ),
           ] else ...[
+            ..._buildInviteStatus(),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(

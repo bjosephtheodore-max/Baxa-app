@@ -75,6 +75,12 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
       case 'not-found':
         return 'Code invalide. Demandez un nouveau code a votre responsable.';
       case 'failed-precondition':
+        final details = e.details;
+        if ((details is Map && details['reason'] == 'expired') ||
+            e.message?.contains('expir') == true) {
+          return 'Ce code a expiré (valable 48 h). Demandez un nouveau '
+              'code à votre responsable.';
+        }
         if (e.message?.contains('entreprise') == true) {
           return 'Ce compte est un compte entreprise, il ne peut pas '
               'rejoindre une equipe.';

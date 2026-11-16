@@ -11,6 +11,7 @@ const searchDir = require("./search_directory");
 const zone = require("./zone");
 const companyPurge = require("./company_purge");
 const suspension = require("./suspension");
+const inviteRules = require("./invite");
 const schedule = require("./company_schedule");
 admin.initializeApp();
 
@@ -1954,6 +1955,12 @@ async function requireActiveInvite(rawCode) {
   if (!found) throw new HttpsError("not-found", "Code invalide.");
   if (found.used) {
     throw new HttpsError("failed-precondition", "Code déjà utilisé.");
+  }
+  // Valable 48 h (voir invite.js) : un code partagé puis oublié ne doit
+  // pas rester utilisable indéfiniment.
+  if (inviteRules.isInviteExpired(found.doc.get("createdAt"))) {
+    throw new HttpsError("failed-precondition", "Code expiré.",
+      {reason: "expired"});
   }
   return found.doc;
 }
