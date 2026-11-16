@@ -792,6 +792,61 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
 
   // ==================== FERMETURE TEMPORAIRE ====================
 
+  /// Résultat de « Utiliser ma position » : précision obtenue (vert) ou
+  /// raison de l'échec, avec le bouton vers les bons réglages si besoin.
+  Widget _locateNoteRow({
+    required String note,
+    required LocationFailure? failure,
+  }) {
+    final ok = failure == null;
+    final color = ok ? _green : Colors.orange.shade800;
+    final settings = switch (failure) {
+      LocationFailure.serviceOff => (
+          'Activer la localisation',
+          () => LocationService().openLocationSettings(),
+        ),
+      LocationFailure.deniedForever => (
+          'Ouvrir les réglages',
+          () => LocationService().openAppSettings(),
+        ),
+      _ => null,
+    };
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              ok ? Icons.check_circle_rounded : Icons.info_outline_rounded,
+              size: 16,
+              color: color,
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                note,
+                style: TextStyle(fontSize: 12, color: color, height: 1.4),
+              ),
+            ),
+          ],
+        ),
+        if (settings != null)
+          TextButton(
+            onPressed: settings.$2,
+            style: TextButton.styleFrom(
+              foregroundColor: _green,
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+            ),
+            child: Text(
+              settings.$1,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+      ],
+    );
+  }
+
   String _formatDate(DateTime d) =>
       '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
 
@@ -1487,6 +1542,10 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
     bool isLocating = false;
     bool isSaving = false;
     String? errorText;
+    // Résultat du dernier « Utiliser ma position » : précision obtenue, ou
+    // raison de l'échec (pour proposer d'ouvrir les bons réglages).
+    String? locateNote;
+    LocationFailure? locateFailure;
 
     final result = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
@@ -1568,21 +1627,38 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                     onPressed: isLocating
                         ? null
                         : () async {
-                            setSheet(() => isLocating = true);
-                            final locationService = LocationService();
-                            final pos = await locationService
-                                .getCurrentPosition();
+                            setSheet(() {
+                              isLocating = true;
+                              locateNote = null;
+                              locateFailure = null;
+                            });
+                            // GPS haute précision, meilleure mesure fraîche
+                            // (voir LocationService.getPrecisePosition).
+                            final result = await LocationService()
+                                .getPrecisePosition();
+                            final pos = result.position;
                             if (pos == null) {
-                              final serviceOn = await locationService
-                                  .isServiceEnabled();
                               setSheet(() {
                                 isLocating = false;
-                                errorText = serviceOn
-                                    ? 'Autorisez Baxa à utiliser votre localisation pour remplir '
-                                          'automatiquement l\'adresse de votre structure — ça se '
-                                          'passe dans les réglages du téléphone.'
-                                    : 'Activez la localisation de votre téléphone pour remplir '
-                                          'automatiquement l\'adresse de votre structure.';
+                                locateFailure = result.failure;
+                                locateNote = switch (result.failure) {
+                                  LocationFailure.serviceOff =>
+                                    'La localisation du téléphone est '
+                                        'désactivée. Activez-la puis '
+                                        'réessayez.',
+                                  LocationFailure.deniedForever =>
+                                    "Baxa n'a pas accès à votre position. "
+                                        'Autorisez-la dans les réglages du '
+                                        'téléphone, puis réessayez.',
+                                  LocationFailure.denied =>
+                                    'Autorisez Baxa à utiliser votre '
+                                        "position pour remplir l'adresse "
+                                        'automatiquement.',
+                                  _ =>
+                                    'Position introuvable pour le moment. '
+                                        "Rapprochez-vous d'une fenêtre ou "
+                                        'sortez, puis réessayez.',
+                                };
                               });
                               return;
                             }
@@ -1591,6 +1667,8 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                             setSheet(() {
                               isLocating = false;
                               errorText = null;
+                              locateNote = 'Position trouvée, précise à '
+                                  '± ${pos.accuracy.round()} m.';
                               capturedPosition = GeoPoint(
                                 pos.latitude,
                                 pos.longitude,
@@ -1618,7 +1696,7 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                           ),
                     label: Text(
                       isLocating
-                          ? 'Localisation en cours...'
+                          ? 'Recherche de votre position précise…'
                           : 'Utiliser ma position actuelle',
                       style: const TextStyle(
                         color: _green,
@@ -1633,6 +1711,13 @@ class _CompanySettingsPageState extends State<CompanySettingsPage>
                     ),
                   ),
                 ),
+                if (locateNote != null) ...[
+                  const SizedBox(height: 8),
+                  _locateNoteRow(
+                    note: locateNote!,
+                    failure: locateFailure,
+                  ),
+                ],
                 const SizedBox(height: 16),
                 TextField(
                   controller: controller,

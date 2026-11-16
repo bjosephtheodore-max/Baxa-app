@@ -1,9 +1,6 @@
 part of 'search_page.dart';
 
-String _formatDistance(double km) {
-  if (km < 1) return '${(km * 1000).round()} m';
-  return '${km.toStringAsFixed(1)} km';
-}
+String _formatDistance(double km) => LocationService.formatDistance(km);
 
 // ── Widgets présentationnels ─────────────────────────────────────────────────
 extension _SearchWidgets on _SearchPageState {
