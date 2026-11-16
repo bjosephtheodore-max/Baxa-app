@@ -9,6 +9,7 @@ const {CloudTasksClient} = require("@google-cloud/tasks");
 const wake = require("./wake");
 const searchDir = require("./search_directory");
 const zone = require("./zone");
+const companyPurge = require("./company_purge");
 const suspension = require("./suspension");
 const schedule = require("./company_schedule");
 admin.initializeApp();
@@ -968,153 +969,27 @@ exports.onReservationBlockChange = v2Updated("companies/{companyId}/reservations
   });
 
 // ====================================================================
-// FONCTION 6 : Suppression en cascade d'une entreprise
+// FONCTION 6 : Suppression COMPLÈTE d'une entreprise (voir company_purge.js)
 // Déclenchée quand deletionRequests/{companyId}.status passe à 'approved'
+// (fin du délai de 7 jours, ou validation manuelle en console). En cas
+// d'échec, la demande passe en 'error' et le passage de nuit
+// (executeScheduledDeletions) la retente.
 // ====================================================================
 exports.onDeleteCompanyApproved = v2Updated("deletionRequests/{companyId}", async (change, context) => {
-    const after = change.after.data();
-    if (after.status !== "approved") return null;
-
+    if (change.after.data().status !== "approved") return null;
     const companyId = context.params.companyId;
-    const companyRef = db.collection("companies").doc(companyId);
-
-    console.log(`🗑️ Démarrage suppression entreprise ${companyId}`);
-
+    console.log(`🗑️ Suppression complète de l'entreprise ${companyId}`);
     try {
-      // ── 1. Récupérer les infos de l'entreprise ───────────────────
-      const companyDoc = await companyRef.get();
-      const companyName = companyDoc.exists ? (companyDoc.data().nom || "") : "";
-      // Dates des notifications dans le fuseau de la structure (zone.js).
-      const tz = zone.tzOf(companyDoc.exists ? companyDoc.get("timeZone") : null);
-
-      // ── 2. Annuler toutes les réservations futures + notifier ─────
-      const now = new Date();
-      const reservationsSnap = await companyRef
-        .collection("reservations")
-        .where("status", "==", "confirmed")
-        .get();
-
-      const futureReservations = reservationsSnap.docs.filter((doc) => {
-        const slotStart = doc.data().slotStart?.toDate();
-        return slotStart && slotStart > now;
-      });
-
-      let batch = db.batch();
-      let count = 0;
-
-      for (const doc of futureReservations) {
-        const data = doc.data();
-        const customerId = data.customerId;
-        const slotStart = data.slotStart?.toDate();
-
-        batch.update(doc.ref, {
-          status: "cancelled",
-          cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-          cancellationSource: "company_deleted",
-        });
-        count++;
-
-        if (customerId && customerId !== "manual_booking" && slotStart) {
-          const queueName = data.queueName || companyName;
-
-          const notifRef = db
-            .collection("customers")
-            .doc(customerId)
-            .collection("notifications")
-            .doc();
-          batch.set(notifRef, {
-            title: "📅 Réservation annulée",
-            body:
-              `Votre réservation du ${zone.fmtDdMmYyyy(slotStart, tz)} ` +
-              `à ${zone.fmtHHhMM(slotStart, tz)} chez ${queueName} a été annulée. ` +
-              `${companyName} n'est plus disponible sur Baxa.`,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            type: "cancellation_by_company",
-            payload: null,
-          });
-          count++;
-        }
-
-        if (count >= 400) {
-          await batch.commit();
-          batch = db.batch();
-          count = 0;
-        }
-      }
-      if (count > 0) await batch.commit();
-      console.log(`✅ ${futureReservations.length} réservation(s) annulée(s)`);
-
-      // ── 3. Révoquer tous les membres de l'équipe ──────────────────
-      const membersSnap = await companyRef.collection("staff").get();
-      if (!membersSnap.empty) {
-        let memberBatch = db.batch();
-        let memberCount = 0;
-        for (const doc of membersSnap.docs) {
-          // Le motif n'écrase pas celui d'un membre déjà parti ou retiré.
-          memberBatch.update(
-            doc.ref,
-            doc.get("isActive") === true
-              ? { isActive: false, revokedReason: "company_leaving" }
-              : { isActive: false },
-          );
-          memberCount++;
-          if (memberCount >= 400) {
-            await memberBatch.commit();
-            memberBatch = db.batch();
-            memberCount = 0;
-          }
-        }
-        if (memberCount > 0) await memberBatch.commit();
-        console.log(`✅ ${membersSnap.size} membre(s) révoqué(s)`);
-      }
-
-      // ── 4. Marquer l'entreprise comme supprimée ───────────────────
-      await companyRef.update({
-        status: "deleted",
-        deletedAt: admin.firestore.FieldValue.serverTimestamp(),
-        isActive: false,
-      });
-
-      // ── 5. Supprimer les sous-collections ─────────────────────────
-      const deleteSubcollection = async (parentRef, name) => {
-        const snap = await parentRef.collection(name).get();
-        if (snap.empty) return;
-        let b = db.batch();
-        let c = 0;
-        for (const doc of snap.docs) {
-          b.delete(doc.ref);
-          c++;
-          if (c >= 400) { await b.commit(); b = db.batch(); c = 0; }
-        }
-        if (c > 0) await b.commit();
-      };
-
-      const queuesSnap = await companyRef.collection("queues").get();
-      for (const queueDoc of queuesSnap.docs) {
-        await deleteSubcollection(queueDoc.ref, "slots");
-        await deleteSubcollection(queueDoc.ref, "timeSlots");
-        await deleteSubcollection(queueDoc.ref, "dailyStats");
-        await queueDoc.ref.delete();
-      }
-      await deleteSubcollection(companyRef, "notificationsHistory");
-      await deleteSubcollection(companyRef, "reservations");
-      console.log(`✅ ${queuesSnap.size} file(s) et leurs créneaux supprimés`);
-
-      // ── 6. Marquer la demande comme traitée ───────────────────────
-      await change.after.ref.update({
-        status: "completed",
-        completedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      console.log(`🎉 Suppression de l'entreprise ${companyId} terminée`);
+      const { cancelled } = await companyPurge.purgeCompany(db, companyId);
+      console.log(`🎉 Entreprise ${companyId} supprimée (${cancelled} réservation(s) annulée(s))`);
       return { success: true };
     } catch (error) {
       console.error(`❌ Erreur suppression ${companyId}:`, error);
-      await change.after.ref.update({
+      await change.after.ref.set({
         status: "error",
         errorMessage: error.message,
         errorAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      }, { merge: true });
       throw error;
     }
   });
@@ -1226,7 +1101,20 @@ exports.executeScheduledDeletions = onSchedule(
       }
     }
     console.log(`🗑️ ${count} départ(s) exécuté(s)`);
-    return { processed: count };
+
+    // Rattrapage : anciennes fiches « fantômes » (d'avant la suppression
+    // complète) et suppressions restées en erreur.
+    let cleaned = 0;
+    for (const companyId of await companyPurge.purgeBacklog(db)) {
+      try {
+        await companyPurge.purgeCompany(db, companyId, { now });
+        cleaned++;
+        console.log(`🧹 Structure ${companyId} entièrement supprimée (rattrapage)`);
+      } catch (e) {
+        console.error(`❌ Rattrapage suppression ${companyId}:`, e.message);
+      }
+    }
+    return { processed: count, cleaned };
   });
 
 // ====================================================================
@@ -2407,6 +2295,11 @@ async function checkPlageFillAfterReservation(companyId, resa) {
 //   récap de minuit porte bien sur la veille.
 // ════════════════════════════════════════════════════════════════════
 
+/** Structure effacée, ou en cours de suppression : plus aucun réveil. */
+function isGoneCompany(snap) {
+  return !snap.exists || snap.get("status") === "deleted";
+}
+
 function wakeRef(companyId) {
   return db.collection("companyWake").doc(companyId);
 }
@@ -2454,6 +2347,10 @@ async function computeDayEvents(companyId, day, now, sent, tz) {
 /** (Re)planifie le jour en cours d'une structure et écrit son réveil. */
 async function planCompanyWake(companyId, now) {
   const ref = wakeRef(companyId);
+  if (isGoneCompany(await db.collection("companies").doc(companyId).get())) {
+    await ref.delete();
+    return;
+  }
   const snap = await ref.get();
   const prev = snap.exists ? snap.data() : {};
   const tz = await companyTimeZone(companyId);
@@ -2476,7 +2373,12 @@ async function requestCompanyReplan(companyId) {
   const at = Date.now() + wake.REPLAN_DEBOUNCE_MS;
   const ref = wakeRef(companyId);
   await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
+    // Les files et plages d'une structure supprimée disparaissent aussi :
+    // leur suppression ne doit pas recréer de réveil fantôme.
+    const [snap, companySnap] = await Promise.all([
+      tx.get(ref), tx.get(db.collection("companies").doc(companyId)),
+    ]);
+    if (isGoneCompany(companySnap)) return;
     const cur = snap.exists && snap.get("wakeAt")
       ? snap.get("wakeAt").toMillis()
       : null;
@@ -2719,6 +2621,10 @@ async function handleTeamEvent(companyId, ev, today, tz) {
 /** Traite les échéances arrivées à terme d'une structure. */
 async function processCompanyWake(companyId, now) {
   const ref = wakeRef(companyId);
+  if (isGoneCompany(await db.collection("companies").doc(companyId).get())) {
+    await ref.delete();
+    return;
+  }
   const tz = await companyTimeZone(companyId);
   const today = zone.ymdIn(now, tz); // jour local de la structure
   let data = (await ref.get()).data() || {};

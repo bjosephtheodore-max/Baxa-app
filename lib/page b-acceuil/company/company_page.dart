@@ -107,6 +107,19 @@ class CompanyPageState extends State<CompanyPage> {
       // jamais dans l'espace structure.
       final role = await CompanyAccountService.resolveRole();
       if (role.role != CompanyRole.company) {
+        // Structure entièrement supprimée (fin du délai de « Quitter
+        // Baxa ») alors que l'app était encore ouverte : sa fiche n'existe
+        // plus, mais on explique ce qui s'est passé plutôt que « ce compte
+        // n'est pas une structure ».
+        if (await _wasDeleted(user.uid)) {
+          if (mounted) {
+            setState(() {
+              _deletionStatus = 'gone';
+              _roleChecked = true;
+            });
+          }
+          return;
+        }
         if (mounted) setState(() => _notACompany = true);
         return;
       }
@@ -141,6 +154,21 @@ class CompanyPageState extends State<CompanyPage> {
       // par défaut — un membre du staff s'y retrouverait. On propose de
       // réessayer.
       if (mounted) setState(() => _roleCheckFailed = true);
+    }
+  }
+
+  /// Demande de départ terminée pour ce compte ? (Il n'en reste qu'une
+  /// trace « terminée » sans donnée personnelle, voir company_purge.js.)
+  Future<bool> _wasDeleted(String uid) async {
+    try {
+      final dr = await FirebaseFirestore.instance
+          .collection('deletionRequests')
+          .doc(uid)
+          .get();
+      final s = dr.data()?['status'];
+      return s == 'approved' || s == 'completed';
+    } catch (_) {
+      return false;
     }
   }
 

@@ -335,8 +335,13 @@ class _StaffAuthPageState extends State<StaffAuthPage> {
             .get();
         isActiveMember = staffDoc.data()?['isActive'] == true;
         if (!isActiveMember) {
+          // Fiche d'équipe absente = la structure a été entièrement
+          // supprimée (fin de « Quitter Baxa ») : une fiche n'est jamais
+          // effacée autrement (un départ ou un retrait la désactive).
           revocation = StaffRevocation.of(
-            staffDoc.data()?['revokedReason'] as String?,
+            staffDoc.exists
+                ? (staffDoc.data()?['revokedReason'] as String?)
+                : 'company_leaving',
             data['companyName'] as String? ?? '',
           );
         }
