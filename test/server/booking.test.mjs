@@ -82,7 +82,8 @@ describe("Réserver", () => {
     const r = await read(`companies/compA/reservations/${reservationId}`);
     assert.equal(r.customerId, "cust1");
     assert.equal(r.customerName, "Awa Diop");
-    assert.equal(r.customerEmail, "client1@mail.com");
+    // L'e-mail du client n'est plus copié sur la réservation.
+    assert.equal(r.customerEmail, undefined);
     assert.equal(r.status, "confirmed");
     assert.equal(r.timeSlotId, "t1");
     assert.equal(r.slotId, "s1");

@@ -266,7 +266,9 @@ function reservationData({user, userData, target, companyId, queueId,
     timeSlotId: target.timeSlotId,
     slotId,
     customerId: user.uid,
-    customerEmail: user.email || null,
+    // Pas d'e-mail du client : la structure n'en a pas besoin (elle voit
+    // le nom et le créneau). Minimisation des données, cf. politique de
+    // confidentialité (getbaxa.com/confidentialite, section 4).
     ...(name ? {customerName: name} : {}),
     slotStart: Timestamp.fromDate(target.start),
     slotEnd: Timestamp.fromDate(target.end),
