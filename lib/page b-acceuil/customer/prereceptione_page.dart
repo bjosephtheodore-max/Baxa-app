@@ -43,8 +43,24 @@ class _PrereceptionePageState extends State<PrereceptionePage> {
   /// staff n'entre pas ici : le formulaire s'affiche comme avant (tests à
   /// plusieurs espaces sur un seul téléphone).
   Future<void> _resumeExistingCustomer() async {
-    final user = FirebaseAuth.instance.currentUser;
+    var user = FirebaseAuth.instance.currentUser;
     var isCustomer = false;
+    // Invité supprimé côté serveur (12 mois sans utilisation, voir
+    // functions/guest_purge.js) : le téléphone garde encore l'ancien compte
+    // en mémoire. On le déconnecte proprement, sinon « Commencer »
+    // réutiliserait ce compte qui n'existe plus.
+    if (user != null && user.isAnonymous) {
+      try {
+        await user.reload();
+      } on FirebaseAuthException catch (e) {
+        if (e.code == 'user-not-found' ||
+            e.code == 'user-disabled' ||
+            e.code == 'user-token-expired') {
+          await FirebaseAuth.instance.signOut();
+          user = null;
+        }
+      } catch (_) {}
+    }
     if (user != null) {
       try {
         final db = FirebaseFirestore.instance;

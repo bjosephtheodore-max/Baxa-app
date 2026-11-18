@@ -12,6 +12,7 @@ const zone = require("./zone");
 const companyPurge = require("./company_purge");
 const suspension = require("./suspension");
 const inviteRules = require("./invite");
+const guestPurge = require("./guest_purge");
 const schedule = require("./company_schedule");
 admin.initializeApp();
 
@@ -1073,6 +1074,27 @@ exports.onDeletionRequestCancelled = v2Deleted("deletionRequests/{companyId}", a
     console.log(`↩️ Demande de départ annulée par ${context.params.companyId}`);
     return null;
   });
+
+// ====================================================================
+// Comptes invités inactifs depuis 12 mois : supprimés (une fois par
+// semaine, dimanche 04:30 UTC). Voir guest_purge.js ; même suppression
+// que « Supprimer mon compte » (booking.deleteAccount).
+// ====================================================================
+exports.purgeInactiveGuests = onSchedule(
+  {
+    schedule: "30 4 * * 0", timeZone: "UTC", region: SCHEDULER_REGION,
+    timeoutSeconds: 540, memory: "512MiB",
+  },
+  async () => {
+    const {deleted, failed} = await guestPurge.purgeInactiveGuests({
+      auth: admin.auth(),
+      db,
+      deleteAccount: require("./booking").deleteAccount,
+      log: (m) => console.warn(m),
+    });
+    console.log(`🧹 Invités inactifs : ${deleted} supprimé(s), ${failed} échec(s)`);
+  },
+);
 
 // ====================================================================
 // FONCTION 6quater : Exécution des départs dont le délai de grâce (7 j)
